@@ -22,7 +22,7 @@ interface IERC4626 {
     function balanceOf(address account) external view returns (uint256);
 }
 
-interface IInvestmentPool is IERC4626 {
+interface ILiquidityPool is IERC4626 {
     event RefundSet(address indexed user, uint256 amount);
     event DiscountAccrued(address indexed user, uint256 amount);
     event FundsTransferredToEscrow(uint256 amount);
