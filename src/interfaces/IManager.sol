@@ -11,10 +11,8 @@ interface IPoolManager {
     }
     
     enum InstrumentType {
-        BOND,
-        TBILL,
-        COMMERCIAL_PAPER,
-        FIXED_DEPOSIT
+        DISCOUNTED,
+        INTEREST_BEARING
     }
     
     struct PoolConfig {
@@ -29,7 +27,7 @@ interface IPoolManager {
         uint256 refundGasFee;
     }
     
-    event Deposit(address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
+    event Deposit(address liquidityPool, address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
     event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
     event InvestmentConfirmed(uint256 actualAmount, string proofHash);
     event CouponReceived(uint256 amount, uint256 timestamp);
@@ -48,7 +46,7 @@ interface IPoolManager {
     function totalCouponsReceived() external view returns (uint256);
     function userDepositTime(address user) external view returns (uint256);
     
-    function handleDeposit(uint256 assets, address receiver, address sender) external returns (uint256 shares);
+    function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external returns (uint256 shares);
     function handleWithdraw(uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
     function calculateTotalAssets() external view returns (uint256);
     
@@ -69,6 +67,8 @@ interface IPoolManager {
     
     function updateStatus(PoolStatus newStatus) external;
     function closeEpoch() external;
+    
+    function initializePool(address pool, PoolConfig memory poolConfig) external;
     
     function isInFundingPeriod() external view returns (bool);
     function isMatured() external view returns (bool);
