@@ -33,6 +33,14 @@ interface IPoolRegistry {
         string newCategory
     );
     
+    event AssetApproved(
+        address indexed asset
+    );
+    
+    event AssetRevoked(
+        address indexed asset
+    );
+    
     function factory() external view returns (address);
     function totalPools() external view returns (uint256);
     function activePools() external view returns (uint256);
@@ -47,9 +55,7 @@ interface IPoolRegistry {
     
     function getActivePools() external view returns (address[] memory);
     function getAllPools() external view returns (address[] memory);
-    function getPoolsByAsset(address asset) external view returns (address[] memory);
     function getPoolsByType(string memory instrumentType) external view returns (address[] memory);
-    function getPoolsByCreator(address creator) external view returns (address[] memory);
     function getPoolsByMaturityRange(uint256 minMaturity, uint256 maxMaturity) external view returns (address[] memory);
     
     function getPoolCount() external view returns (uint256);
@@ -58,4 +64,8 @@ interface IPoolRegistry {
     function pausePool(address pool) external;
     function unpausePool(address pool) external;
     function emergencyDeactivatePool(address pool) external;
+    
+    function approveAsset(address asset) external;
+    function revokeAsset(address asset) external;
+    function isApprovedAsset(address asset) external view returns (bool);
 } 

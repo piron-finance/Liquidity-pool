@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import "./IManager.sol";
+
 interface IPoolFactory {
     struct PoolConfig {
         address asset;
-        string instrumentType;
+        IPoolManager.InstrumentType instrumentType;
+        string instrumentName;
         string instrumentDetails;
         uint256 targetRaise;
         uint256 epochDuration;
@@ -18,7 +21,7 @@ interface IPoolFactory {
         address indexed pool,
         address indexed manager,
         address indexed asset,
-        string instrumentType,
+        string instrumentName,
         uint256 targetRaise,
         uint256 maturityDate
     );
