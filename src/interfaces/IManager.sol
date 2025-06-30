@@ -25,6 +25,7 @@ interface IPoolManager {
         uint256[] couponDates;
         uint256[] couponRates;
         uint256 refundGasFee;
+        uint256 discountRate; // (basis points)
     }
     
     event Deposit(address liquidityPool, address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
@@ -36,7 +37,6 @@ interface IPoolManager {
     event StatusChanged(PoolStatus oldStatus, PoolStatus newStatus);
     event EmergencyExit(address indexed caller, uint256 timestamp);
     
-    function pool() external view returns (address);
     function escrow() external view returns (address);
     function config() external view returns (PoolConfig memory);
     function status() external view returns (PoolStatus);
@@ -50,7 +50,7 @@ interface IPoolManager {
     function handleWithdraw(uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
     function calculateTotalAssets() external view returns (uint256);
     
-    function processInvestment(uint256 actualAmount, string memory proofHash) external;
+    function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external;
     function processCouponPayment(uint256 amount) external;
     function processMaturity(uint256 finalAmount) external;
     

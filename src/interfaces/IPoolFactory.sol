@@ -15,6 +15,7 @@ interface IPoolFactory {
         uint256 maturityDate;
         address spvAddress;
         address[] multisigSigners;
+        uint256 discountRate; // Known discount rate at pool creation (basis points)
     }
     
     event PoolCreated(
