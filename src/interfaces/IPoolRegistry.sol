@@ -5,6 +5,7 @@ interface IPoolRegistry {
     struct PoolInfo {
         address pool;
         address manager;
+        address escrow;
         address asset;
         string instrumentType;
         uint256 createdAt;

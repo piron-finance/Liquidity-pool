@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
-
-interface ILiquidityPool  {
+interface ILiquidityPool is IERC4626 {
     event RefundSet(address indexed user, uint256 amount);
     event DiscountAccrued(address indexed user, uint256 amount);
     event FundsTransferredToEscrow(uint256 amount);
     event FundsReceivedFromEscrow(uint256 amount);
+    event RefundClaimed(address indexed user, uint256 amount);
+    event EmergencyWithdrawal(address indexed user, uint256 refundAmount, uint256 sharesBurned);
     event ManagerUpdated(address oldManager, address newManager);
 
     

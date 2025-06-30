@@ -103,14 +103,15 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         // Initialize the manager with pool configuration
         IPoolManager.PoolConfig memory managerConfig = IPoolManager.PoolConfig({
             instrumentType: config.instrumentType,
-            faceValue: config.targetRaise, // Assuming face value equals target raise for now
-            purchasePrice: config.targetRaise, // Will be adjusted based on instrument type
+            faceValue: 0, // Will be calculated after deposit epoch closes based on actual raised amount
+            purchasePrice: config.targetRaise, // We'll spend what we raise
             targetRaise: config.targetRaise,
             epochEndTime: block.timestamp + config.epochDuration,
             maturityDate: config.maturityDate,
             couponDates: new uint256[](0), // Empty for now, can be set later
             couponRates: new uint256[](0), // Empty for now, can be set later
-            refundGasFee: 0 // Default to 0, can be configured later
+            refundGasFee: 0, // Default to 0, can be configured later
+            discountRate: config.discountRate
         });
         
         IPoolManager(manager).initializePool(pool, managerConfig);
@@ -202,5 +203,20 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         if (hasRole(role, account)) {
             _roles[role][account] = false;
         }
+    }
+    
+    /**
+     * @dev Calculate face value for discounted instruments
+     * @param targetRaise Amount we want to raise from investors
+     * @param discountRate Discount rate in basis points (e.g., 1800 = 18%)
+     * @return faceValue The face value at maturity
+     */
+    function _calculateFaceValue(uint256 targetRaise, uint256 discountRate) internal pure returns (uint256) {
+        // Face Value = Target Raise / (1 - discount rate)
+        // For 18% discount: Face Value = 100,000 / (1 - 0.18) = 100,000 / 0.82 = 121,951
+        require(discountRate < 10000, "Discount rate must be less than 100%");
+        
+        uint256 discountFactor = 10000 - discountRate; // e.g., 10000 - 1800 = 8200
+        return (targetRaise * 10000) / discountFactor;
     }
 } 
