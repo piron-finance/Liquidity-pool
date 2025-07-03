@@ -32,7 +32,8 @@ interface IPoolManager {
     event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
     event InvestmentConfirmed(uint256 actualAmount, string proofHash);
     event CouponReceived(uint256 amount, uint256 timestamp);
-    event MaturityProcessed(uint256 finalAmount);
+    event CouponDistributed(address indexed liquidityPool, uint256 amount, uint256 timestamp);
+    event MaturityProcessed(uint256 finalAmount);  
     event RefundClaimed(address indexed user, uint256 amount);
     event StatusChanged(PoolStatus oldStatus, PoolStatus newStatus);
     event EmergencyExit(address indexed caller, uint256 timestamp);
@@ -48,15 +49,17 @@ interface IPoolManager {
     
     function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external returns (uint256 shares);
     function handleWithdraw(uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
+    function handleRedeem(uint256 shares, address receiver, address owner, address sender) external returns (uint256 assets);
     function calculateTotalAssets() external view returns (uint256);
     
     function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external;
-    function processCouponPayment(uint256 amount) external;
-    function processMaturity(uint256 finalAmount) external;
+    function processCouponPayment(address poolAddress, uint256 amount) external;
+    function processMaturity(address poolAddress, uint256 finalAmount) external;
     
     function calculateUserReturn(address user) external view returns (uint256);
     function calculateUserDiscount(address user) external view returns (uint256);
     function calculateMaturityValue() external view returns (uint256);
+    function claimMaturityEntitlement(address user) external view returns (uint256);
     
     function claimRefund() external;
     function getUserRefund(address user) external view returns (uint256);
@@ -66,7 +69,7 @@ interface IPoolManager {
     function unpausePool() external;
     
     function updateStatus(PoolStatus newStatus) external;
-    function closeEpoch() external;
+    function closeEpoch(address liquidityPool) external;
     
     function initializePool(address pool, PoolConfig memory poolConfig) external;
     
