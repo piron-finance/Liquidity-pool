@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IPoolFactory.sol";
 import "../interfaces/IPoolRegistry.sol";
 import "../interfaces/IManager.sol";
+import "../AccessManager.sol";
 
 contract PoolFactory is IPoolFactory, ReentrancyGuard {
     using Clones for address;
@@ -17,20 +18,23 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
     address public override registry;
     uint256 public override totalPoolsCreated;
     
+    AccessManager public accessManager;
+    
     mapping(address => address[]) public poolsByAsset;
     mapping(address => address[]) public poolsByCreator;
     mapping(address => bool) public validPools;
     
-    address public admin;
-    mapping(bytes32 => mapping(address => bool)) private _roles;
-    
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "Only admin");
+    modifier onlyRole(bytes32 role) {
+        require(accessManager.hasRole(role, msg.sender), "PoolFactory/access-denied");
         _;
     }
     
     modifier onlyPoolCreator() {
-        require(hasRole(POOL_CREATOR_ROLE, msg.sender) || msg.sender == admin, "Not authorized");
+        require(
+            accessManager.hasRole(POOL_CREATOR_ROLE, msg.sender) || 
+            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender), 
+            "PoolFactory/not-authorized"
+        );
         _;
     }
     
@@ -38,19 +42,17 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         address _poolImpl,
         address _managerImpl,
         address _registry,
-        address _admin
+        address _accessManager
     ) {
         require(_poolImpl != address(0), "Invalid pool implementation");
         require(_managerImpl != address(0), "Invalid manager implementation");
         require(_registry != address(0), "Invalid registry");
-        require(_admin != address(0), "Invalid admin");
+        require(_accessManager != address(0), "Invalid access manager");
         
         poolImplementation = _poolImpl;
         managerImplementation = _managerImpl;
         registry = _registry;
-        admin = _admin;
-        
-        _grantRole(POOL_CREATOR_ROLE, _admin);
+        accessManager = AccessManager(_accessManager);
     }
     
     function createPool(
@@ -89,6 +91,7 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         IPoolRegistry.PoolInfo memory poolInfo = IPoolRegistry.PoolInfo({
             pool: pool,
             manager: manager,
+            escrow: address(0), // Will be set later when escrow is created
             asset: config.asset,
             instrumentType: config.instrumentName,
             createdAt: block.timestamp,
@@ -140,7 +143,7 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         return validPools[pool];
     }
     
-    function setImplementations(address poolImpl, address managerImpl) external override onlyAdmin {
+    function setImplementations(address poolImpl, address managerImpl) external override onlyRole(POOL_CREATOR_ROLE) {
         require(poolImpl != address(0), "Invalid pool implementation");
         require(managerImpl != address(0), "Invalid manager implementation");
         
@@ -153,7 +156,7 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         emit ImplementationUpdated(oldPoolImpl, poolImpl, oldManagerImpl, managerImpl);
     }
     
-    function setRegistry(address newRegistry) external override onlyAdmin {
+    function setRegistry(address newRegistry) external override onlyRole(POOL_CREATOR_ROLE) {
         require(newRegistry != address(0), "Invalid registry");
         registry = newRegistry;
     }
@@ -181,28 +184,12 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         );
     }
     
-    function grantPoolCreatorRole(address account) external onlyAdmin {
-        _grantRole(POOL_CREATOR_ROLE, account);
+    function grantPoolCreatorRole(address account) external onlyRole(POOL_CREATOR_ROLE) {
+        accessManager.grantRole(POOL_CREATOR_ROLE, account);
     }
     
-    function revokePoolCreatorRole(address account) external onlyAdmin {
-        _revokeRole(POOL_CREATOR_ROLE, account);
-    }
-    
-    function hasRole(bytes32 role, address account) public view returns (bool) {
-        return _roles[role][account];
-    }
-    
-    function _grantRole(bytes32 role, address account) internal {
-        if (!hasRole(role, account)) {
-            _roles[role][account] = true;
-        }
-    }
-    
-    function _revokeRole(bytes32 role, address account) internal {
-        if (hasRole(role, account)) {
-            _roles[role][account] = false;
-        }
+    function revokePoolCreatorRole(address account) external onlyRole(POOL_CREATOR_ROLE) {
+        accessManager.revokeRole(POOL_CREATOR_ROLE, account);
     }
     
     /**
