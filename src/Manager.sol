@@ -5,10 +5,13 @@ import "./interfaces/IManager.sol";
 import "./interfaces/IPoolRegistry.sol";
 import "./interfaces/IPoolEscrow.sol";
 import "./LiquidityPool.sol";
+import "./AccessManager.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract Manager is IPoolManager {
+contract Manager is IPoolManager, ReentrancyGuard {
     IPoolRegistry public registry;
+    AccessManager public accessManager;
     
     mapping(address => PoolConfig) private poolConfigs;
     mapping(address => PoolStatus) public poolStatus;
@@ -19,8 +22,18 @@ contract Manager is IPoolManager {
     mapping(address => uint256) public poolTotalCouponsDistributed;
     mapping(address => mapping(address => uint256)) public poolUserDepositTime;
     
+    // Add slippage protection constants
+    uint256 public constant DEFAULT_SLIPPAGE_TOLERANCE = 500; // 5%
+    uint256 public constant MAX_SLIPPAGE_TOLERANCE = 1000; // 10%
+    
+    // Add slippage protection mapping
+    mapping(address => uint256) public poolSlippageTolerance;
+    
     event PoolPaused(address indexed pool, uint256 timestamp);
     event PoolUnpaused(address indexed pool, uint256 timestamp);
+    event AccessManagerUpdated(address oldManager, address newManager);
+    event SlippageToleranceUpdated(address indexed pool, uint256 oldTolerance, uint256 newTolerance);
+    event SlippageProtectionTriggered(address indexed pool, uint256 expected, uint256 actual, uint256 tolerance);
     
     modifier onlyValidPool() {
         require(registry.isActivePool(msg.sender), "Manager/inactive-pool");
@@ -37,9 +50,33 @@ contract Manager is IPoolManager {
         _;
     }
     
-    constructor(address _registry) {
-        require(_registry != address(0), "Invalid registry");
+    modifier onlyRole(bytes32 role) {
+        require(accessManager.hasRole(role, msg.sender), "Manager/access-denied");
+        _;
+    }
+    
+    modifier onlyRoleWithDelay(bytes32 role) {
+        require(accessManager.canActWithDelay(role, msg.sender), "Manager/role-delay-not-met");
+        _;
+    }
+    
+    modifier whenNotPaused() {
+        require(!accessManager.paused(), "Manager/paused");
+        _;
+    }
+    
+    constructor(address _registry, address _accessManager) {
+        require(_registry != address(0), "Manager/invalid-registry");
+        require(_accessManager != address(0), "Manager/invalid-access-manager");
         registry = IPoolRegistry(_registry);
+        accessManager = AccessManager(_accessManager);
+    }
+    
+    function setAccessManager(address newAccessManager) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(newAccessManager != address(0), "Manager/invalid-access-manager");
+        address oldManager = address(accessManager);
+        accessManager = AccessManager(newAccessManager);
+        emit AccessManagerUpdated(oldManager, newAccessManager);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -49,7 +86,7 @@ contract Manager is IPoolManager {
     function initializePool(
         address pool,
         PoolConfig memory poolConfig
-    ) external onlyFactory {
+    ) external onlyFactory whenNotPaused {
         require(poolConfigs[pool].targetRaise == 0, "Manager/already-initialized");
         require(registry.isRegisteredPool(pool), "Manager/pool-not-registered");
         
@@ -63,7 +100,7 @@ contract Manager is IPoolManager {
     /////////////////////////////// DEPOSIT AND WITHDRAWAL FLOW /////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external override onlyValidPool returns (uint256 shares) {
+    function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external override onlyValidPool whenNotPaused nonReentrant returns (uint256 shares) {
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         require(poolInfo.createdAt != 0, "Manager/invalid-pool");
         require(registry.isApprovedAsset(poolInfo.asset), "Manager/asset-not-approved");
@@ -87,7 +124,7 @@ contract Manager is IPoolManager {
         return shares;
     }
 
-    function handleWithdraw(uint256 assets, address receiver, address owner, address sender) external override onlyRegisteredPool returns (uint256 shares) {
+    function handleWithdraw(uint256 assets, address receiver, address owner, address sender) external override onlyRegisteredPool whenNotPaused nonReentrant returns (uint256 shares) {
         address poolAddress = msg.sender;
         PoolConfig storage poolConfig = poolConfigs[poolAddress];
         PoolStatus currentStatus = poolStatus[poolAddress];
@@ -114,7 +151,7 @@ contract Manager is IPoolManager {
         }
     }
 
-    function handleRedeem(uint256 shares, address receiver, address owner, address sender) external override onlyRegisteredPool returns (uint256 assets) {
+    function handleRedeem(uint256 shares, address receiver, address owner, address sender) external override onlyRegisteredPool whenNotPaused nonReentrant returns (uint256 assets) {
         address poolAddress = msg.sender;
         PoolConfig storage poolConfig = poolConfigs[poolAddress];
         PoolStatus currentStatus = poolStatus[poolAddress];
@@ -123,7 +160,6 @@ contract Manager is IPoolManager {
         require(owner != address(0), "Manager/invalid-owner");
         require(shares > 0, "Manager/invalid-shares");
         
-        // Check user has enough shares
         uint256 userShares = IERC20(poolAddress).balanceOf(owner);
         require(userShares >= shares, "Manager/insufficient-shares");
         
@@ -149,28 +185,21 @@ contract Manager is IPoolManager {
     /////////////////////////////// INVESTMENT FLOW //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external onlyValidPool {
+    function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external onlyValidPool onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
         PoolConfig storage poolConfig = poolConfigs[liquidityPool];
         require(poolStatus[liquidityPool] == PoolStatus.PENDING_INVESTMENT, "Manager/not-pending-investment");
+        
+        uint256 expectedAmount = poolTotalRaised[liquidityPool];
+        
+        // Use enhanced slippage protection
+        checkSlippageProtection(liquidityPool, expectedAmount, actualAmount);
         
         poolActualInvested[liquidityPool] = actualAmount;
         
         if (poolConfig.instrumentType == InstrumentType.DISCOUNTED) {
-            uint256 expectedSpend = poolTotalRaised[liquidityPool];
-            require(
-                actualAmount >= expectedSpend * 95 / 100 && actualAmount <= expectedSpend * 105 / 100,
-                "Manager/investment-amount-mismatch"
-            );
-            
             uint256 totalDiscount = poolConfig.faceValue - actualAmount;
             poolTotalDiscountEarned[liquidityPool] = totalDiscount;
         } else {
-            uint256 expectedSpend = poolTotalRaised[liquidityPool];
-            require(
-                actualAmount >= expectedSpend * 95 / 100 && actualAmount <= expectedSpend * 105 / 100,
-                "Manager/investment-amount-mismatch"
-            );
-            
             if (poolConfig.couponDates.length > 0) {
                 require(poolConfig.couponDates.length == poolConfig.couponRates.length, "Manager/coupon-config-mismatch");
                 require(poolConfig.couponDates[0] > block.timestamp, "Manager/invalid-coupon-dates");
@@ -181,7 +210,7 @@ contract Manager is IPoolManager {
         emit InvestmentConfirmed(actualAmount, proofHash);
     }
     
-    function processCouponPayment(address liquidityPool, uint256 amount) external override {
+    function processCouponPayment(address liquidityPool, uint256 amount) external override onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), "Manager/invalid-pool");
         PoolConfig storage poolConfig = poolConfigs[liquidityPool];
         
@@ -196,7 +225,7 @@ contract Manager is IPoolManager {
         emit CouponReceived(amount, block.timestamp);
     }
     
-    function processMaturity(address liquidityPool, uint256 finalAmount) external override {
+    function processMaturity(address liquidityPool, uint256 finalAmount) external override onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), "Manager/invalid-pool");
         PoolConfig storage poolConfig = poolConfigs[liquidityPool];
         
@@ -205,11 +234,8 @@ contract Manager is IPoolManager {
         require(finalAmount > 0, "Manager/invalid-amount");
         
         if (poolConfig.instrumentType == InstrumentType.DISCOUNTED) {
-            require(
-                finalAmount >= poolConfig.faceValue * 95 / 100 && 
-                finalAmount <= poolConfig.faceValue * 105 / 100,
-                "Manager/unexpected-maturity-amount"
-            );
+            // Use enhanced slippage protection for maturity amount validation
+            checkSlippageProtection(liquidityPool, poolConfig.faceValue, finalAmount);
         }
         
         _updateStatus(liquidityPool, PoolStatus.MATURED);
@@ -217,7 +243,7 @@ contract Manager is IPoolManager {
         emit MaturityProcessed(finalAmount);
     }
 
-    function distributeCouponPayment(address liquidityPool) external {
+    function distributeCouponPayment(address liquidityPool) external onlyRole(accessManager.OPERATOR_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), "Manager/invalid-pool");
         PoolConfig storage poolConfig = poolConfigs[liquidityPool];
         
@@ -236,7 +262,7 @@ contract Manager is IPoolManager {
     /////////////////////////////// EPOCH MANAGEMENT /////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function closeEpoch(address liquidityPool) external override {
+    function closeEpoch(address liquidityPool) external override onlyRole(accessManager.OPERATOR_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), "Manager/invalid-pool");
         PoolConfig storage poolConfig = poolConfigs[liquidityPool];
         require(poolStatus[liquidityPool] == PoolStatus.FUNDING, "Manager/not-in-funding");
@@ -259,7 +285,7 @@ contract Manager is IPoolManager {
         }
     }
 
-    function forceCloseEpoch(address liquidityPool) external {
+    function forceCloseEpoch(address liquidityPool) external onlyRole(accessManager.EMERGENCY_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), "Manager/invalid-pool");
         PoolConfig storage poolConfig = poolConfigs[liquidityPool];
         require(poolStatus[liquidityPool] == PoolStatus.FUNDING, "Manager/not-in-funding");
@@ -281,11 +307,46 @@ contract Manager is IPoolManager {
     }
 
     ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// SLIPPAGE PROTECTION ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    function setSlippageTolerance(address pool, uint256 tolerance) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(registry.isRegisteredPool(pool), "Manager/invalid-pool");
+        require(tolerance <= MAX_SLIPPAGE_TOLERANCE, "Manager/tolerance-too-high");
+        
+        uint256 oldTolerance = poolSlippageTolerance[pool];
+        poolSlippageTolerance[pool] = tolerance;
+        
+        emit SlippageToleranceUpdated(pool, oldTolerance, tolerance);
+    }
+    
+    function getSlippageTolerance(address pool) public view returns (uint256) {
+        uint256 tolerance = poolSlippageTolerance[pool];
+        return tolerance == 0 ? DEFAULT_SLIPPAGE_TOLERANCE : tolerance;
+    }
+    
+    function validateSlippage(address pool, uint256 expected, uint256 actual) public view returns (bool) {
+        uint256 tolerance = getSlippageTolerance(pool);
+        uint256 minAmount = (expected * (10000 - tolerance)) / 10000;
+        uint256 maxAmount = (expected * (10000 + tolerance)) / 10000;
+        
+        return actual >= minAmount && actual <= maxAmount;
+    }
+    
+    function checkSlippageProtection(address pool, uint256 expected, uint256 actual) internal {
+        if (!validateSlippage(pool, expected, actual)) {
+            uint256 tolerance = getSlippageTolerance(pool);
+            emit SlippageProtectionTriggered(pool, expected, actual, tolerance);
+            revert("Manager/slippage-protection-triggered");
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// INTERNAL HELPERS ///////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
     function _calculateFaceValue(uint256 actualRaised, uint256 discountRate) internal pure returns (uint256) {
-        require(discountRate < 10000, "Discount rate must be less than 100%");
+        require(discountRate < 10000, "Manager/discount-rate-too-high");
         
         uint256 discountFactor = 10000 - discountRate;
         return (actualRaised * 10000) / discountFactor;
@@ -334,8 +395,7 @@ contract Manager is IPoolManager {
         
         shares = (assets * totalShares) / totalValue;
         
-        uint256 penaltyRate = 200;
-        uint256 penalty = (assets * penaltyRate) / 10000;
+        uint256 penalty = _calculateDynamicPenalty(poolAddress, assets, owner);
         uint256 netAssets = assets - penalty;
         
         require(netAssets <= _getAvailableLiquidity(poolAddress), "Manager/insufficient-liquidity");
@@ -444,8 +504,7 @@ contract Manager is IPoolManager {
         
         assets = (shares * totalValue) / totalShares;
         
-        uint256 penaltyRate = 200;
-        uint256 penalty = (assets * penaltyRate) / 10000;
+        uint256 penalty = _calculateDynamicPenalty(poolAddress, assets, owner);
         uint256 netAssets = assets - penalty;
         
         require(netAssets <= _getAvailableLiquidity(poolAddress), "Manager/insufficient-liquidity");
@@ -505,6 +564,24 @@ contract Manager is IPoolManager {
         
         emit Withdraw(msg.sender, receiver, owner, assets, shares);
         return assets;
+    }
+    
+    function _calculateDynamicPenalty(address poolAddress, uint256 assets, address owner) internal view returns (uint256) {
+        uint256 depositTime = poolUserDepositTime[poolAddress][owner];
+        if (depositTime == 0) return 0;
+        
+        uint256 timeHeld = block.timestamp - depositTime;
+        uint256 basePenalty = 200; // 2% base penalty
+        
+        if (timeHeld < 7 days) {
+            return (assets * 500) / 10000; // 5% penalty for < 1 week
+        } else if (timeHeld < 30 days) {
+            return (assets * 300) / 10000; // 3% penalty for < 1 month
+        } else if (timeHeld < 90 days) {
+            return (assets * basePenalty) / 10000; // 2% penalty for < 3 months
+        } else {
+            return (assets * 100) / 10000; // 1% penalty for > 3 months
+        }
     }
     
     function _getUserRefundInternal(address poolAddress, address user) internal view returns (uint256) {
@@ -678,7 +755,7 @@ contract Manager is IPoolManager {
         emit EmergencyExit(msg.sender, block.timestamp);
     }
     
-    function cancelPool() external onlyValidPool {
+    function cancelPool() external onlyValidPool onlyRole(accessManager.EMERGENCY_ROLE()) {
         address poolAddress = msg.sender;
         require(poolStatus[poolAddress] == PoolStatus.FUNDING, "Manager/not-in-funding");
         
@@ -709,19 +786,19 @@ contract Manager is IPoolManager {
     /////////////////////////////// ADMIN FUNCTIONS //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function pausePool() external override onlyValidPool {
+    function pausePool() external override onlyValidPool onlyRole(accessManager.OPERATOR_ROLE()) {
         address poolAddress = msg.sender;
         LiquidityPool(poolAddress).pause();
         emit PoolPaused(poolAddress, block.timestamp);
     }
     
-    function unpausePool() external override onlyValidPool {
+    function unpausePool() external override onlyValidPool onlyRole(accessManager.OPERATOR_ROLE()) {
         address poolAddress = msg.sender;
         LiquidityPool(poolAddress).unpause();
         emit PoolUnpaused(poolAddress, block.timestamp);
     }
     
-    function updateStatus(PoolStatus newStatus) external override onlyValidPool {
+    function updateStatus(PoolStatus newStatus) external override onlyValidPool onlyRole(accessManager.OPERATOR_ROLE()) {
         _updateStatus(msg.sender, newStatus);
     }
 
