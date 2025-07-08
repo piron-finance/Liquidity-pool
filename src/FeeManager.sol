@@ -262,30 +262,8 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         emit FeeCollected(pool, payer, amount, feeType);
     }
     
-    function distributeFees(address pool) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) onlyValidPool(pool) whenFeeManagerNotPaused nonReentrant {
-        require(canDistributeFees(pool), "FeeManager/distribution-too-frequent");
-        
-        FeeDistribution memory distribution = getFeeDistribution(pool);
-        require(distribution.spvAddress != address(0), "FeeManager/spv-not-set");
-        
-        // Get total accumulated fees for this pool
-        uint256 totalFees = getAccumulatedFees(pool);
-        require(totalFees > 0, "FeeManager/no-fees-to-distribute");
-        
-        uint256 protocolAmount = (totalFees * distribution.protocolShare) / BASIS_POINTS;
-        uint256 spvAmount = totalFees - protocolAmount;
-        
-        // Reset accumulated fees
-        delete accumulatedFees[pool]["protocol"];
-        delete accumulatedFees[pool]["spv"];
-        delete accumulatedFees[pool]["performance"];
-        delete accumulatedFees[pool]["earlyWithdrawal"];
-        delete accumulatedFees[pool]["refundGas"];
-        
-        lastDistributionTime[pool] = block.timestamp;
-        
-        emit FeeDistributed(pool, distribution.protocolTreasury, protocolAmount, "protocol");
-        emit FeeDistributed(pool, distribution.spvAddress, spvAmount, "spv");
+    function distributeFees(address pool) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) onlyValidPool(pool) whenFeeManagerNotPaused {
+        _distributeFees(pool);
     }
     
     function distributeFeesBatch(address[] memory pools) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) whenFeeManagerNotPaused nonReentrant {
@@ -341,12 +319,39 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         emit EmergencyWithdrawal(token, amount, recipient);
     }
     
-    function batchDistributeFees(address[] calldata pools) external whenFeeManagerNotPaused {
+    function batchDistributeFees(address[] calldata pools) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) whenFeeManagerNotPaused {
         for (uint256 i = 0; i < pools.length; i++) {
             if (canDistributeFees(pools[i])) {
-                this.distributeFees(pools[i]);
+                _distributeFees(pools[i]);
             }
         }
+    }
+    
+    function _distributeFees(address pool) internal nonReentrant {
+        require(pool != address(0), "FeeManager/invalid-pool");
+        require(canDistributeFees(pool), "FeeManager/distribution-too-frequent");
+        
+        FeeDistribution memory distribution = getFeeDistribution(pool);
+        require(distribution.spvAddress != address(0), "FeeManager/spv-not-set");
+        
+        // Get total accumulated fees for this pool
+        uint256 totalFees = getAccumulatedFees(pool);
+        require(totalFees > 0, "FeeManager/no-fees-to-distribute");
+        
+        uint256 protocolAmount = (totalFees * distribution.protocolShare) / BASIS_POINTS;
+        uint256 spvAmount = totalFees - protocolAmount;
+        
+        // Reset accumulated fees
+        delete accumulatedFees[pool]["protocol"];
+        delete accumulatedFees[pool]["spv"];
+        delete accumulatedFees[pool]["performance"];
+        delete accumulatedFees[pool]["earlyWithdrawal"];
+        delete accumulatedFees[pool]["refundGas"];
+        
+        lastDistributionTime[pool] = block.timestamp;
+        
+        emit FeeDistributed(pool, distribution.protocolTreasury, protocolAmount, "protocol");
+        emit FeeDistributed(pool, distribution.spvAddress, spvAmount, "spv");
     }
     
     function estimateFeesForAmount(

@@ -37,6 +37,7 @@ interface IPoolManager {
     event RefundClaimed(address indexed user, uint256 amount);
     event StatusChanged(PoolStatus oldStatus, PoolStatus newStatus);
     event EmergencyExit(address indexed caller, uint256 timestamp);
+    event CouponClaimed(address indexed pool, address indexed user, uint256 amount);
     
     function escrow() external view returns (address);
     function config() external view returns (PoolConfig memory);
@@ -48,7 +49,7 @@ interface IPoolManager {
     function userDepositTime(address user) external view returns (uint256);
     
     function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external returns (uint256 shares);
-    function handleWithdraw(uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
+    function handleWithdraw(address liquidityPool, uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
     function handleRedeem(uint256 shares, address receiver, address owner, address sender) external returns (uint256 assets);
     function calculateTotalAssets() external view returns (uint256);
     
@@ -56,9 +57,12 @@ interface IPoolManager {
     function processCouponPayment(address poolAddress, uint256 amount) external;
     function processMaturity(address poolAddress, uint256 finalAmount) external;
     
+    function claimUserCoupon(address liquidityPool, address user) external returns (uint256);
+    
     function calculateUserReturn(address user) external view returns (uint256);
     function calculateUserDiscount(address user) external view returns (uint256);
     function calculateMaturityValue() external view returns (uint256);
+    function getUserAvailableCoupon(address liquidityPool, address user) external view returns (uint256);
     function claimMaturityEntitlement(address user) external view returns (uint256);
     
     function claimRefund() external;
