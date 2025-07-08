@@ -29,11 +29,15 @@ contract PoolRegistry is IPoolRegistry {
     }
     
     constructor(address _factory, address _admin) {
-        require(_factory != address(0), "Invalid factory");
         require(_admin != address(0), "Invalid admin");
         
-        factory = _factory;
+        factory = _factory; // Can be address(0) initially
         admin = _admin;
+    }
+    
+    function setFactory(address _factory) external onlyAdmin {
+        require(_factory != address(0), "Invalid factory");
+        factory = _factory;
     }
     
     function getPoolInfo(address pool) external view override returns (PoolInfo memory) {

@@ -1,22 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IPoolFactory.sol";
 import "../interfaces/IPoolRegistry.sol";
 import "../interfaces/IManager.sol";
 import "../AccessManager.sol";
+import "../PoolEscrow.sol";
+import "../LiquidityPool.sol";
 
 contract PoolFactory is IPoolFactory, ReentrancyGuard {
-    using Clones for address;
     
     bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
     
-    address public override poolImplementation;
-    address public override managerImplementation;
-    address public override registry;
-    uint256 public override totalPoolsCreated;
+    address public registry;
+    address public manager; 
+    uint256 public totalPoolsCreated;
     
     AccessManager public accessManager;
     
@@ -39,25 +38,22 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
     }
     
     constructor(
-        address _poolImpl,
-        address _managerImpl,
         address _registry,
+        address _manager,
         address _accessManager
     ) {
-        require(_poolImpl != address(0), "Invalid pool implementation");
-        require(_managerImpl != address(0), "Invalid manager implementation");
         require(_registry != address(0), "Invalid registry");
+        require(_manager != address(0), "Invalid manager");
         require(_accessManager != address(0), "Invalid access manager");
         
-        poolImplementation = _poolImpl;
-        managerImplementation = _managerImpl;
         registry = _registry;
+        manager = _manager; 
         accessManager = AccessManager(_accessManager);
     }
     
     function createPool(
         PoolConfig memory config
-    ) external override onlyPoolCreator nonReentrant returns (address pool, address manager) {
+    ) external override onlyPoolCreator nonReentrant returns (address pool, address escrow) {
         require(config.asset != address(0), "Invalid asset");
         require(config.targetRaise > 0, "Invalid target raise");
         require(config.epochDuration > 0, "Invalid epoch duration");
@@ -66,32 +62,52 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         require(config.multisigSigners.length >= 2, "Need at least 2 multisig signers");
         require(bytes(config.instrumentName).length > 0, "Instrument name required");
         
-        bytes32 salt = keccak256(
-            abi.encodePacked(
-                config.asset,
-                config.instrumentType,
-                config.instrumentName,
-                config.targetRaise,
-                config.maturityDate,
-                totalPoolsCreated,
-                block.timestamp
-            )
-        );
+        // Validate multisig signers
+        for (uint256 i = 0; i < config.multisigSigners.length; i++) {
+            require(config.multisigSigners[i] != address(0), "Invalid multisig signer");
+            // Check for duplicates
+            for (uint256 j = i + 1; j < config.multisigSigners.length; j++) {
+                require(config.multisigSigners[i] != config.multisigSigners[j], "Duplicate multisig signer");
+            }
+        }
         
-        pool = poolImplementation.cloneDeterministic(salt);
-        manager = managerImplementation.cloneDeterministic(
-            keccak256(abi.encodePacked(salt, "manager"))
-        );
+        // Calculate required confirmations (minimum 2, maximum 75% of signers)
+        uint256 requiredConfirmations = config.multisigSigners.length >= 3 ? 
+            (config.multisigSigners.length * 3) / 4 : 2;
+        if (requiredConfirmations < 2) requiredConfirmations = 2;
         
+        // Create enterprise-grade escrow with multisig configuration
+        escrow = address(new PoolEscrow(
+            config.asset,
+            manager,
+            config.spvAddress,
+            config.multisigSigners,
+            requiredConfirmations
+        ));
+        
+        // Create pool with unique name and symbol
+        string memory poolName = string(abi.encodePacked("Piron Pool ", config.instrumentName));
+        string memory poolSymbol = string(abi.encodePacked("PIRON-", _toString(totalPoolsCreated + 1)));
+        
+        pool = address(new LiquidityPool(
+            IERC20(config.asset),
+            poolName,
+            poolSymbol,
+            manager,
+            escrow
+        ));
+        
+        // Track pools
         poolsByAsset[config.asset].push(pool);
         poolsByCreator[msg.sender].push(pool);
         validPools[pool] = true;
         totalPoolsCreated++;
         
+        // Register pool in registry
         IPoolRegistry.PoolInfo memory poolInfo = IPoolRegistry.PoolInfo({
             pool: pool,
             manager: manager,
-            escrow: address(0), // Will be set later when escrow is created
+            escrow: escrow,
             asset: config.asset,
             instrumentType: config.instrumentName,
             createdAt: block.timestamp,
@@ -103,17 +119,16 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         
         IPoolRegistry(registry).registerPool(pool, poolInfo);
         
-        // Initialize the manager with pool configuration
         IPoolManager.PoolConfig memory managerConfig = IPoolManager.PoolConfig({
             instrumentType: config.instrumentType,
-            faceValue: 0, // Will be calculated after deposit epoch closes based on actual raised amount
-            purchasePrice: config.targetRaise, // We'll spend what we raise
+            faceValue: 0, 
+            purchasePrice: config.targetRaise,
             targetRaise: config.targetRaise,
             epochEndTime: block.timestamp + config.epochDuration,
             maturityDate: config.maturityDate,
-            couponDates: new uint256[](0), // Empty for now, can be set later
-            couponRates: new uint256[](0), // Empty for now, can be set later
-            refundGasFee: 0, // Default to 0, can be configured later
+            couponDates: new uint256[](0),
+            couponRates: new uint256[](0),
+            refundGasFee: 0,
             discountRate: config.discountRate
         });
         
@@ -121,14 +136,14 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         
         emit PoolCreated(
             pool,
-            manager,
+            manager, 
             config.asset,
             config.instrumentName,
             config.targetRaise,
             config.maturityDate
         );
         
-        return (pool, manager);
+        return (pool, escrow);
     }
     
     function getPoolsByAsset(address asset) external view override returns (address[] memory) {
@@ -143,45 +158,14 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         return validPools[pool];
     }
     
-    function setImplementations(address poolImpl, address managerImpl) external override onlyRole(POOL_CREATOR_ROLE) {
-        require(poolImpl != address(0), "Invalid pool implementation");
-        require(managerImpl != address(0), "Invalid manager implementation");
-        
-        address oldPoolImpl = poolImplementation;
-        address oldManagerImpl = managerImplementation;
-        
-        poolImplementation = poolImpl;
-        managerImplementation = managerImpl;
-        
-        emit ImplementationUpdated(oldPoolImpl, poolImpl, oldManagerImpl, managerImpl);
-    }
-    
     function setRegistry(address newRegistry) external override onlyRole(POOL_CREATOR_ROLE) {
         require(newRegistry != address(0), "Invalid registry");
         registry = newRegistry;
     }
     
-    function predictPoolAddress(
-        PoolConfig memory config,
-        uint256 nonce,
-        uint256 timestamp
-    ) external view returns (address pool, address manager) {
-        bytes32 salt = keccak256(
-            abi.encodePacked(
-                config.asset,
-                config.instrumentType,
-                config.instrumentName,
-                config.targetRaise,
-                config.maturityDate,
-                nonce,
-                timestamp
-            )
-        );
-        
-        pool = poolImplementation.predictDeterministicAddress(salt);
-        manager = managerImplementation.predictDeterministicAddress(
-            keccak256(abi.encodePacked(salt, "manager"))
-        );
+    function setManager(address newManager) external onlyRole(POOL_CREATOR_ROLE) {
+        require(newManager != address(0), "Invalid manager");
+        manager = newManager;
     }
     
     function grantPoolCreatorRole(address account) external onlyRole(POOL_CREATOR_ROLE) {
@@ -205,5 +189,27 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         
         uint256 discountFactor = 10000 - discountRate; // e.g., 10000 - 1800 = 8200
         return (targetRaise * 10000) / discountFactor;
+    }
+    
+    /**
+     * @dev Convert uint256 to string
+     */
+    function _toString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
     }
 } 

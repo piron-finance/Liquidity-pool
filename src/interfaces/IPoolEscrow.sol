@@ -69,7 +69,20 @@ interface IPoolEscrow {
     function removeSigner(address signer) external;
     function changeRequiredConfirmations(uint256 newRequired) external;
     
-    function releaseFunds(address recipient, uint256 amount) external;
     function lockFunds(uint256 amount) external;
+    function releaseFunds(address recipient, uint256 amount) external;
     function getBalance() external view returns (uint256);
+
+    
+    function receiveDeposit(address user, uint256 amount) external;
+
+    function trackCouponPayment(uint256 amount) external;
+
+    function trackMaturityReturn(uint256 amount) external;
+
+    function claimCoupon(address user, uint256 amount) external;
+    
+
+    function withdrawForInvestment(uint256 amount) external returns (bytes32 transferId);
+    function canWithdrawForInvestment(uint256 amount) external view returns (bool);
 } 

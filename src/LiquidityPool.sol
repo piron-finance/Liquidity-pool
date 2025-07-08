@@ -5,14 +5,13 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interfaces/ILiquidityPool.sol";
-import "./Manager.sol";
-import "./Escrow.sol";
+import "./interfaces/IManager.sol";
 
 contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     using SafeERC20 for IERC20;
     
-    Manager internal manager;
-    address internal escrow;
+    IPoolManager public immutable manager;
+    address public immutable escrow;
 
     mapping(address => uint256) public override pendingRefunds;
     mapping(address => uint256) public override discountedBillsAccrued; 
@@ -32,7 +31,10 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         address _manager, 
         address _escrow
     ) ERC4626(asset_) ERC20(name_, symbol_) {
-        manager = Manager(_manager);
+        require(_manager != address(0), "LiquidityPool/invalid-manager");
+        require(_escrow != address(0), "LiquidityPool/invalid-escrow");
+        
+        manager = IPoolManager(_manager);
         escrow = _escrow;
     }
 
@@ -80,13 +82,8 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         require(assets > 0, "LiquidityPool/Non zero assets allowed");
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         require(owner != address(0), "LiquidityPool/Valid owner required");
-        uint256 shares = previewWithdraw(assets);
-        
-        if (msg.sender != owner) {
-            _spendAllowance(owner, msg.sender, shares);
-        }
-        
-        uint256 actualShares = manager.handleWithdraw(assets, receiver, owner, msg.sender);
+    
+        uint256 actualShares = manager.handleWithdraw(address(this), assets, receiver, owner, msg.sender);
         
         return actualShares;
     }
@@ -96,10 +93,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         require(owner != address(0), "LiquidityPool/Valid owner required");
         
-        if (msg.sender != owner) {
-            _spendAllowance(owner, msg.sender, shares);
-        }
-        
+     
         uint256 assets = manager.handleRedeem(shares, receiver, owner, msg.sender);
         
         return assets;
@@ -120,7 +114,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         
         _burn(msg.sender, userShares);
         
-        IERC20(asset()).safeTransferFrom(escrow, msg.sender, refundAmount);
+        manager.handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
         
         emit RefundClaimed(msg.sender, refundAmount);
     }
@@ -133,9 +127,28 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         require(refundAmount > 0, "LiquidityPool/no-refund-available");
         
         _burn(msg.sender, userShares);
-        IERC20(asset()).safeTransferFrom(escrow, msg.sender, refundAmount);
+        manager.handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
         
         emit EmergencyWithdrawal(msg.sender, refundAmount, userShares);
+    }
+    
+    /**
+     * @dev User claims their proportional coupon payment
+     * @notice Users can call this to claim their share of distributed coupons
+     */
+    function claimCoupon() external override whenNotPaused returns (uint256) {
+        uint256 couponAmount = manager.claimUserCoupon(address(this), msg.sender);
+        require(couponAmount > 0, "LiquidityPool/no-coupon-available");
+        
+        emit CouponClaimed(msg.sender, couponAmount);
+        return couponAmount;
+    }
+    
+    /**
+     * @dev Get user's potential coupon amount
+     */
+    function getUserCouponAmount(address user) external view override returns (uint256) {
+        return IPoolManager(address(manager)).getUserAvailableCoupon(address(this), user);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -166,16 +179,6 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         }
         
         emit DiscountAccrued(user, amount);
-    }
-    
-    function transferToEscrow(uint256 amount) external override onlyManager returns (bool) {
-        IERC20(asset()).safeTransfer(escrow, amount);
-        emit FundsTransferredToEscrow(amount);
-        return true;
-    }
-    
-    function receiveFromEscrow(uint256 amount) external override onlyManager {
-        emit FundsReceivedFromEscrow(amount);
     }
     
     function mintShares(uint256 shares, address receiver) external override onlyManager {
