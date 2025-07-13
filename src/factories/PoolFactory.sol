@@ -62,7 +62,7 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         require(config.multisigSigners.length >= 2, "Need at least 2 multisig signers");
         require(bytes(config.instrumentName).length > 0, "Instrument name required");
         
-        // Validate multisig signers
+
         for (uint256 i = 0; i < config.multisigSigners.length; i++) {
             require(config.multisigSigners[i] != address(0), "Invalid multisig signer");
             // Check for duplicates
@@ -71,12 +71,12 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
             }
         }
         
-        // Calculate required confirmations (minimum 2, maximum 75% of signers)
+
         uint256 requiredConfirmations = config.multisigSigners.length >= 3 ? 
             (config.multisigSigners.length * 3) / 4 : 2;
         if (requiredConfirmations < 2) requiredConfirmations = 2;
         
-        // Create enterprise-grade escrow with multisig configuration
+
         escrow = address(new PoolEscrow(
             config.asset,
             manager,
@@ -85,7 +85,6 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
             requiredConfirmations
         ));
         
-        // Create pool with unique name and symbol
         string memory poolName = string(abi.encodePacked("Piron Pool ", config.instrumentName));
         string memory poolSymbol = string(abi.encodePacked("PIRON-", _toString(totalPoolsCreated + 1)));
         
@@ -97,13 +96,13 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
             escrow
         ));
         
-        // Track pools
+        
         poolsByAsset[config.asset].push(pool);
         poolsByCreator[msg.sender].push(pool);
         validPools[pool] = true;
         totalPoolsCreated++;
         
-        // Register pool in registry
+
         IPoolRegistry.PoolInfo memory poolInfo = IPoolRegistry.PoolInfo({
             pool: pool,
             manager: manager,
@@ -126,8 +125,8 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
             targetRaise: config.targetRaise,
             epochEndTime: block.timestamp + config.epochDuration,
             maturityDate: config.maturityDate,
-            couponDates: new uint256[](0),
-            couponRates: new uint256[](0),
+            couponDates: config.couponDates,
+            couponRates: config.couponRates,
             refundGasFee: 0,
             discountRate: config.discountRate
         });
@@ -158,21 +157,21 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
         return validPools[pool];
     }
     
-    function setRegistry(address newRegistry) external override onlyRole(POOL_CREATOR_ROLE) {
-        require(newRegistry != address(0), "Invalid registry");
+    function setRegistry(address newRegistry) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(newRegistry != address(0), "PoolFactory/invalid-registry");
         registry = newRegistry;
     }
     
-    function setManager(address newManager) external onlyRole(POOL_CREATOR_ROLE) {
-        require(newManager != address(0), "Invalid manager");
+    function setManager(address newManager) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(newManager != address(0), "PoolFactory/invalid-manager");
         manager = newManager;
     }
     
-    function grantPoolCreatorRole(address account) external onlyRole(POOL_CREATOR_ROLE) {
+    function grantPoolCreatorRole(address account) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
         accessManager.grantRole(POOL_CREATOR_ROLE, account);
     }
     
-    function revokePoolCreatorRole(address account) external onlyRole(POOL_CREATOR_ROLE) {
+    function revokePoolCreatorRole(address account) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
         accessManager.revokeRole(POOL_CREATOR_ROLE, account);
     }
     

@@ -61,6 +61,7 @@ interface IPoolEscrow {
         bytes memory data
     ) external returns (bytes32 transferId);
     
+    function setPool(address pool) external;
     function approveTransfer(bytes32 transferId) external;
     function executeTransfer(bytes32 transferId) external;
     function revokeTransfer(bytes32 transferId) external;

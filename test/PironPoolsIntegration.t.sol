@@ -81,7 +81,7 @@ contract PironPoolsIntegrationTest is Test {
         console.log("AccessManager deployed at:", address(accessManager));
         
         // Deploy PoolRegistry with zero address initially (will be set later)
-        registry = new PoolRegistry(address(0), admin);
+        registry = new PoolRegistry(address(accessManager));
         console.log("PoolRegistry deployed at:", address(registry));
         
         // Deploy singleton Manager
@@ -145,6 +145,11 @@ contract PironPoolsIntegrationTest is Test {
     function testAdminPoolCreation() public {
         console.log("\n=== Test: Admin Pool Creation ===");
         
+        // Create multisig signers array
+        address[] memory signers = new address[](2);
+        signers[0] = admin;
+        signers[1] = spv;
+        
         // Create pool configuration
         IPoolFactory.PoolConfig memory config = IPoolFactory.PoolConfig({
             asset: address(usdc),
@@ -155,11 +160,14 @@ contract PironPoolsIntegrationTest is Test {
             maturityDate: block.timestamp + FUNDING_DAYS * 1 days + MATURITY_DAYS * 1 days,
             discountRate: DISCOUNT_RATE,
             spvAddress: spv,
-            multisigSigners: new address[](2)
+            multisigSigners: signers,
+            couponDates: new uint256[](0),
+            couponRates: new uint256[](0)
         });
         
-        config.multisigSigners[0] = admin;
-        config.multisigSigners[1] = spv;
+        // Remove the redundant assignments since we already set them above
+        // config.multisigSigners[0] = admin;
+        // config.multisigSigners[1] = spv;
         
         console.log("Creating pool with config:");
         console.log("  - Asset:", config.asset);

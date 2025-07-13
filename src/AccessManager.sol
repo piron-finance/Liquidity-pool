@@ -5,13 +5,14 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract AccessManager is AccessControl, Pausable {
-    // Custom role definitions for the protocol
+
     bytes32 public constant SPV_ROLE = keccak256("SPV_ROLE");
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
     bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
     bytes32 public constant VERIFIER_ROLE = keccak256("VERIFIER_ROLE");
     bytes32 public constant FACTORY_ROLE = keccak256("FACTORY_ROLE");
+    bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
     
     mapping(address => bool) public emergencyPausers;
     mapping(address => uint256) public roleGrantTime;
@@ -107,6 +108,10 @@ contract AccessManager is AccessControl, Pausable {
     }
     
     // Convenience functions for checking protocol-specific roles
+    function isAdmin(address account) external view returns (bool) {
+        return hasRole(DEFAULT_ADMIN_ROLE, account);
+    }
+    
     function isSPV(address account) external view returns (bool) {
         return hasRole(SPV_ROLE, account);
     }
@@ -121,6 +126,10 @@ contract AccessManager is AccessControl, Pausable {
     
     function isVerifier(address account) external view returns (bool) {
         return hasRole(VERIFIER_ROLE, account);
+    }
+    
+    function isPoolCreator(address account) external view returns (bool) {
+        return hasRole(POOL_CREATOR_ROLE, account);
     }
     
     function canActWithDelay(bytes32 role, address account) external view returns (bool) {
