@@ -23,6 +23,8 @@ interface IPoolFactory {
         uint256 discountRate;
         address spvAddress;
         address[] multisigSigners;
+        uint256[] couponDates;
+        uint256[] couponRates;
     }
     
     function createPool(PoolConfig memory config) external returns (address pool, address escrow);

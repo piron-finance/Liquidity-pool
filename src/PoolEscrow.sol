@@ -17,7 +17,7 @@ contract PoolEscrow is IPoolEscrow, ReentrancyGuard, AccessControl {
     
     IERC20 public immutable asset;
     address public immutable override manager;
-    address public immutable override pool;
+    address public override pool;
     address public immutable override spvAddress;
     
     uint256 public override requiredConfirmations;
@@ -105,10 +105,10 @@ contract PoolEscrow is IPoolEscrow, ReentrancyGuard, AccessControl {
         
         asset = IERC20(_asset);
         manager = _manager;
-        pool = msg.sender;
         spvAddress = _spvAddress;
         requiredConfirmations = _requiredConfirmations;
         signerCount = _signers.length;
+        pool = address(0);
         
         _grantRole(DEFAULT_ADMIN_ROLE, _manager);
         _grantRole(EMERGENCY_ROLE, _manager);
@@ -117,6 +117,12 @@ contract PoolEscrow is IPoolEscrow, ReentrancyGuard, AccessControl {
             require(_signers[i] != address(0), "PoolEscrow/invalid-signer");
             _grantRole(SIGNER_ROLE, _signers[i]);
         }
+    }
+
+     function setPool(address _pool) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_pool != address(0), "PoolEscrow/invalid-pool");
+        require(pool == address(0), "PoolEscrow/pool-already-set"); 
+        pool = _pool;
     }
     
     ////////////////////////////////////////////////////////////////////////////////

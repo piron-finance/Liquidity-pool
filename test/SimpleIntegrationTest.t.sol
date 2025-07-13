@@ -26,7 +26,7 @@ contract SimpleIntegrationTest is Test {
         accessManager = new AccessManager(admin);
         
         // Deploy registry
-        registry = new PoolRegistry(address(0), admin);
+        registry = new PoolRegistry(address(accessManager));
         
         // Deploy manager with real registry
         manager = new Manager(address(registry), address(accessManager));

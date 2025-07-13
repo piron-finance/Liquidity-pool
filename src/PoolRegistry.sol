@@ -2,9 +2,11 @@
 pragma solidity ^0.8.19;
 
 import "./interfaces/IPoolRegistry.sol";
+import "./AccessManager.sol";
 
 contract PoolRegistry is IPoolRegistry {
     address public override factory;
+    AccessManager public accessManager;
     
     uint256 public override totalPools;
     uint256 public override activePools;
@@ -16,28 +18,55 @@ contract PoolRegistry is IPoolRegistry {
     
     mapping(address => bool) private approvedAssets;
     
-    address public admin;
+    event FactoryUpdated(address indexed oldFactory, address indexed newFactory);
+    event AccessManagerUpdated(address indexed oldAccessManager, address indexed newAccessManager);
     
     modifier onlyFactory() {
-        require(msg.sender == factory, "Only factory can call");
+        require(msg.sender == factory, "PoolRegistry/only-factory");
+        _;
+    }
+    
+    modifier onlyRole(bytes32 role) {
+        require(accessManager.hasRole(role, msg.sender), "PoolRegistry/access-denied");
         _;
     }
     
     modifier onlyAdmin() {
-        require(msg.sender == admin, "Only admin can call");
+        require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender), "PoolRegistry/only-admin");
         _;
     }
     
-    constructor(address _factory, address _admin) {
-        require(_admin != address(0), "Invalid admin");
+    constructor(address _accessManager) {
+        require(_accessManager != address(0), "PoolRegistry/invalid-access-manager");
         
-        factory = _factory; // Can be address(0) initially
-        admin = _admin;
+        accessManager = AccessManager(_accessManager);
+        factory = address(0);
     }
     
+    /**
+     * @dev Set the factory address - can only be called by admin
+     * @param _factory The new factory address
+     */
     function setFactory(address _factory) external onlyAdmin {
-        require(_factory != address(0), "Invalid factory");
+        require(_factory != address(0), "PoolRegistry/invalid-factory");
+        
+        address oldFactory = factory;
         factory = _factory;
+        
+        emit FactoryUpdated(oldFactory, _factory);
+    }
+    
+    /**
+     * @dev Update the access manager - can only be called by current admin
+     * @param _accessManager The new access manager address
+     */
+    function setAccessManager(address _accessManager) external onlyAdmin {
+        require(_accessManager != address(0), "PoolRegistry/invalid-access-manager");
+        
+        address oldAccessManager = address(accessManager);
+        accessManager = AccessManager(_accessManager);
+        
+        emit AccessManagerUpdated(oldAccessManager, _accessManager);
     }
     
     function getPoolInfo(address pool) external view override returns (PoolInfo memory) {
@@ -53,9 +82,9 @@ contract PoolRegistry is IPoolRegistry {
     }
     
     function registerPool(address pool, PoolInfo memory info) external override onlyFactory {
-        require(pool != address(0), "Invalid pool");
-        require(poolInfos[pool].createdAt == 0, "Pool already registered");
-        require(approvedAssets[info.asset], "Asset not approved");
+        require(pool != address(0), "PoolRegistry/invalid-pool");
+        require(poolInfos[pool].createdAt == 0, "PoolRegistry/pool-already-registered");
+        require(approvedAssets[info.asset], "PoolRegistry/asset-not-approved");
         
         poolInfos[pool] = info;
         poolList.push(pool);
@@ -69,8 +98,8 @@ contract PoolRegistry is IPoolRegistry {
         emit PoolRegistered(pool, info.manager, info.asset, info.instrumentType, info.creator);
     }
     
-    function updatePoolStatus(address pool, bool isActive) public override onlyAdmin {
-        require(poolInfos[pool].createdAt != 0, "Pool not registered");
+    function updatePoolStatus(address pool, bool isActive) public override onlyRole(accessManager.OPERATOR_ROLE()) {
+        require(poolInfos[pool].createdAt != 0, "PoolRegistry/pool-not-registered");
         
         bool wasActive = poolInfos[pool].isActive;
         poolInfos[pool].isActive = isActive;
@@ -84,8 +113,8 @@ contract PoolRegistry is IPoolRegistry {
         emit PoolStatusUpdated(pool, isActive);
     }
     
-    function updatePoolCategory(address pool, string memory newCategory) external override onlyAdmin {
-        require(poolInfos[pool].createdAt != 0, "Pool not registered");
+    function updatePoolCategory(address pool, string memory newCategory) external override onlyRole(accessManager.OPERATOR_ROLE()) {
+        require(poolInfos[pool].createdAt != 0, "PoolRegistry/pool-not-registered");
         
         string memory oldCategory = poolInfos[pool].instrumentType;
         poolInfos[pool].instrumentType = newCategory;
@@ -147,21 +176,21 @@ contract PoolRegistry is IPoolRegistry {
         return poolList[index];
     }
     
-    function pausePool(address pool) external override onlyAdmin {
+    function pausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
         updatePoolStatus(pool, false);
     }
     
-    function unpausePool(address pool) external override onlyAdmin {
+    function unpausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
         updatePoolStatus(pool, true);
     }
     
-    function emergencyDeactivatePool(address pool) external override onlyAdmin {
+    function emergencyDeactivatePool(address pool) external override onlyRole(accessManager.EMERGENCY_ROLE()) {
         updatePoolStatus(pool, false);
     }
     
     function approveAsset(address asset) external override onlyAdmin {
-        require(asset != address(0), "Invalid asset");
-        require(!approvedAssets[asset], "Asset already approved");
+        require(asset != address(0), "PoolRegistry/invalid-asset");
+        require(!approvedAssets[asset], "PoolRegistry/asset-already-approved");
         
         approvedAssets[asset] = true;
         
@@ -169,7 +198,7 @@ contract PoolRegistry is IPoolRegistry {
     }
     
     function revokeAsset(address asset) external override onlyAdmin {
-        require(approvedAssets[asset], "Asset not approved");
+        require(approvedAssets[asset], "PoolRegistry/asset-not-approved");
         
         approvedAssets[asset] = false;
         

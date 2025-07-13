@@ -103,6 +103,9 @@ contract Manager is IPoolManager, ReentrancyGuard {
         require(poolConfigs[pool].targetRaise == 0, "Manager/already-initialized");
         require(registry.isRegisteredPool(pool), "Manager/pool-not-registered");
         
+        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(pool);
+        IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
+        escrowContract.setPool(pool);
         poolConfigs[pool] = poolConfig;
         poolStatus[pool] = PoolStatus.FUNDING;
         

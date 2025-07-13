@@ -53,7 +53,7 @@ contract DeployScript is Script {
         console.log("PoolFactory deployed at:", address(factory));
         
         // 4. Deploy PoolRegistry with the real factory address
-        PoolRegistry registry = new PoolRegistry(address(factory), deployer);
+        PoolRegistry registry = new PoolRegistry(address(accessManager));
         console.log("PoolRegistry deployed at:", address(registry));
         
         // 5. Deploy singleton Manager with real registry
@@ -96,16 +96,23 @@ contract DeployScript is Script {
         
         vm.startBroadcast(deployerPrivateKey);
         
+        // Create multisig signers array
+        address[] memory signers = new address[](2);
+        signers[0] = deployer;
+        signers[1] = deployer; // For demo purposes, using same address
+        
         IPoolFactory.PoolConfig memory config = IPoolFactory.PoolConfig({
             asset: address(usdc),
             instrumentType: IPoolManager.InstrumentType.DISCOUNTED,
-            instrumentName: "90-Day Treasury Bills",
-            targetRaise: 100_000e6, // 100k USDC
+            instrumentName: "6-Month Treasury Bill",
+            targetRaise: 1_000_000e6, // 1M USDC
             epochDuration: 7 days,
-            maturityDate: block.timestamp + 90 days,
-            discountRate: 1800, // 18% discount
-            spvAddress: deployer,
-            multisigSigners: new address[](0) // Empty for now
+            maturityDate: block.timestamp + 180 days,
+            discountRate: 500, // 5% discount
+            spvAddress: deployer, // Using deployer as SPV for demo
+            multisigSigners: signers,
+            couponDates: new uint256[](0),
+            couponRates: new uint256[](0)
         });
         
         (address pool, address escrow) = factory.createPool(config);
