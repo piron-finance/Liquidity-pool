@@ -24,11 +24,11 @@ Users deposit USDC → Pool collects funds → SPV invests in real instruments �
 1. **PoolFactory** - Creates new investment pools
 2. **LiquidityPool** - ERC4626 vault for user deposits/withdrawals
 3. **Manager** - Core business logic and pool state management
-4. **Escrow** - Multi-signature custody of funds
+4. **PoolEscrow** - Multi-signature custody of funds
 5. **AccessManager** - Role-based access control
-6. **FeeManager** - Fee calculation and distribution
-7. **PoolOracle** - Investment proof verification (optional)
-8. **PoolRegistry** - Pool registration and discovery
+6. **PoolRegistry** - Pool registration and discovery
+7. **FeeManager** - Fee calculation and distribution (optional)
+8. **PoolOracle** - Investment proof verification (optional)
 
 ### System Flow Diagram
 
@@ -47,7 +47,7 @@ Users deposit USDC → Pool collects funds → SPV invests in real instruments �
        ▼                  ▼                  ▼                  ▼
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │Liquidity    │◄──►│   Manager   │◄──►│   Escrow    │◄──►│ Fee Manager │
-│Pool (ERC4626)│   │             │    │ (MultiSig)  │    │             │
+│Pool (ERC4626)│   │             │    │ (MultiSig)  │    │ (Optional)  │
 └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
        ▲                  ▲                  ▲                  ▲
        │                  │                  │                  │
@@ -106,10 +106,10 @@ PoolFactory.createPool(PoolConfig{
 
 **Function Call Sequence:**
 
-1. `PoolFactory.createPool()` - Creates pool and manager contracts
+1. `PoolFactory.createPool()` - Creates new LiquidityPool and PoolEscrow contracts
 2. `PoolRegistry.registerPool()` - Registers pool in registry
 3. `Manager.initializePool()` - Initializes pool configuration
-4. `AccessManager.grantRole()` - Assigns roles to SPV and operators
+4. Escrow automatically configured with multisig signers
 
 **Events Emitted:**
 
@@ -119,7 +119,7 @@ PoolFactory.createPool(PoolConfig{
 ### 2. Deposit Flow
 
 **Actors:** Users
-**Contracts:** LiquidityPool, Manager, Escrow
+**Contracts:** LiquidityPool, Manager, PoolEscrow
 **Status:** FUNDING
 
 ```solidity
@@ -132,7 +132,8 @@ LiquidityPool.deposit(1000e6, userAddress) // Deposit $1,000
 1. `LiquidityPool.deposit()` - User entry point
 2. `USDC.transferFrom(user, escrow, amount)` - Transfer USDC to escrow
 3. `Manager.handleDeposit()` - Process deposit logic
-4. `LiquidityPool._mint(user, shares)` - Mint pool shares to user
+4. `PoolEscrow.receiveDeposit()` - Track deposit in escrow
+5. `LiquidityPool._mint(user, shares)` - Mint pool shares to user
 
 **State Changes:**
 
@@ -184,38 +185,24 @@ if (amountRaised >= minimumRaise) {
 ### 4. Investment Processing Flow
 
 **Actors:** SPV
-**Contracts:** Manager, PoolOracle (optional), Escrow
+**Contracts:** Manager, PoolEscrow
 **Status:** PENDING_INVESTMENT → INVESTED
 
-#### Option A: With Oracle Verification
-
 ```solidity
-// Step 1: SPV submits investment proof
-PoolOracle.submitInvestmentProof(
-    poolAddress,
-    "0x1234abcd...", // Cryptographic proof hash
-    100000e6        // Actual investment amount
-)
+// Step 1: SPV withdraws funds for investment
+Manager.withdrawFundsForInvestment(poolAddress, amount)
 
-// Step 2: Oracles verify proof (after 24-hour timelock)
-PoolOracle.verifyProof(poolAddress) // Called by multiple oracles
-
-// Step 3: SPV processes investment
-Manager.processInvestment(poolAddress, 100000e6, "0x1234abcd...")
-```
-
-#### Option B: Without Oracle (Trust-Based)
-
-```solidity
-// Step 1: SPV directly processes investment
-Manager.processInvestment(poolAddress, 100000e6, "") // Empty proof hash
+// Step 2: SPV processes investment
+Manager.processInvestment(poolAddress, actualAmount, "proof-hash")
 ```
 
 **Function Call Sequence:**
 
-1. `Manager.processInvestment()` - Process SPV investment
-2. `Manager.checkSlippageProtection()` - Validate investment amount
-3. `Manager._updateStatus()` - Update to INVESTED status
+1. `Manager.withdrawFundsForInvestment()` - SPV withdraws funds from escrow
+2. `PoolEscrow.withdrawForInvestment()` - Release funds to SPV
+3. `Manager.processInvestment()` - Process SPV investment confirmation
+4. `Manager.checkSlippageProtection()` - Validate investment amount
+5. `Manager._updateStatus()` - Update to INVESTED status
 
 **Business Logic:**
 
@@ -231,13 +218,14 @@ if (instrumentType == DISCOUNTED) {
 
 **Events Emitted:**
 
+- `SPVFundsWithdrawn(pool, amount, transferId)`
 - `InvestmentConfirmed(actualAmount, proofHash)`
 - `StatusChanged(PENDING_INVESTMENT, INVESTED)`
 
 ### 5. Withdrawal Flow
 
 **Actors:** Users
-**Contracts:** LiquidityPool, Manager, Escrow
+**Contracts:** LiquidityPool, Manager, PoolEscrow
 **Status:** Any status
 
 #### A. Funding Period Withdrawal (Penalty-Free)
@@ -253,7 +241,7 @@ LiquidityPool.withdraw(1000e6, userAddress, userAddress)
 2. `Manager.handleWithdraw()` - Route to appropriate handler
 3. `Manager._handleFundingWithdrawal()` - Process funding withdrawal
 4. `LiquidityPool.burnShares()` - Burn user shares
-5. `Escrow.releaseFunds()` - Release USDC to user
+5. `PoolEscrow.releaseFunds()` - Release USDC to user
 
 **Business Logic:**
 
@@ -276,7 +264,7 @@ LiquidityPool.withdraw(1000e6, userAddress, userAddress)
 2. `Manager._handleInvestedWithdrawal()` - Process early withdrawal
 3. `Manager._calculateDynamicPenalty()` - Calculate time-based penalty
 4. `LiquidityPool.burnShares()` - Burn user shares
-5. `Escrow.releaseFunds()` - Release net amount to user
+5. `PoolEscrow.releaseFunds()` - Release net amount to user
 
 **Penalty Structure:**
 
@@ -309,7 +297,7 @@ LiquidityPool.withdraw(userShares, userAddress, userAddress)
 2. `Manager._handleMaturedWithdrawal()` - Process maturity withdrawal
 3. `Manager._calculateTotalReturns()` - Calculate user's share of returns
 4. `LiquidityPool.burnShares()` - Burn all user shares
-5. `Escrow.releaseFunds()` - Release full returns to user
+5. `PoolEscrow.releaseFunds()` - Release full returns to user
 
 **Return Calculation:**
 
@@ -328,7 +316,7 @@ function _calculateTotalReturns(address pool, PoolConfig storage config) interna
 ### 6. Maturity Processing Flow
 
 **Actors:** SPV
-**Contracts:** Manager, Escrow
+**Contracts:** Manager, PoolEscrow
 **Status:** INVESTED → MATURED
 
 ```solidity
@@ -340,7 +328,8 @@ Manager.processMaturity(poolAddress, 121951e6) // $121,951 received
 
 1. `Manager.processMaturity()` - Process instrument maturity
 2. `Manager.checkSlippageProtection()` - Validate maturity amount
-3. `Manager._updateStatus()` - Update to MATURED status
+3. `PoolEscrow.trackMaturityReturn()` - Track maturity funds
+4. `Manager._updateStatus()` - Update to MATURED status
 
 **Business Logic:**
 
@@ -361,7 +350,7 @@ if (config.instrumentType == DISCOUNTED) {
 ### 7. Emergency Flow
 
 **Actors:** Emergency Role, Users
-**Contracts:** Manager, LiquidityPool, Escrow
+**Contracts:** Manager, LiquidityPool, PoolEscrow
 **Status:** Any → EMERGENCY
 
 #### Emergency Triggers
@@ -404,39 +393,6 @@ function _getUserRefundInternal(address pool, address user) internal view return
 }
 ```
 
-## Fee System
-
-### Fee Types & Rates
-
-```solidity
-struct FeeConfig {
-    uint256 protocolFee;      // 0.5% - Protocol revenue
-    uint256 spvFee;           // 1.0% - SPV management fee
-    uint256 performanceFee;   // 2.0% - Performance-based fee
-    uint256 earlyWithdrawalFee; // 1.0% - Early exit penalty
-    uint256 refundGasFee;     // 0.1% - Gas compensation
-}
-```
-
-### Fee Collection Points
-
-1. **Investment Processing:** Protocol and SPV fees
-2. **Early Withdrawal:** Penalty fees
-3. **Maturity:** Performance fees on profits
-4. **Emergency Refund:** Gas fees
-
-### Fee Distribution
-
-```solidity
-// 50/50 split between protocol and SPV
-FeeDistribution {
-    protocolTreasury: PROTOCOL_ADDRESS,
-    spvAddress: SPV_ADDRESS,
-    protocolShare: 5000, // 50%
-    spvShare: 5000       // 50%
-}
-```
-
 ## Access Control System
 
 ### Role Hierarchy
@@ -446,55 +402,25 @@ bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
 bytes32 public constant SPV_ROLE = keccak256("SPV_ROLE");
 bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
-bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
-bytes32 public constant VERIFIER_ROLE = keccak256("VERIFIER_ROLE");
-bytes32 public constant FACTORY_ROLE = keccak256("FACTORY_ROLE");
+bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
 ```
 
 ### Role Permissions
 
-| Role               | Permissions                                         |
-| ------------------ | --------------------------------------------------- |
-| **DEFAULT_ADMIN**  | Grant/revoke roles, update configurations           |
-| **SPV_ROLE**       | Process investments, submit proofs, handle maturity |
-| **OPERATOR_ROLE**  | Close epochs, distribute coupons, pause pools       |
-| **EMERGENCY_ROLE** | Emergency exits, force close, emergency pause       |
-| **ORACLE_ROLE**    | Verify proofs, update valuations                    |
-| **VERIFIER_ROLE**  | Verify investment proofs                            |
-| **FACTORY_ROLE**   | Create pools, update implementations                |
+| Role                  | Permissions                                         |
+| --------------------- | --------------------------------------------------- |
+| **DEFAULT_ADMIN**     | Grant/revoke roles, update configurations           |
+| **SPV_ROLE**          | Process investments, submit proofs, handle maturity |
+| **OPERATOR_ROLE**     | Close epochs, distribute coupons, pause pools       |
+| **EMERGENCY_ROLE**    | Emergency exits, force close, emergency pause       |
+| **POOL_CREATOR_ROLE** | Create new pools                                    |
 
 ### Security Features
 
 1. **24-Hour Role Delays:** Critical role assignments have time delays
 2. **Emergency Pause:** Immediate system shutdown capability
-3. **Multi-Signature:** Escrow requires multiple signatures
+3. **Multi-Signature:** Escrow requires multiple signatures for large transfers
 4. **Slippage Protection:** Investment amount validation (±5% tolerance)
-
-## Oracle System (Optional)
-
-### Investment Proof Verification
-
-```solidity
-struct InvestmentProofData {
-    string proofHash;           // Cryptographic proof hash
-    uint256 amount;             // Investment amount
-    uint256 timestamp;          // Submission time
-    bool verified;              // Verification status
-    address verifier;           // Verifying oracle
-    address submitter;          // SPV submitter
-    uint256 blockNumber;        // Block number
-    string ipfsHash;            // IPFS document hash
-    uint256 verificationCount;  // Number of verifications
-}
-```
-
-### Verification Process
-
-1. **Proof Submission:** SPV submits proof with IPFS documentation
-2. **24-Hour Timelock:** Prevents rushed verifications
-3. **Multi-Oracle Verification:** Minimum 2 oracles must verify
-4. **Challenge Period:** Oracles can challenge disputed proofs
-5. **Reputation System:** Oracle reputation affects weighting
 
 ## Real-World Example
 
@@ -525,7 +451,8 @@ struct InvestmentProofData {
 
 **Day 9: SPV Investment**
 
-- SPV invests $100,000 in Treasury Bills
+- SPV withdraws $100,000 from escrow
+- SPV invests in Treasury Bills
 - Receives $121,951 face value instruments
 - Calls `processInvestment()`
 - Status: INVESTED
@@ -543,47 +470,58 @@ struct InvestmentProofData {
 - User who deposited $1,000 receives $1,219.51
 - ROI: 21.95% (90-day period)
 
-## Deployment Guide
+## Development & Testing
 
-### Contract Deployment Order
+### Prerequisites
+
+- [Foundry](https://book.getfoundry.sh/)
+- Git
+
+### Installation
+
+```bash
+git clone https://github.com/piron-finance/Liquidity-pool.git
+cd Liquidity-pool
+forge install
+```
+
+### Build
+
+```bash
+forge build
+```
+
+### Test
+
+```bash
+# Run all tests
+forge test
+
+# Run with verbose output
+forge test -vvv
+
+# Run specific test file
+forge test --match-path test/Manager.t.sol
+
+# Generate gas report
+forge test --gas-report
+```
+
+### Deployment
+
+**Contract Deployment Order:**
 
 1. **AccessManager** - Deploy first for role management
 2. **PoolRegistry** - Deploy for pool registration
-3. **FeeManager** - Deploy for fee management
-4. **PoolOracle** - Deploy for proof verification (optional)
-5. **Manager Implementation** - Deploy as template
-6. **LiquidityPool Implementation** - Deploy as template
-7. **Escrow Implementation** - Deploy as template
-8. **PoolFactory** - Deploy with all implementations
+3. **Manager** - Deploy for pool logic
+4. **PoolFactory** - Deploy with registry and manager addresses
 
-### Configuration Steps
+**Configuration Steps:**
 
-1. **Set up roles** in AccessManager
-2. **Configure default fees** in FeeManager
-3. **Add oracles** to PoolOracle (if using)
-4. **Grant factory role** to PoolFactory
-5. **Set treasury addresses** for fee collection
-
-### Frontend Integration
-
-**Key Contract Interactions:**
-
-```typescript
-// Pool creation
-const tx = await poolFactory.createPool(poolConfig);
-
-// User deposit
-const tx = await liquidityPool.deposit(amount, userAddress);
-
-// User withdrawal
-const tx = await liquidityPool.withdraw(amount, userAddress, userAddress);
-
-// Check user returns
-const returns = await liquidityPool.getUserReturn(userAddress);
-
-// Check pool status
-const status = await manager.status();
-```
+1. Set up roles in AccessManager
+2. Configure factory in PoolRegistry
+3. Approve assets in PoolRegistry
+4. Grant necessary roles to SPV and operators
 
 ## Security Considerations
 
@@ -592,19 +530,12 @@ const status = await manager.status();
 1. **Access Control:** Role-based permissions with time delays
 2. **Slippage Protection:** Investment amount validation
 3. **Emergency Mechanisms:** Multiple emergency exit options
-4. **Multi-Signature:** Escrow requires multiple signatures
-5. **Oracle Verification:** Investment proof verification (optional)
-6. **Fee Caps:** Maximum fee rates to prevent exploitation
+4. **Multi-Signature:** Escrow requires multiple signatures for large transfers
+5. **Liquidity Limits:** Maximum 10% of invested amount available for early withdrawal
 
 ### Risk Mitigation
 
 1. **Minimum Raise:** 50% minimum funding requirement
-2. **Liquidity Buffer:** 10% available for early withdrawals
+2. **Liquidity Buffer:** SPV can provide additional liquidity for early withdrawals
 3. **Time-Based Penalties:** Discourage short-term speculation
 4. **Emergency Refunds:** Full refund capability in emergencies
-
-## Conclusion
-
-Piron Pools provides a comprehensive DeFi solution for investing in traditional financial instruments. The system balances security, flexibility, and user experience while maintaining transparency and decentralization. The modular architecture allows for optional features like oracle verification while keeping the core functionality simple and robust.
-
-The discount calculation is mathematically sound, the fee system is fair and transparent, and the emergency mechanisms provide multiple layers of user protection. The system can operate with or without oracle verification, making it adaptable to different trust models and operational requirements.
