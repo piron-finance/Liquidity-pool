@@ -22,22 +22,25 @@ contract Manager is IPoolManager, ReentrancyGuard {
     mapping(address => uint256) public poolTotalCouponsDistributed;
     mapping(address => mapping(address => uint256)) public poolUserDepositTime;
     
-    // Add user coupon balances mapping
+
     mapping(address => mapping(address => uint256)) public poolUserCouponBalances;
     
-    // Track user coupon claims to prevent double claiming
+
     mapping(address => mapping(address => uint256)) public poolUserCouponsClaimed;
     
-    // Add slippage protection constants
+
     uint256 public constant DEFAULT_SLIPPAGE_TOLERANCE = 500; // 5%
     uint256 public constant MAX_SLIPPAGE_TOLERANCE = 1000; // 10%
     
-    // Add slippage protection mapping
+
     mapping(address => uint256) public poolSlippageTolerance;
     
-    // Track SPV fund transfers
+
     mapping(address => uint256) public poolFundsWithdrawnBySPV;
     mapping(address => uint256) public poolFundsReturnedBySPV;
+    
+
+    mapping(address => uint256) public poolLiquidityBuffer;
     
     event PoolPaused(address indexed pool, uint256 timestamp);
     event PoolUnpaused(address indexed pool, uint256 timestamp);
@@ -47,9 +50,10 @@ contract Manager is IPoolManager, ReentrancyGuard {
     event SPVFundsWithdrawn(address indexed pool, uint256 amount, bytes32 transferId);
     event SPVFundsReturned(address indexed pool, uint256 amount);
     event CouponPaymentReceived(address indexed pool, uint256 amount);
+    event LiquidityBufferProvided(address indexed pool, uint256 amount);
     
     modifier onlyValidPool() {
-        require(registry.isActivePool(msg.sender), "Manager/inactive-pool");
+        require(registry.isActivePool(msg.sender), "Manager/caller is not a pool");
         _;
     }
     
@@ -116,7 +120,7 @@ contract Manager is IPoolManager, ReentrancyGuard {
     /////////////////////////////// DEPOSIT AND WITHDRAWAL FLOW /////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external override onlyValidPool whenNotPaused nonReentrant returns (uint256 shares) {  // don we not need access control here. 
+    function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external override onlyValidPool whenNotPaused nonReentrant returns (uint256 shares) {  // maybe more access control here. 
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         require(poolInfo.createdAt != 0, "Manager/invalid-pool");
         require(registry.isApprovedAsset(poolInfo.asset), "Manager/asset-not-approved");
@@ -154,6 +158,7 @@ contract Manager is IPoolManager, ReentrancyGuard {
         
         require(receiver != address(0), "Manager/invalid-receiver");
         require(owner != address(0), "Manager/invalid-owner");
+        require(sender != address(0), "Manager/invalid-sender");
         require(assets > 0, "Manager/invalid-amount");
         
         if (sender != owner) {
@@ -326,6 +331,23 @@ contract Manager is IPoolManager, ReentrancyGuard {
         emit SPVFundsReturned(liquidityPool, finalAmount);
     }
     
+    function provideLiquidityBuffer(address liquidityPool, uint256 amount) external onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
+        require(registry.isRegisteredPool(liquidityPool), "Manager/invalid-pool");
+        require(poolStatus[liquidityPool] == PoolStatus.INVESTED, "Manager/not-invested");
+        require(amount > 0, "Manager/invalid-amount");
+        
+        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
+        require(IERC20(poolInfo.asset).balanceOf(msg.sender) >= amount, "Manager/insufficient-spv-balance");
+        
+
+        IERC20(poolInfo.asset).transferFrom(msg.sender, poolInfo.escrow, amount);
+        
+
+        poolLiquidityBuffer[liquidityPool] += amount;
+        
+        emit LiquidityBufferProvided(liquidityPool, amount);
+    }
+    
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// COUPON PAYMENT SYSTEM ////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
@@ -495,6 +517,9 @@ contract Manager is IPoolManager, ReentrancyGuard {
         
         require(netAssets <= _getAvailableLiquidity(poolAddress), "Manager/insufficient-liquidity");
         
+       
+        poolLiquidityBuffer[poolAddress] -= netAssets;
+        
         ILiquidityPool(poolAddress).burnShares(owner, shares);
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
@@ -603,6 +628,9 @@ contract Manager is IPoolManager, ReentrancyGuard {
         
         require(netAssets <= _getAvailableLiquidity(poolAddress), "Manager/insufficient-liquidity");
         
+       
+        poolLiquidityBuffer[poolAddress] -= netAssets;
+        
         ILiquidityPool(poolAddress).burnShares(owner, shares);
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
@@ -708,7 +736,11 @@ contract Manager is IPoolManager, ReentrancyGuard {
     }
     
     function _getAvailableLiquidity(address poolAddress) internal view returns (uint256) {
-        return poolActualInvested[poolAddress] / 10;
+        uint256 theoreticalLimit = poolActualInvested[poolAddress] / 10;
+
+        uint256 actualBuffer = poolLiquidityBuffer[poolAddress];
+
+        return theoreticalLimit < actualBuffer ? theoreticalLimit : actualBuffer;
     }
     
     function _calculateTotalReturns(address poolAddress, PoolConfig storage poolConfig) internal view returns (uint256) {
