@@ -24,11 +24,11 @@ Users deposit USDC → Pool collects funds → SPV invests in real instruments �
 1. **PoolFactory** - Creates new investment pools
 2. **LiquidityPool** - ERC4626 vault for user deposits/withdrawals
 3. **Manager** - Core business logic and pool state management
-4. **PoolEscrow** - Multi-signature custody of funds
+4. **PoolEscrow** - Secure custody of funds (single manager control)
 5. **AccessManager** - Role-based access control
 6. **PoolRegistry** - Pool registration and discovery
-7. **FeeManager** - Fee calculation and distribution (optional)
-8. **PoolOracle** - Investment proof verification (optional)
+7. **FeeManager** - Fee calculation (standalone, not integrated)
+8. **PoolOracle** - Investment proof verification (optional, not implemented)
 
 ### System Flow Diagram
 
@@ -47,16 +47,16 @@ Users deposit USDC → Pool collects funds → SPV invests in real instruments �
        ▼                  ▼                  ▼                  ▼
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │Liquidity    │◄──►│   Manager   │◄──►│   Escrow    │◄──►│ Fee Manager │
-│Pool (ERC4626)│   │             │    │ (MultiSig)  │    │ (Optional)  │
+│Pool (ERC4626)│   │             │    │ (Single Mgr)│    │(Standalone) │
 └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
        ▲                  ▲                  ▲                  ▲
        │                  │                  │                  │
-       │ 5. Withdraw      │ 6. Process       │ 7. Release      │ 8. Collect Fees
-       │                  │    Investment    │    Funds        │
+       │ 5. Withdraw      │ 6. Process       │ 7. Release      │ 8. Calculate Fees
+       │                  │    Investment    │    Funds        │    (Manual)
        ▼                  ▼                  ▼                  ▼
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │   Frontend  │    │     SPV     │    │Pool Oracle  │    │  Treasury   │
-│             │    │ (Off-chain) │    │ (Optional)  │    │             │
+│             │    │ (Off-chain) │    │(Not Impl.)  │    │             │
 └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
 ```
 
@@ -100,7 +100,8 @@ PoolFactory.createPool(PoolConfig{
     maturityDate: block.timestamp + 90 days,
     discountRate: 1800,         // 18% discount (basis points)
     spvAddress: SPV_ADDRESS,
-    multisigSigners: [signer1, signer2, signer3]
+    couponDates: [],            // Empty for discounted instruments
+    couponRates: []             // Empty for discounted instruments
 })
 ```
 
@@ -109,7 +110,7 @@ PoolFactory.createPool(PoolConfig{
 1. `PoolFactory.createPool()` - Creates new LiquidityPool and PoolEscrow contracts
 2. `PoolRegistry.registerPool()` - Registers pool in registry
 3. `Manager.initializePool()` - Initializes pool configuration
-4. Escrow automatically configured with multisig signers
+4. Escrow configured with single manager control
 
 **Events Emitted:**
 
@@ -201,14 +202,17 @@ Manager.processInvestment(poolAddress, actualAmount, "proof-hash")
 1. `Manager.withdrawFundsForInvestment()` - SPV withdraws funds from escrow
 2. `PoolEscrow.withdrawForInvestment()` - Release funds to SPV
 3. `Manager.processInvestment()` - Process SPV investment confirmation
-4. `Manager.checkSlippageProtection()` - Validate investment amount
+4. `Manager._validateSlippageProtection()` - Validate investment amount (±5% tolerance)
 5. `Manager._updateStatus()` - Update to INVESTED status
 
 **Business Logic:**
 
 ```solidity
 uint256 expectedAmount = poolTotalRaised[pool];
-checkSlippageProtection(pool, expectedAmount, actualAmount); // ±5% tolerance
+// Fixed 5% slippage protection (hardcoded)
+uint256 minAmount = (expectedAmount * 9500) / 10000; // 5% below expected
+uint256 maxAmount = (expectedAmount * 10500) / 10000; // 5% above expected
+require(actualAmount >= minAmount && actualAmount <= maxAmount, "SlippageProtectionTriggered");
 
 if (instrumentType == DISCOUNTED) {
     uint256 totalDiscount = faceValue - actualAmount;
@@ -226,7 +230,7 @@ if (instrumentType == DISCOUNTED) {
 
 **Actors:** Users
 **Contracts:** LiquidityPool, Manager, PoolEscrow
-**Status:** Any status
+**Status:** Depends on pool status
 
 #### A. Funding Period Withdrawal (Penalty-Free)
 
@@ -251,38 +255,17 @@ shares = assets; // 1:1 ratio
 poolTotalRaised[pool] -= assets;
 ```
 
-#### B. Early Withdrawal (With Penalties)
+#### B. Early Withdrawal (BLOCKED)
+
+**IMPORTANT:** Early withdrawals are **completely blocked** during INVESTED status.
 
 ```solidity
-// User withdraws after investment
+// User attempts withdrawal after investment
 LiquidityPool.withdraw(1000e6, userAddress, userAddress)
+// REVERTS with "WithdrawalNotAllowed()"
 ```
 
-**Function Call Sequence:**
-
-1. `LiquidityPool.withdraw()` - User entry point
-2. `Manager._handleInvestedWithdrawal()` - Process early withdrawal
-3. `Manager._calculateDynamicPenalty()` - Calculate time-based penalty
-4. `LiquidityPool.burnShares()` - Burn user shares
-5. `PoolEscrow.releaseFunds()` - Release net amount to user
-
-**Penalty Structure:**
-
-```solidity
-function _calculateDynamicPenalty(address pool, uint256 assets, address owner) internal view returns (uint256) {
-    uint256 timeHeld = block.timestamp - poolUserDepositTime[pool][owner];
-
-    if (timeHeld < 7 days) {
-        return (assets * 500) / 10000; // 5% penalty
-    } else if (timeHeld < 30 days) {
-        return (assets * 300) / 10000; // 3% penalty
-    } else if (timeHeld < 90 days) {
-        return (assets * 200) / 10000; // 2% penalty
-    } else {
-        return (assets * 100) / 10000; // 1% penalty
-    }
-}
-```
+The current implementation **does not support** early withdrawals with penalties during the INVESTED phase.
 
 #### C. Maturity Withdrawal (Full Returns)
 
@@ -306,7 +289,7 @@ function _calculateTotalReturns(address pool, PoolConfig storage config) interna
     if (config.instrumentType == DISCOUNTED) {
         return config.faceValue; // Full face value
     } else {
-        // Interest-bearing: principal + coupons
+        // Interest-bearing: principal + undistributed coupons
         uint256 undistributedCoupons = poolTotalCouponsReceived[pool] - poolTotalCouponsDistributed[pool];
         return poolActualInvested[pool] + undistributedCoupons;
     }
@@ -327,7 +310,7 @@ Manager.processMaturity(poolAddress, 121951e6) // $121,951 received
 **Function Call Sequence:**
 
 1. `Manager.processMaturity()` - Process instrument maturity
-2. `Manager.checkSlippageProtection()` - Validate maturity amount
+2. `Manager._validateSlippageProtection()` - Validate maturity amount (±5% tolerance)
 3. `PoolEscrow.trackMaturityReturn()` - Track maturity funds
 4. `Manager._updateStatus()` - Update to MATURED status
 
@@ -336,10 +319,11 @@ Manager.processMaturity(poolAddress, 121951e6) // $121,951 received
 ```solidity
 require(block.timestamp >= config.maturityDate, "Manager/not-matured");
 
-if (config.instrumentType == DISCOUNTED) {
-    // Validate final amount matches expected face value (±5% tolerance)
-    checkSlippageProtection(pool, config.faceValue, finalAmount);
-}
+// 5% slippage protection applies to maturity amounts too
+uint256 expectedAmount = config.faceValue;
+uint256 minAmount = (expectedAmount * 9500) / 10000;
+uint256 maxAmount = (expectedAmount * 10500) / 10000;
+require(finalAmount >= minAmount && finalAmount <= maxAmount, "SlippageProtectionTriggered");
 ```
 
 **Events Emitted:**
@@ -366,7 +350,7 @@ if (config.instrumentType == DISCOUNTED) {
 2. **Manual Emergency Exit:**
 
    ```solidity
-   Manager.emergencyExit() // Called by emergency role
+   Manager.emergencyExit() // Called by pool itself or emergency role
    ```
 
 3. **Pool Cancellation:**
@@ -419,8 +403,27 @@ bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
 
 1. **24-Hour Role Delays:** Critical role assignments have time delays
 2. **Emergency Pause:** Immediate system shutdown capability
-3. **Multi-Signature:** Escrow requires multiple signatures for large transfers
-4. **Slippage Protection:** Investment amount validation (±5% tolerance)
+3. **Single Manager Control:** Escrow releases funds based on Manager instructions only
+4. **Slippage Protection:** Fixed 5% tolerance on investment and maturity amounts
+
+## Fee Management (Standalone)
+
+The FeeManager contract exists with full functionality but is **NOT integrated** with the core deposit/withdrawal flows.
+
+### Default Fee Structure
+
+```solidity
+FeeConfig({
+    protocolFee: 50,         // 0.5%
+    spvFee: 100,            // 1.0%
+    performanceFee: 200,    // 2.0%
+    earlyWithdrawalFee: 100, // 1.0% (not used - early withdrawals blocked)
+    refundGasFee: 10,       // 0.1%
+    isActive: true
+});
+```
+
+**Note:** Fees are calculated by FeeManager but require manual integration to collect during transactions.
 
 ## Real-World Example
 
@@ -457,6 +460,12 @@ bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
 - Calls `processInvestment()`
 - Status: INVESTED
 
+**Day 10-98: Invested Period**
+
+- **Early withdrawals are BLOCKED**
+- Users must wait for maturity
+- SPV manages off-chain investment
+
 **Day 99: Maturity**
 
 - Treasury Bills mature
@@ -480,8 +489,8 @@ bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
 ### Installation
 
 ```bash
-git clone https://github.com/piron-finance/Liquidity-pool.git
-cd Liquidity-pool
+git clone https://github.com/piron-finance/piron-pools.git
+cd piron-pools
 forge install
 ```
 
@@ -515,6 +524,7 @@ forge test --gas-report
 2. **PoolRegistry** - Deploy for pool registration
 3. **Manager** - Deploy for pool logic
 4. **PoolFactory** - Deploy with registry and manager addresses
+5. **FeeManager** - Deploy standalone (optional)
 
 **Configuration Steps:**
 
@@ -528,14 +538,7 @@ forge test --gas-report
 ### Multi-Layer Security
 
 1. **Access Control:** Role-based permissions with time delays
-2. **Slippage Protection:** Investment amount validation
+2. **Slippage Protection:** Fixed 5% tolerance on investment amounts
 3. **Emergency Mechanisms:** Multiple emergency exit options
-4. **Multi-Signature:** Escrow requires multiple signatures for large transfers
-5. **Liquidity Limits:** Maximum 10% of invested amount available for early withdrawal
-
-### Risk Mitigation
-
-1. **Minimum Raise:** 50% minimum funding requirement
-2. **Liquidity Buffer:** SPV can provide additional liquidity for early withdrawals
-3. **Time-Based Penalties:** Discourage short-term speculation
-4. **Emergency Refunds:** Full refund capability in emergencies
+4. **Single Point Control:** Manager controls all fund releases from escrow
+5. **Withdrawal Restrictions:** Early withdrawals blocked during investment period

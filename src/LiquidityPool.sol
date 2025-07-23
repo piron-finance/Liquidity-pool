@@ -88,17 +88,6 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         return actualShares;
     }
     
-    function redeem(uint256 shares, address receiver, address owner) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
-        require(shares > 0, "LiquidityPool/Non zero shares allowed");
-        require(receiver != address(0), "LiquidityPool/Valid addresses only");
-        require(owner != address(0), "LiquidityPool/Valid owner required");
-        
-     
-        uint256 assets = manager.handleRedeem(shares, receiver, owner, msg.sender);
-        
-        return assets;
-    }
-
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// EMERGENCY FUNCTIONS //////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
@@ -109,10 +98,14 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         uint256 refundAmount = pendingRefunds[msg.sender];
         uint256 userShares = balanceOf(msg.sender);
         
+       
+        uint256 totalUserValue = manager.calculateUserReturn(msg.sender);
+        uint256 sharesToBurn = totalUserValue > 0 ? (userShares * refundAmount) / totalUserValue : userShares;
+        
         pendingRefunds[msg.sender] = 0;
         totalPendingRefunds -= refundAmount;
         
-        _burn(msg.sender, userShares);
+        _burn(msg.sender, sharesToBurn);
         
         manager.handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
         

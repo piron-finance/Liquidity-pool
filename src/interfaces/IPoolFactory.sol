@@ -22,7 +22,6 @@ interface IPoolFactory {
         uint256 maturityDate;
         uint256 discountRate;
         address spvAddress;
-        address[] multisigSigners;
         uint256[] couponDates;
         uint256[] couponRates;
     }
