@@ -274,11 +274,7 @@ contract ManagerTest is Test {
         assertEq(sharesWithdrawn, withdrawAmount, "Withdrawal shares incorrect");
         assertEq(manager.poolTotalRaised(address(discountedPool)), DEPOSIT_AMOUNT_1 + DEPOSIT_AMOUNT_2 - withdrawAmount, "Total raised not updated after withdrawal");
         
-        vm.prank(address(discountedPool));
-        uint256 assetsRedeemed = manager.handleRedeem(redeemShares, user2, user2, user2);
-        assertEq(assetsRedeemed, redeemShares, "Redemption assets incorrect");
-        
-        console.log(" Funding phase withdrawals and redemptions verified");
+        console.log(" Funding phase withdrawals verified");
     }
 
     function test_08_FundingPhase_WithdrawalFailures() public {
@@ -469,23 +465,20 @@ contract ManagerTest is Test {
     }
 
     function test_16_InvestmentFlow_CustomSlippageTolerance() public {
-        vm.prank(admin);
-        manager.setSlippageTolerance(address(discountedPool), 1000); // 10%
-        
         uint256 fundingAmount = (TARGET_RAISE * 70) / 100;
         _fundAndCloseEpoch(address(discountedPool), fundingAmount);
         
-        // Test investment with 10% slippage (should now pass)
-        uint256 actualInvestment = (fundingAmount * 90) / 100;
+        // Test investment with 5% slippage (hardcoded limit) - should pass
+        uint256 actualInvestment = (fundingAmount * 95) / 100; // 5% below expected
         
         vm.prank(spv);
         manager.processInvestment(address(discountedPool), actualInvestment, "proof");
         
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.INVESTED), "Investment should succeed with custom tolerance");
+        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.INVESTED), "Investment should succeed with 5% slippage");
         vm.stopPrank();
         
-        console.log(" Custom slippage tolerance verified");
+        console.log(" Hardcoded 5% slippage tolerance verified");
     }
 
     function test_17_InvestmentFlow_Failures() public {
@@ -512,101 +505,23 @@ contract ManagerTest is Test {
     /////////////////////////////// PHASE 5: INVESTED STATE OPERATIONS ///////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function test_18_InvestedState_WithdrawalsWithPenalty() public {
+    function test_18_InvestedState_WithdrawalsBlocked_Comprehensive() public {
         uint256 fundingAmount = (TARGET_RAISE * 70) / 100;
         _simulateFullInvestmentFlow(address(discountedPool), fundingAmount);
         
-        uint256 liquidityBuffer = 10_000e6; // 10k USDC for early withdrawals
-        vm.prank(spv);
-        usdc.approve(address(manager), liquidityBuffer);
-        vm.prank(spv);
-        manager.provideLiquidityBuffer(address(discountedPool), liquidityBuffer);
+        // Test multiple withdrawal attempts with different amounts - all should fail
+        uint256[] memory testAmounts = new uint256[](3);
+        testAmounts[0] = 1_000e6;   // Small amount
+        testAmounts[1] = 10_000e6;  // Medium amount  
+        testAmounts[2] = 50_000e6;  // Large amount
         
-        // Test withdrawal with penalty - use amount within liquidity limits
-        // Available liquidity = min(actualInvested / 10, liquidityBuffer)
-        // actualInvested = 67,900, so theoretical limit = 6,790
-        // liquidityBuffer = 10,000, so available = min(6,790, 10,000) = 6,790
-        // With 5% penalty, we need netAssets ≤ 6,790
-        // So withdrawAmount should be ≤ 6,790 / 0.95 ≈ 7,147 USDC
-        uint256 withdrawAmount = 6_000e6; // Safe amount within limits
+        for (uint256 i = 0; i < testAmounts.length; i++) {
+            vm.prank(address(discountedPool));
+            vm.expectRevert("Manager/withdrawal-not-allowed");
+            manager.handleWithdraw(address(discountedPool), testAmounts[i], user1, user1, user1);
+        }
         
-        vm.prank(address(discountedPool));
-        uint256 sharesWithdrawn = manager.handleWithdraw(address(discountedPool), withdrawAmount, user1, user1, user1);
-        
-        // Verify penalty was applied (withdrawal should result in more shares burned than assets received)
-        assertGt(sharesWithdrawn, 0, "Shares should be withdrawn");
-        
-        // User held for exactly 7 days, so penalty is 3% (not 5%)
-        uint256 penalty = (withdrawAmount * 300) / 10000; // 3% penalty for 7 days to 30 days
-        uint256 expectedNetAssets = withdrawAmount - penalty;
-        
-        // Verify liquidity buffer was consumed
-        uint256 remainingBuffer = manager.poolLiquidityBuffer(address(discountedPool));
-        assertEq(remainingBuffer, liquidityBuffer - expectedNetAssets, "Liquidity buffer should be consumed");
-        
-        // The user should have received expectedNetAssets (less than withdrawAmount due to penalty)
-        console.log("Withdraw amount:", withdrawAmount);
-        console.log("Expected penalty:", penalty);
-        console.log("Expected net assets:", expectedNetAssets);
-        console.log("Shares withdrawn:", sharesWithdrawn);
-        console.log("Remaining liquidity buffer:", remainingBuffer);
-        
-        console.log("Invested state withdrawals with penalty verified");
-    }
-
-    function test_19_InvestedState_PenaltyCalculation() public {
-        uint256 fundingAmount = (TARGET_RAISE * 70) / 100;
-        _simulateFullInvestmentFlow(address(discountedPool), fundingAmount);
-        
-        uint256 liquidityBuffer = 20_000e6; // 20k USDC for early withdrawals
-        vm.prank(spv);
-        usdc.approve(address(manager), liquidityBuffer);
-        vm.prank(spv);
-        manager.provideLiquidityBuffer(address(discountedPool), liquidityBuffer);
-        
-        uint256 withdrawAmount = 6_000e6; // Use smaller amount to stay within liquidity limits
-        
-        // First withdrawal (after 7 days from investment flow) - 3% penalty
-        vm.prank(address(discountedPool));
-        uint256 sharesImmediate = manager.handleWithdraw(address(discountedPool), withdrawAmount, user1, user1, user1);
-        
-        // Setup new user for time-based test (deposit after investment)
-        // Note: This user will have a different deposit time
-        vm.prank(user2);
-        usdc.approve(address(discountedPool), 20_000e6);
-        // Since pool is in INVESTED state, we can't deposit normally
-        // Instead, let's test with existing user2 who didn't deposit yet
-        
-
-        
-        //let's test the penalty calculation by checking the actual penalty applied
-        uint256 expectedPenalty1 = (withdrawAmount * 300) / 10000; // 3% penalty for 7-30 days
-        uint256 expectedNetAssets1 = withdrawAmount - expectedPenalty1;
-        
-        // Verify the first withdrawal worked with correct penalty
-        assertGt(sharesImmediate, 0, "First withdrawal should work");
-        
-        // Test immediate withdrawal (< 7 days) by warping back and testing with fresh pool
-        console.log("First withdrawal shares:", sharesImmediate);
-        console.log("Expected penalty (3%):", expectedPenalty1);
-        console.log("Expected net assets:", expectedNetAssets1);
-        
-        console.log("Penalty calculation verified");
-    }
-
-    function test_20_InvestedState_LiquidityLimits() public {
-        uint256 fundingAmount = (TARGET_RAISE * 70) / 100;
-        _simulateFullInvestmentFlow(address(discountedPool), fundingAmount);
-        
-        // Test liquidity limits (10% of actual invested)
-        uint256 actualInvested = manager.poolActualInvested(address(discountedPool));
-        uint256 maxLiquidity = actualInvested / 10;
-        
-        vm.prank(address(discountedPool));
-        vm.expectRevert("Manager/insufficient-liquidity");
-        manager.handleWithdraw(address(discountedPool), maxLiquidity + 1e6, user1, user1, user1);
-        
-        console.log(" Liquidity limits verified");
+        console.log("All invested state withdrawal attempts properly blocked");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -889,7 +804,7 @@ contract ManagerTest is Test {
     function test_32_EmergencyScenarios_PoolCancellation() public {
         // Test pool cancellation during funding
         vm.prank(admin);
-        manager.cancelPool();
+        manager.cancelPool(address(discountedPool));
         
         // Verify emergency status
         vm.startPrank(address(discountedPool));
@@ -943,13 +858,13 @@ contract ManagerTest is Test {
     function test_35_AdminFunctions_PoolPauseUnpause() public {
         // Test pool pause
         vm.prank(operator);
-        manager.pausePool();
+        manager.pausePool(address(discountedPool));
         
         assertTrue(discountedPool.paused(), "Pool should be paused");
         
         // Test pool unpause
         vm.prank(operator);
-        manager.unpausePool();
+        manager.unpausePool(address(discountedPool));
         
         assertFalse(discountedPool.paused(), "Pool should be unpaused");
         
@@ -957,19 +872,20 @@ contract ManagerTest is Test {
     }
 
     function test_36_AdminFunctions_SlippageManagement() public {
-        // Test slippage tolerance setting
-        uint256 newTolerance = 750; // 7.5%
+        // Test hardcoded 5% slippage protection
+        uint256 fundingAmount = 100_000e6;
+        _fundAndCloseEpoch(address(discountedPool), fundingAmount);
         
-        vm.prank(admin);
-        manager.setSlippageTolerance(address(discountedPool), newTolerance);
+        // Test investment within 5% tolerance (should pass)
+        uint256 validInvestment = (fundingAmount * 95) / 100; // 5% below
+        vm.prank(spv);
+        manager.processInvestment(address(discountedPool), validInvestment, "proof");
         
-        assertEq(manager.getSlippageTolerance(address(discountedPool)), newTolerance, "Slippage tolerance not updated");
+        vm.startPrank(address(discountedPool));
+        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.INVESTED), "5% slippage should be valid");
+        vm.stopPrank();
         
-        // Test validation
-        assertTrue(manager.validateSlippage(address(discountedPool), 100_000e6, 92_500e6), "7.5% slippage should be valid");
-        assertFalse(manager.validateSlippage(address(discountedPool), 100_000e6, 90_000e6), "10% slippage should be invalid");
-        
-        console.log("Slippage management verified");
+        console.log("Hardcoded slippage protection verified");
     }
 
     function test_37_AdminFunctions_AccessManagerUpdate() public {
@@ -1001,7 +917,7 @@ contract ManagerTest is Test {
         // Admin role tests
         vm.prank(user1);
         vm.expectRevert("Manager/access-denied");
-        manager.setSlippageTolerance(address(discountedPool), 1000);
+        manager.closeEpoch(address(discountedPool));
         
         console.log("Role-based permissions verified");
     }
@@ -1083,9 +999,9 @@ contract ManagerTest is Test {
         manager.handleWithdraw(address(discountedPool), 0, user1, user1, user1);
         
         // Test zero shares redemption
-        vm.prank(address(discountedPool));
-        vm.expectRevert("Manager/invalid-shares");
-        manager.handleRedeem(0, user1, user1, user1);
+//         vm.prank(address(discountedPool));
+//         vm.expectRevert("Manager/invalid-shares");
+//         // manager.handleRedeem(0, user1, user1, user1);
         
         console.log(" Zero amount operations tested");
     }
@@ -1155,11 +1071,6 @@ contract ManagerTest is Test {
     ////////////////////////////////////////////////////////////////////////////////
 
     function _createTestPools() internal {
-        address[] memory signers = new address[](3);
-        signers[0] = admin;
-        signers[1] = signer1;
-        signers[2] = signer2;
-        
         // Create discounted pool
         IPoolFactory.PoolConfig memory discountedConfig = IPoolFactory.PoolConfig({
             asset: address(usdc),
@@ -1170,7 +1081,6 @@ contract ManagerTest is Test {
             maturityDate: block.timestamp + MATURITY_DURATION,
             discountRate: DISCOUNT_RATE,
             spvAddress: spv,
-            multisigSigners: signers,
             couponDates: new uint256[](0),
             couponRates: new uint256[](0)
         });
@@ -1206,7 +1116,6 @@ contract ManagerTest is Test {
             maturityDate: block.timestamp + MATURITY_DURATION,
             discountRate: 0,
             spvAddress: spv,
-            multisigSigners: signers,
             couponDates: couponDates,
             couponRates: couponRates
         });

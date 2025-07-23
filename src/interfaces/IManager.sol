@@ -2,6 +2,54 @@
 pragma solidity ^0.8.19;
 
 interface IPoolManager {
+    // Custom Errors
+    error CallerNotPool();
+    error InvalidPool();
+    error OnlyFactory();
+    error AccessDenied();
+    error Paused();
+    error InvalidRegistry();
+    error InvalidAccessManager();
+    error AlreadyInitialized();
+    error PoolNotRegistered();
+    error AssetNotApproved();
+    error NotFundingPhase();
+    error ExceedsTarget();
+    error FundingEnded();
+    error CallerMustBePool();
+    error InvalidReceiver();
+    error InvalidOwner();
+    error InvalidSender();
+    error InvalidAmount();
+    error InsufficientAllowance();
+    error InvalidShares();
+    error InsufficientShares();
+    error NotInFunding();
+    error EpochNotEnded();
+    error NotPendingInvestment();
+    error NotInvested();
+    error NotMatured();
+    error InsufficientSpvBalance();
+    error NotInterestBearing();
+    error InvalidCouponDate();
+    error NoCouponsToDistribute();
+    error NoSharesOutstanding();
+    error OnlyPool();
+    error InvalidUser();
+    error NoShares();
+    error NoCouponsDistributed();
+    error NoNewCoupons();
+    error DiscountRateTooHigh();
+    error InsufficientPoolBalance();
+    error InsufficientLiquidity();
+    error NoRefundAvailable();
+    error ExceedsRefundAmount();
+    error CouponConfigMismatch();
+    error InvalidCouponDates();
+    error NotEmergencyStatus();
+    error WithdrawalNotAllowed();
+    error SlippageProtectionTriggered();
+
     enum PoolStatus {
         FUNDING,
         PENDING_INVESTMENT,
@@ -50,7 +98,6 @@ interface IPoolManager {
     
     function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external returns (uint256 shares);
     function handleWithdraw(address liquidityPool, uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
-    function handleRedeem(uint256 shares, address receiver, address owner, address sender) external returns (uint256 assets);
     function calculateTotalAssets() external view returns (uint256);
     
     function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external;
@@ -65,14 +112,13 @@ interface IPoolManager {
     function getUserAvailableCoupon(address liquidityPool, address user) external view returns (uint256);
     function claimMaturityEntitlement(address user) external view returns (uint256);
     
-    function claimRefund() external;
     function getUserRefund(address user) external view returns (uint256);
     
     function emergencyExit() external;
-    function pausePool() external;
-    function unpausePool() external;
+    function pausePool(address liquidityPool) external;
+    function unpausePool(address liquidityPool) external;
     
-    function updateStatus(PoolStatus newStatus) external;
+
     function closeEpoch(address liquidityPool) external;
     
     function initializePool(address pool, PoolConfig memory poolConfig) external;
