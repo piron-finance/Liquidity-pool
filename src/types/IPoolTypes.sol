@@ -27,9 +27,11 @@ interface IPoolTypes {
      */
     enum PoolStatus {
         FUNDING,
+        FILLED,
         PENDING_INVESTMENT,
         INVESTED,
         MATURED,
+        WITHDRAWN,
         EMERGENCY
     }
     
