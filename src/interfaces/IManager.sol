@@ -9,6 +9,7 @@ interface IPoolManager {
     error InvalidPool();
     error OnlyFactory();
     error AccessDenied();
+    error RoleDelayNotMet();
     error Paused();
     error InvalidRegistry();
     error InvalidAccessManager();

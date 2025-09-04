@@ -26,6 +26,8 @@ contract Manager is IPoolManager, ReentrancyGuard {
     event SPVFundsWithdrawn(address indexed pool, uint256 amount, bytes32 transferId);
     event SPVFundsReturned(address indexed pool, uint256 amount);
     event CouponPaymentReceived(address indexed pool, uint256 amount);
+    event PoolFilled(address indexed pool, uint256 totalRaised, uint256 timestamp);
+    event PoolFullyWithdrawn(address indexed pool, uint256 timestamp);
     
     modifier onlyValidPool() {
         require(registry.isActivePool(msg.sender), CallerNotPool());
@@ -44,6 +46,12 @@ contract Manager is IPoolManager, ReentrancyGuard {
     
     modifier onlyRole(bytes32 role) {
         require(accessManager.hasRole(role, msg.sender), AccessDenied());
+        _;
+    }
+    
+    modifier onlyRoleWithDelay(bytes32 role) {
+        require(accessManager.hasRole(role, msg.sender), AccessDenied());
+        require(accessManager.canActWithDelay(role, msg.sender), RoleDelayNotMet());
         _;
     }
     
@@ -153,15 +161,30 @@ contract Manager is IPoolManager, ReentrancyGuard {
     /////////////////////////////// EPOCH MANAGEMENT /////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
+    function handlePoolFilled(address pool) external onlyRole(accessManager.OPERATOR_ROLE()) {
+        IPoolTypes.PoolData storage poolData = pools[pool];
+        require(poolData.status == IPoolTypes.PoolStatus.FUNDING, "Not in funding");
+        require(poolData.totalRaised >= poolData.config.targetRaise, "Not filled");
+
+        poolData.status = IPoolTypes.PoolStatus.FILLED;
+
+        emit PoolFilled(pool, poolData.totalRaised, block.timestamp);
+    }
+
     function closeEpoch(address liquidityPool) external override onlyRole(accessManager.OPERATOR_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), InvalidPool());
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
-        require(pools[liquidityPool].status == IPoolTypes.PoolStatus.FUNDING, NotInFunding());
+        require(pools[liquidityPool].status == IPoolTypes.PoolStatus.FUNDING || 
+               pools[liquidityPool].status == IPoolTypes.PoolStatus.FILLED, 
+               NotInFunding());
+
+        if (pools[liquidityPool].status == IPoolTypes.PoolStatus.FUNDING ) {
         require(block.timestamp >= poolData.config.epochEndTime, EpochNotEnded());
+        }
         
         uint256 amountRaised = pools[liquidityPool].totalRaised;
         
-        if (amountRaised >= poolData.config.targetRaise * 50 / 100) {
+        if (amountRaised >= poolData.config.targetRaise * 50 / 100) { // check if we should just have operator set minimum rather than 50 percent
             if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
                 poolData.config.faceValue = _calculateFaceValue(amountRaised, poolData.config.discountRate);
             } else {
@@ -375,6 +398,19 @@ contract Manager is IPoolManager, ReentrancyGuard {
         uint256 userAlreadyClaimed = poolUsers[liquidityPool][user].couponsClaimed;
         
         return userTotalEntitlement > userAlreadyClaimed ? userTotalEntitlement - userAlreadyClaimed : 0;
+    }
+
+      function markPoolWithdrawn(address pool) external onlyRole(accessManager.OPERATOR_ROLE()) {
+         IPoolTypes.PoolData storage poolData = pools[pool];
+        require(poolData.status ==  IPoolTypes.PoolStatus.MATURED, "Pool not matured");
+
+        // Check if all funds have been withdrawn
+        uint256 remainingShares = IERC20(pool).totalSupply();
+        require(remainingShares == 0, "Shares still outstanding");
+
+        poolData.status =  IPoolTypes.PoolStatus.WITHDRAWN;
+
+        emit PoolFullyWithdrawn(pool, block.timestamp);
     }
 
 
