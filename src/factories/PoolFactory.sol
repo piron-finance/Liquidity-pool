@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IPoolFactory.sol";
 import "../interfaces/IPoolRegistry.sol";
 import "../interfaces/IManager.sol";
+import "../types/IPoolTypes.sol";
 import "../AccessManager.sol";
 import "../PoolEscrow.sol";
 import "../LiquidityPool.sol";
@@ -90,7 +91,7 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
             maturityDate: config.maturityDate
         }));
         
-        IPoolManager(manager).initializePool(pool, IPoolManager.PoolConfig({
+        IPoolManager(manager).initializePool(pool, IPoolTypes.PoolConfig({
             instrumentType: config.instrumentType,
             faceValue: 0, 
             purchasePrice: config.targetRaise,

@@ -10,6 +10,7 @@ import "../src/PoolRegistry.sol";
 import "../src/AccessManager.sol";
 import "../src/factories/PoolFactory.sol";
 import "../src/interfaces/IManager.sol";
+import "../src/types/IPoolTypes.sol";
 import "../src/interfaces/IPoolRegistry.sol";
 import "../src/interfaces/IPoolEscrow.sol";
 import "../src/interfaces/IPoolFactory.sol";
@@ -66,7 +67,7 @@ contract ManagerTest is Test {
     uint256 constant LARGE_DEPOSIT = 200_000e6;
     
     // Events for testing
-    event StatusChanged(IPoolManager.PoolStatus oldStatus, IPoolManager.PoolStatus newStatus);
+    event StatusChanged(IPoolTypes.PoolStatus oldStatus, IPoolTypes.PoolStatus newStatus);
     event Deposit(address liquidityPool, address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
     event Withdraw(address indexed pool, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
     event InvestmentConfirmed(uint256 actualAmount, string proofHash);
@@ -154,16 +155,16 @@ contract ManagerTest is Test {
         
 
         vm.startPrank(address(discountedPool));
-        IPoolManager.PoolConfig memory discountedConfig = manager.config();
+        IPoolTypes.PoolConfig memory discountedConfig = manager.config();
         assertEq(discountedConfig.targetRaise, TARGET_RAISE, "Target raise not set");
-        assertEq(uint256(discountedConfig.instrumentType), uint256(IPoolManager.InstrumentType.DISCOUNTED), "Instrument type not set");
+        assertEq(uint256(discountedConfig.instrumentType), uint256(IPoolTypes.InstrumentType.DISCOUNTED), "Instrument type not set");
         assertEq(discountedConfig.discountRate, DISCOUNT_RATE, "Discount rate not set");
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.FUNDING), "Pool not in funding status");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.FUNDING), "Pool not in funding status");
         vm.stopPrank();
         
         vm.startPrank(address(interestPool));
-        IPoolManager.PoolConfig memory interestConfig = manager.config();
-        assertEq(uint256(interestConfig.instrumentType), uint256(IPoolManager.InstrumentType.INTEREST_BEARING), "Interest pool type not set");
+        IPoolTypes.PoolConfig memory interestConfig = manager.config();
+        assertEq(uint256(interestConfig.instrumentType), uint256(IPoolTypes.InstrumentType.INTEREST_BEARING), "Interest pool type not set");
         assertEq(interestConfig.couponDates.length, 4, "Coupon dates not set");
         assertEq(interestConfig.couponRates.length, 4, "Coupon rates not set");
         vm.stopPrank();
@@ -178,7 +179,7 @@ contract ManagerTest is Test {
     }
 
     function test_03_PoolInitializationFailures() public {
-        IPoolManager.PoolConfig memory config = _createDiscountedPoolConfig();
+        IPoolTypes.PoolConfig memory config = _createDiscountedPoolConfig();
         vm.prank(address(factory));
         vm.expectRevert("Manager/already-initialized");
         manager.initializePool(address(discountedPool), config);
@@ -313,17 +314,17 @@ contract ManagerTest is Test {
         vm.warp(block.timestamp + EPOCH_DURATION + 1);
         
         vm.expectEmit(true, true, false, false);
-        emit StatusChanged(IPoolManager.PoolStatus.FUNDING, IPoolManager.PoolStatus.PENDING_INVESTMENT);
+        emit StatusChanged(IPoolTypes.PoolStatus.FUNDING, IPoolTypes.PoolStatus.PENDING_INVESTMENT);
         
         vm.prank(operator);
         manager.closeEpoch(address(discountedPool));
         
         // Verify status change
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.PENDING_INVESTMENT), "Status not updated");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.PENDING_INVESTMENT), "Status not updated");
         
         // Verify face value calculation for discounted instruments
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         uint256 expectedFaceValue = (fundingAmount * 10000) / (10000 - DISCOUNT_RATE);
         assertEq(config.faceValue, expectedFaceValue, "Face value calculation incorrect");
         vm.stopPrank();
@@ -339,14 +340,14 @@ contract ManagerTest is Test {
         vm.warp(block.timestamp + EPOCH_DURATION + 1);
         
         vm.expectEmit(true, true, false, false);
-        emit StatusChanged(IPoolManager.PoolStatus.FUNDING, IPoolManager.PoolStatus.EMERGENCY);
+        emit StatusChanged(IPoolTypes.PoolStatus.FUNDING, IPoolTypes.PoolStatus.EMERGENCY);
         
         vm.prank(operator);
         manager.closeEpoch(address(discountedPool));
         
         // Verify emergency status
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.EMERGENCY), "Status not updated to emergency");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.EMERGENCY), "Status not updated to emergency");
         vm.stopPrank();
         
         console.log(" Insufficient funding epoch close verified");
@@ -362,7 +363,7 @@ contract ManagerTest is Test {
         
         // Verify emergency status
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.EMERGENCY), "Status not updated to emergency");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.EMERGENCY), "Status not updated to emergency");
         vm.stopPrank();
         
         console.log(" Force close epoch verified");
@@ -436,11 +437,11 @@ contract ManagerTest is Test {
         
  
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.INVESTED), "Status not updated to invested");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.INVESTED), "Status not updated to invested");
         assertEq(manager.actualInvested(), actualInvestment, "Actual investment not tracked");
         
 
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         uint256 expectedDiscount = config.faceValue - actualInvestment;
         assertEq(manager.totalDiscountEarned(), expectedDiscount, "Discount calculation incorrect");
         vm.stopPrank();
@@ -475,7 +476,7 @@ contract ManagerTest is Test {
         manager.processInvestment(address(discountedPool), actualInvestment, "proof");
         
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.INVESTED), "Investment should succeed with 5% slippage");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.INVESTED), "Investment should succeed with 5% slippage");
         vm.stopPrank();
         
         console.log(" Hardcoded 5% slippage tolerance verified");
@@ -534,7 +535,7 @@ contract ManagerTest is Test {
         
         // Move to first coupon date (set during pool creation)
         vm.startPrank(address(interestPool));
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         vm.stopPrank();
         
         vm.warp(config.couponDates[0]);
@@ -561,7 +562,7 @@ contract ManagerTest is Test {
         _simulateFullInvestmentFlow(address(interestPool), fundingAmount);
         
          vm.startPrank(address(interestPool));
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         vm.stopPrank();
         
         vm.warp(config.couponDates[0]);
@@ -590,7 +591,7 @@ contract ManagerTest is Test {
         _simulateFullInvestmentFlow(address(interestPool), fundingAmount);
         
           vm.startPrank(address(interestPool));
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         vm.stopPrank();
         
         vm.warp(config.couponDates[0]);
@@ -660,7 +661,7 @@ contract ManagerTest is Test {
         
         // Get face value for return
         vm.startPrank(address(discountedPool));
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         vm.stopPrank();
         
         // Process maturity
@@ -675,7 +676,7 @@ contract ManagerTest is Test {
         
         // Verify maturity processing
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.MATURED), "Status not updated to matured");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.MATURED), "Status not updated to matured");
         vm.stopPrank();
         
         assertEq(manager.poolFundsReturnedBySPV(address(discountedPool)), config.faceValue, "SPV return not tracked");
@@ -700,7 +701,7 @@ contract ManagerTest is Test {
         manager.processMaturity(address(interestPool), maturityAmount);
         
         vm.startPrank(address(interestPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.MATURED), "Status not updated to matured");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.MATURED), "Status not updated to matured");
         vm.stopPrank();
         
         console.log("Interest-bearing instrument maturity processing verified");
@@ -717,7 +718,7 @@ contract ManagerTest is Test {
         
         // Get the correct face value to avoid slippage protection
         vm.startPrank(address(discountedPool));
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         vm.stopPrank();
         
         // maturity processing with correct amount but wrong caller
@@ -795,7 +796,7 @@ contract ManagerTest is Test {
         
         // Verify emergency status
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.EMERGENCY), "Status not updated to emergency");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.EMERGENCY), "Status not updated to emergency");
         vm.stopPrank();
         
         console.log("Pool emergency exit verified");
@@ -808,7 +809,7 @@ contract ManagerTest is Test {
         
         // Verify emergency status
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.EMERGENCY), "Status not updated to emergency");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.EMERGENCY), "Status not updated to emergency");
         vm.stopPrank();
         
         console.log("Pool cancellation verified");
@@ -882,7 +883,7 @@ contract ManagerTest is Test {
         manager.processInvestment(address(discountedPool), validInvestment, "proof");
         
         vm.startPrank(address(discountedPool));
-        assertEq(uint256(manager.status()), uint256(IPoolManager.PoolStatus.INVESTED), "5% slippage should be valid");
+        assertEq(uint256(manager.status()), uint256(IPoolTypes.PoolStatus.INVESTED), "5% slippage should be valid");
         vm.stopPrank();
         
         console.log("Hardcoded slippage protection verified");
@@ -930,11 +931,11 @@ contract ManagerTest is Test {
         // Test various view functions
         vm.startPrank(address(discountedPool));
         
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         assertEq(config.targetRaise, TARGET_RAISE, "Config target raise incorrect");
         
-        IPoolManager.PoolStatus status = manager.status();
-        assertEq(uint256(status), uint256(IPoolManager.PoolStatus.FUNDING), "Status incorrect");
+        IPoolTypes.PoolStatus status = manager.status();
+        assertEq(uint256(status), uint256(IPoolTypes.PoolStatus.FUNDING), "Status incorrect");
         
         uint256 totalRaised = manager.totalRaised();
         assertEq(totalRaised, 0, "Total raised should be 0 initially");
@@ -1074,7 +1075,7 @@ contract ManagerTest is Test {
         // Create discounted pool
         IPoolFactory.PoolConfig memory discountedConfig = IPoolFactory.PoolConfig({
             asset: address(usdc),
-            instrumentType: IPoolManager.InstrumentType.DISCOUNTED,
+            instrumentType: IPoolTypes.InstrumentType.DISCOUNTED,
             instrumentName: "Test Discounted Bill",
             targetRaise: TARGET_RAISE,
             epochDuration: EPOCH_DURATION,
@@ -1109,7 +1110,7 @@ contract ManagerTest is Test {
         // Create interest-bearing pool with coupon schedule
         IPoolFactory.PoolConfig memory interestConfig = IPoolFactory.PoolConfig({
             asset: address(usdc),
-            instrumentType: IPoolManager.InstrumentType.INTEREST_BEARING,
+            instrumentType: IPoolTypes.InstrumentType.INTEREST_BEARING,
             instrumentName: "Test Interest Bearing Note",
             targetRaise: TARGET_RAISE,
             epochDuration: EPOCH_DURATION,
@@ -1126,9 +1127,9 @@ contract ManagerTest is Test {
         interestEscrow = PoolEscrow(payable(interestEscrowAddr));
     }
     
-    function _createDiscountedPoolConfig() internal view returns (IPoolManager.PoolConfig memory) {
-        return IPoolManager.PoolConfig({
-            instrumentType: IPoolManager.InstrumentType.DISCOUNTED,
+    function _createDiscountedPoolConfig() internal view returns (IPoolTypes.PoolConfig memory) {
+        return IPoolTypes.PoolConfig({
+            instrumentType: IPoolTypes.InstrumentType.DISCOUNTED,
             faceValue: 0,
             purchasePrice: 0,
             targetRaise: TARGET_RAISE,
@@ -1181,10 +1182,10 @@ contract ManagerTest is Test {
         
         // Process maturity
         vm.startPrank(address(poolAddress));
-        IPoolManager.PoolConfig memory config = manager.config();
+        IPoolTypes.PoolConfig memory config = manager.config();
         vm.stopPrank();
         
-        uint256 maturityAmount = config.instrumentType == IPoolManager.InstrumentType.DISCOUNTED 
+        uint256 maturityAmount = config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED 
             ? config.faceValue 
             : manager.poolActualInvested(poolAddress);
         vm.prank(spv);

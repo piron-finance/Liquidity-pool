@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import "../types/IPoolTypes.sol";
+
 interface IPoolManager {
     // Custom Errors
     error CallerNotPool();
@@ -50,31 +52,6 @@ interface IPoolManager {
     error WithdrawalNotAllowed();
     error SlippageProtectionTriggered();
 
-    enum PoolStatus {
-        FUNDING,
-        PENDING_INVESTMENT,
-        INVESTED,
-        MATURED,
-        EMERGENCY
-    }
-    
-    enum InstrumentType {
-        DISCOUNTED,
-        INTEREST_BEARING
-    }
-    
-    struct PoolConfig {
-        InstrumentType instrumentType;
-        uint256 faceValue;
-        uint256 purchasePrice;
-        uint256 targetRaise;
-        uint256 epochEndTime;
-        uint256 maturityDate;
-        uint256[] couponDates;
-        uint256[] couponRates;
-        uint256 refundGasFee;
-        uint256 discountRate; // (basis points)
-    }
     
     event Deposit(address liquidityPool, address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
     event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
@@ -83,13 +60,13 @@ interface IPoolManager {
     event CouponDistributed(address indexed liquidityPool, uint256 amount, uint256 timestamp);
     event MaturityProcessed(uint256 finalAmount);  
     event RefundClaimed(address indexed user, uint256 amount);
-    event StatusChanged(PoolStatus oldStatus, PoolStatus newStatus);
+    event StatusChanged(IPoolTypes.PoolStatus oldStatus, IPoolTypes.PoolStatus newStatus);
     event EmergencyExit(address indexed caller, uint256 timestamp);
     event CouponClaimed(address indexed pool, address indexed user, uint256 amount);
     
     function escrow() external view returns (address);
-    function config() external view returns (PoolConfig memory);
-    function status() external view returns (PoolStatus);
+    function config() external view returns (IPoolTypes.PoolConfig memory);
+    function status() external view returns (IPoolTypes.PoolStatus);
     function totalRaised() external view returns (uint256);
     function actualInvested() external view returns (uint256);
     function totalDiscountEarned() external view returns (uint256);
@@ -121,7 +98,7 @@ interface IPoolManager {
 
     function closeEpoch(address liquidityPool) external;
     
-    function initializePool(address pool, PoolConfig memory poolConfig) external;
+    function initializePool(address pool, IPoolTypes.PoolConfig memory poolConfig) external;
     
     function isInFundingPeriod() external view returns (bool);
     function isMatured() external view returns (bool);

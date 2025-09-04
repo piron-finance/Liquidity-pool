@@ -38,7 +38,7 @@ contract PironPoolsDeployment is Script {
         address baseToken;
     }
     
-    // Events for deployment tracking
+
     event ContractDeployed(string name, address addr);
     event SystemConfigured(address admin, address spv, address operator);
     event DeploymentComplete(DeployedContracts contracts);
@@ -55,22 +55,17 @@ contract PironPoolsDeployment is Script {
         console.log("Treasury: %s", config.treasury);
         console.log("");
         
-        // Start deployment
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
         
-        // Deploy contracts in correct order
         DeployedContracts memory contracts = _deployContracts(config);
         
-        // Configure system
         _configureSystem(contracts, config);
         
-        // Verify deployment
         _verifyDeployment(contracts, config);
         
         vm.stopBroadcast();
         
-        // Log final results
         _logDeploymentResults(contracts, config);
         
         emit DeploymentComplete(contracts);
@@ -87,7 +82,6 @@ contract PironPoolsDeployment is Script {
         config.deployMockToken = vm.envOr("DEPLOY_MOCK_TOKEN", true);
         config.roleDelay = vm.envOr("ROLE_DELAY", uint256(24 hours));
         
-        // Validate addresses
         require(config.admin != address(0), "Invalid admin address");
         require(config.spv != address(0), "Invalid SPV address");
         require(config.operator != address(0), "Invalid operator address");
@@ -106,7 +100,6 @@ contract PironPoolsDeployment is Script {
     {
         console.log("=== DEPLOYING CONTRACTS ===");
         
-        // 1. Deploy or use existing base token
         if (config.deployMockToken) {
             contracts.baseToken = address(new MockERC20());
             console.log("MockERC20 deployed at: %s", contracts.baseToken);
@@ -116,22 +109,18 @@ contract PironPoolsDeployment is Script {
             console.log("Using existing token at: %s", contracts.baseToken);
         }
         
-        // 2. Deploy AccessManager
         contracts.accessManager = address(new AccessManager(config.admin));
         console.log("AccessManager deployed at: %s", contracts.accessManager);
         emit ContractDeployed("AccessManager", contracts.accessManager);
         
-        // 3. Deploy PoolRegistry
         contracts.poolRegistry = address(new PoolRegistry(contracts.accessManager));
         console.log("PoolRegistry deployed at: %s", contracts.poolRegistry);
         emit ContractDeployed("PoolRegistry", contracts.poolRegistry);
         
-        // 4. Deploy Manager
         contracts.manager = address(new Manager(contracts.poolRegistry, contracts.accessManager));
         console.log("Manager deployed at: %s", contracts.manager);
         emit ContractDeployed("Manager", contracts.manager);
         
-        // 5. Deploy PoolFactory
         contracts.poolFactory = address(new PoolFactory(
             contracts.poolRegistry,
             contracts.manager,
@@ -140,7 +129,6 @@ contract PironPoolsDeployment is Script {
         console.log("PoolFactory deployed at: %s", contracts.poolFactory);
         emit ContractDeployed("PoolFactory", contracts.poolFactory);
         
-        // 6. Deploy FeeManager (optional)
         contracts.feeManager = address(new FeeManager(contracts.accessManager, config.treasury));
         console.log("FeeManager deployed at: %s", contracts.feeManager);
         emit ContractDeployed("FeeManager", contracts.feeManager);
@@ -155,22 +143,18 @@ contract PironPoolsDeployment is Script {
         AccessManager accessManager = AccessManager(contracts.accessManager);
         PoolRegistry registry = PoolRegistry(contracts.poolRegistry);
         
-        // 1. Set factory in registry
         registry.setFactory(contracts.poolFactory);
         console.log("Factory set in registry");
         
-        // 2. Setup roles
         accessManager.grantRole(accessManager.SPV_ROLE(), config.spv);
         accessManager.grantRole(accessManager.OPERATOR_ROLE(), config.operator);
         accessManager.grantRole(accessManager.EMERGENCY_ROLE(), config.emergency);
         accessManager.grantRole(keccak256("POOL_CREATOR_ROLE"), config.admin);
         console.log("Roles granted successfully");
         
-        // 3. Approve base token as valid asset
         registry.approveAsset(contracts.baseToken);
         console.log("Base token approved as valid asset");
         
-        // 4. Configure fee manager default settings
         FeeManager feeManager = FeeManager(contracts.feeManager);
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
             protocolFee: 50,         // 0.5% protocol fee
@@ -191,34 +175,28 @@ contract PironPoolsDeployment is Script {
     
     function _verifyDeployment(DeployedContracts memory contracts, DeploymentConfig memory config) internal view {
         console.log("=== VERIFYING DEPLOYMENT ===");
-        
-        // Verify AccessManager
         AccessManager accessManager = AccessManager(contracts.accessManager);
         require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), config.admin), "Admin role not set");
         require(accessManager.hasRole(accessManager.SPV_ROLE(), config.spv), "SPV role not set");
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), config.operator), "Operator role not set");
         require(accessManager.hasRole(accessManager.EMERGENCY_ROLE(), config.emergency), "Emergency role not set");
         console.log("AccessManager roles verified");
-        
-        // Verify PoolRegistry
+
         PoolRegistry registry = PoolRegistry(contracts.poolRegistry);
         require(registry.factory() == contracts.poolFactory, "Factory not set in registry");
         require(registry.isApprovedAsset(contracts.baseToken), "Base token not approved");
         console.log("PoolRegistry configuration verified");
         
-        // Verify Manager
         Manager manager = Manager(contracts.manager);
         require(address(manager.registry()) == contracts.poolRegistry, "Manager registry not set");
         require(address(manager.accessManager()) == contracts.accessManager, "Manager access manager not set");
         console.log("Manager configuration verified");
         
-        // Verify PoolFactory
         PoolFactory factory = PoolFactory(contracts.poolFactory);
         require(factory.registry() == contracts.poolRegistry, "Factory registry not set");
         require(factory.manager() == contracts.manager, "Factory manager not set");
         console.log("PoolFactory configuration verified");
         
-        // Verify FeeManager
         FeeManager feeManager = FeeManager(contracts.feeManager);
         require(address(feeManager.accessManager()) == contracts.accessManager, "FeeManager access manager not set");
         console.log("FeeManager configuration verified");
@@ -256,6 +234,7 @@ contract PironPoolsDeployment is Script {
         
         if (chainId == 1) return "Mainnet";
         if (chainId == 17000) return "Holesky";
+        if (chainId == 84532) return "Base sepolia";
         if (chainId == 2810) return "Morph Holesky";
         
         return "Unknown";
@@ -267,8 +246,8 @@ contract PironPoolsDeployment is Script {
  * @dev Mock ERC20 token for testing purposes
  */
 contract MockERC20 is ERC20 {
-    constructor() ERC20("Mock Token", "MOCK") {
-        _mint(msg.sender, 10_000_000 * 1e18);
+    constructor() ERC20("CNGN", "CNGN") {
+        _mint(msg.sender, 10_000_000 * 1e6);
     }
     
     function mint(address to, uint256 amount) external {
@@ -276,6 +255,6 @@ contract MockERC20 is ERC20 {
     }
     
     function decimals() public pure override returns (uint8) {
-        return 18;
+        return 6;
     }
 } 

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.19;
 
 import "./IManager.sol";
+import "../types/IPoolTypes.sol";
 
 interface IPoolFactory {
     event PoolCreated(
@@ -15,7 +16,7 @@ interface IPoolFactory {
     
     struct PoolConfig {
         address asset;
-        IPoolManager.InstrumentType instrumentType;
+        IPoolTypes.InstrumentType instrumentType;
         string instrumentName;
         uint256 targetRaise;
         uint256 epochDuration;
