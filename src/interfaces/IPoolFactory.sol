@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 import "./IManager.sol";
 import "../types/IPoolTypes.sol";
@@ -13,6 +13,9 @@ interface IPoolFactory {
         uint256 targetRaise,
         uint256 maturityDate
     );
+    
+    event PoolImplementationUpdated(address indexed oldImplementation, address indexed newImplementation);
+    event EscrowImplementationUpdated(address indexed oldImplementation, address indexed newImplementation);
     
     struct PoolConfig {
         address asset;

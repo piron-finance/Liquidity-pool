@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 import "../types/IPoolTypes.sol";
 
@@ -105,4 +105,12 @@ interface IPoolManager {
     function isMatured() external view returns (bool);
     function getTimeToMaturity() external view returns (uint256);
     function getExpectedReturn() external view returns (uint256);
+    
+    // Upgrade management functions
+    function setTimelockController(address newTimelockController) external;
+    function version() external view returns (uint256);
+    
+    // Additional events for upgradeability
+    event ManagerUpgraded(address indexed oldImplementation, address indexed newImplementation, uint256 version);
+    event TimelockControllerUpdated(address indexed oldController, address indexed newController);
 }

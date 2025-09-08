@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC4626Upgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "./interfaces/ILiquidityPool.sol";
 import "./interfaces/IManager.sol";
+import "./interfaces/IPoolEscrow.sol";
 
-contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
+
+contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, ILiquidityPool, PausableUpgradeable {
     using SafeERC20 for IERC20;
     
-    IPoolManager public immutable manager;
-    address public immutable escrow;
+    IPoolManager public manager;
+    IPoolEscrow public escrow;
 
     mapping(address => uint256) public override pendingRefunds;
     mapping(address => uint256) public override discountedBillsAccrued; 
@@ -24,48 +28,74 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         _;
     }
 
-    constructor(
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+    
+    /**
+     * @notice Initialize the LiquidityPool contract
+     * @param asset_ The underlying ERC20 asset
+     * @param name_ Pool token name
+     * @param symbol_ Pool token symbol
+     * @param _manager Manager contract address
+     * @param _escrow Pool escrow contract address
+     */
+    function initialize(
         IERC20 asset_, 
         string memory name_, 
         string memory symbol_, 
         address _manager, 
         address _escrow
-    ) ERC4626(asset_) ERC20(name_, symbol_) {
+    ) public initializer {
         require(_manager != address(0), "LiquidityPool/invalid-manager");
         require(_escrow != address(0), "LiquidityPool/invalid-escrow");
         
+        __ERC4626_init(asset_);
+        __ERC20_init(name_, symbol_);
+        __Pausable_init();
+        __UUPSUpgradeable_init();
+        
         manager = IPoolManager(_manager);
-        escrow = _escrow;
+        escrow = IPoolEscrow(_escrow);
+    }
+    
+    /**
+     * @notice Disable upgrades for live pools
+     * @dev Pools should never be upgraded once deployed
+     */
+    function _authorizeUpgrade(address) internal pure override {
+        revert("Pool upgrades disabled for security");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
     ///////////////////////////////  DEPOSIT FLOW /////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function deposit(uint256 assets, address receiver) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
+    function deposit(uint256 assets, address receiver) public override(ERC4626Upgradeable, IERC4626) whenNotPaused returns (uint256) {
         require(assets > 0, "LiquidityPool/Non zero deposits allowed");
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         require(IERC20(asset()).balanceOf(msg.sender) >= assets, "LiquidityPool/Insufficient balance");
        
-        IERC20(asset()).safeTransferFrom(msg.sender, escrow, assets);
+        IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), assets);
 
-        uint256 shares = manager.handleDeposit(address(this), assets, receiver, msg.sender);
+        uint256 shares = IPoolManager(manager).handleDeposit(address(this), assets, receiver, msg.sender);
 
         _mint(receiver, shares);
         
         return shares;
     }
     
-    function mint(uint256 shares, address receiver) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
+    function mint(uint256 shares, address receiver) public override(ERC4626Upgradeable, IERC4626) whenNotPaused returns (uint256) {
         require(shares > 0, "LiquidityPool/Non zero shares allowed");
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         
         uint256 assets = previewMint(shares);
         require(IERC20(asset()).balanceOf(msg.sender) >= assets, "LiquidityPool/Insufficient balance");
         
-        IERC20(asset()).safeTransferFrom(msg.sender, escrow, assets);
+        IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), assets);
 
-        uint256 actualShares = manager.handleDeposit(address(this), assets, receiver, msg.sender);
+        uint256 actualShares = IPoolManager(manager).handleDeposit(address(this), assets, receiver, msg.sender);
         
         require(actualShares >= shares, "LiquidityPool/Insufficient shares minted");
 
@@ -78,12 +108,12 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     ///////////////////////////////  WITHDRAWAL FLOW //////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function withdraw(uint256 assets, address receiver, address owner) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
+    function withdraw(uint256 assets, address receiver, address owner) public override(ERC4626Upgradeable, IERC4626) whenNotPaused returns (uint256) {
         require(assets > 0, "LiquidityPool/Non zero assets allowed");
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         require(owner != address(0), "LiquidityPool/Valid owner required");
     
-        uint256 actualShares = manager.handleWithdraw(address(this), assets, receiver, owner, msg.sender);
+        uint256 actualShares = IPoolManager(manager).handleWithdraw(address(this), assets, receiver, owner, msg.sender);
         
         return actualShares;
     }
@@ -99,7 +129,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         uint256 userShares = balanceOf(msg.sender);
         
        
-        uint256 totalUserValue = manager.calculateUserReturn(msg.sender);
+        uint256 totalUserValue = IPoolManager(manager).calculateUserReturn(msg.sender);
         uint256 sharesToBurn = totalUserValue > 0 ? (userShares * refundAmount) / totalUserValue : userShares;
         
         pendingRefunds[msg.sender] = 0;
@@ -107,7 +137,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         
         _burn(msg.sender, sharesToBurn);
         
-        manager.handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
+        IPoolManager(manager).handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
         
         emit RefundClaimed(msg.sender, refundAmount);
     }
@@ -116,11 +146,11 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         uint256 userShares = balanceOf(msg.sender);
         require(userShares > 0, "LiquidityPool/no-shares");
         
-        uint256 refundAmount = manager.getUserRefund(msg.sender);
+        uint256 refundAmount = IPoolManager(manager).getUserRefund(msg.sender);
         require(refundAmount > 0, "LiquidityPool/no-refund-available");
         
         _burn(msg.sender, userShares);
-        manager.handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
+        IPoolManager(manager).handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
         
         emit EmergencyWithdrawal(msg.sender, refundAmount, userShares);
     }
@@ -130,7 +160,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
      * @notice Users can call this to claim their share of distributed coupons
      */
     function claimCoupon() external override whenNotPaused returns (uint256) {
-        uint256 couponAmount = manager.claimUserCoupon(address(this), msg.sender);
+        uint256 couponAmount = IPoolManager(manager).claimUserCoupon(address(this), msg.sender);
         require(couponAmount > 0, "LiquidityPool/no-coupon-available");
         
         emit CouponClaimed(msg.sender, couponAmount);
@@ -141,7 +171,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
      * @dev Get user's potential coupon amount
      */
     function getUserCouponAmount(address user) external view override returns (uint256) {
-        return IPoolManager(address(manager)).getUserAvailableCoupon(address(this), user);
+        return IPoolManager(manager).getUserAvailableCoupon(address(this), user);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -198,36 +228,36 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function paused() public view override(ILiquidityPool, Pausable) returns (bool) {
+    function paused() public view override(ILiquidityPool, PausableUpgradeable) returns (bool) {
         return super.paused();
     }
 
-    function totalAssets() public view override(ERC4626, IERC4626) returns (uint256) {
-        return manager.calculateTotalAssets();
+    function totalAssets() public view override(ERC4626Upgradeable, IERC4626) returns (uint256) {
+        return IPoolManager(manager).calculateTotalAssets();
     }
 
     function getUserReturn(address user) external view returns (uint256) {
-        return manager.calculateUserReturn(user);
+        return IPoolManager(manager).calculateUserReturn(user);
     }
     
     function getUserDiscount(address user) external view returns (uint256) {
-        return manager.calculateUserDiscount(user);
+        return IPoolManager(manager).calculateUserDiscount(user);
     }
     
     function isInFundingPeriod() external view returns (bool) {
-        return manager.isInFundingPeriod();
+        return IPoolManager(manager).isInFundingPeriod();
     }
     
     function isMatured() external view returns (bool) {
-        return manager.isMatured();
+        return IPoolManager(manager).isMatured();
     }
     
     function getTimeToMaturity() external view returns (uint256) {
-        return manager.getTimeToMaturity();
+        return IPoolManager(manager).getTimeToMaturity();
     }
     
     function getExpectedReturn() external view returns (uint256) {
-        return manager.getExpectedReturn();
+        return IPoolManager(manager).getExpectedReturn();
     }
 }
 
