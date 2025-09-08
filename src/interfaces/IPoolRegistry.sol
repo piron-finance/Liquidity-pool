@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 interface IPoolRegistry {
     struct PoolInfo {
@@ -41,6 +41,7 @@ interface IPoolRegistry {
     event AssetRevoked(
         address indexed asset
     );
+
     
     function factory() external view returns (address);
     function totalPools() external view returns (uint256);
@@ -69,4 +70,8 @@ interface IPoolRegistry {
     function approveAsset(address asset) external;
     function revokeAsset(address asset) external;
     function isApprovedAsset(address asset) external view returns (bool);
+    
+    function approveImplementation(address implementation) external;
+    function revokeImplementation(address implementation) external;
+    function isApprovedImplementation(address implementation) external view returns (bool);
 } 

@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 import "./interfaces/IPoolRegistry.sol";
 import "./AccessManager.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-contract PoolRegistry is IPoolRegistry {
+contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
     address public override factory;
     AccessManager public accessManager;
+    address public timelockController;
+    uint256 public version;
     
     uint256 public override totalPools;
     uint256 public override activePools;
@@ -17,9 +21,12 @@ contract PoolRegistry is IPoolRegistry {
     mapping(string => address[]) private poolsByType;
     
     mapping(address => bool) private approvedAssets;
+    mapping(address => bool) public approvedImplementations;
     
     event FactoryUpdated(address indexed oldFactory, address indexed newFactory);
     event AccessManagerUpdated(address indexed oldAccessManager, address indexed newAccessManager);
+    event ImplementationApproved(address indexed implementation);
+    event ImplementationRevoked(address indexed implementation);
     
     modifier onlyFactory() {
         require(msg.sender == factory, "PoolRegistry/only-factory");
@@ -36,11 +43,39 @@ contract PoolRegistry is IPoolRegistry {
         _;
     }
     
-    constructor(address _accessManager) {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+    
+    /**
+     * @notice Initialize the PoolRegistry contract
+     * @param _accessManager AccessManager contract address
+     * @param _timelockController TimelockController contract address
+     */
+    function initialize(
+        address _accessManager,
+        address _timelockController
+    ) public initializer {
         require(_accessManager != address(0), "PoolRegistry/invalid-access-manager");
+        require(_timelockController != address(0), "Invalid timelock controller");
+        
+        __UUPSUpgradeable_init();
         
         accessManager = AccessManager(_accessManager);
+        timelockController = _timelockController;
         factory = address(0);
+        version = 1;
+    }
+    
+    /**
+     * @notice Authorize contract upgrades
+     * @param newImplementation New implementation contract address
+     */
+    function _authorizeUpgrade(address newImplementation) internal override {
+        require(msg.sender == timelockController, "Only timelock can upgrade");
+        require(newImplementation != address(0), "Invalid implementation");
+        version += 1;
     }
     
     /**
@@ -207,5 +242,40 @@ contract PoolRegistry is IPoolRegistry {
     
     function isApprovedAsset(address asset) external view override returns (bool) {
         return approvedAssets[asset];
+    }
+
+    /**
+     * @notice Approve a new pool implementation
+     * @param implementation Address of the new implementation contract
+     * @dev Only callable by EXECUTOR_ROLE (rare, high-privilege operation)
+     */
+    function approveImplementation(address implementation) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
+        require(implementation != address(0), "Invalid implementation");
+        require(!approvedImplementations[implementation], "Already approved");
+        
+        approvedImplementations[implementation] = true;
+        
+        emit ImplementationApproved(implementation);
+    }
+
+    /**
+     * @notice Revoke an implementation approval
+     * @param implementation Address of the implementation to revoke
+     */
+    function revokeImplementation(address implementation) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
+        require(approvedImplementations[implementation], "Implementation not approved");
+        
+        approvedImplementations[implementation] = false;
+        
+        emit ImplementationRevoked(implementation);
+    }
+
+    /**
+     * @notice Check if implementation is approved
+     * @param implementation Address to check
+     * @return approved True if implementation is approved
+     */
+    function isApprovedImplementation(address implementation) external view returns (bool) {
+        return approvedImplementations[implementation];
     }
 } 

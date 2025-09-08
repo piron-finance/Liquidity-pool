@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "./interfaces/IPoolEscrow.sol";
-
 /**
  * @title PoolEscrow
  * @dev Escrow contract for pool fund management
  * @notice This contract holds funds securely and releases them based on Manager instructions
  */
-contract PoolEscrow is IPoolEscrow, ReentrancyGuard, AccessControl {
+contract PoolEscrow is Initializable, UUPSUpgradeable, IPoolEscrow, ReentrancyGuardUpgradeable, AccessControlUpgradeable {
     using SafeERC20 for IERC20;
     
-    IERC20 public immutable asset;
-    address public immutable override manager;
+    IERC20 public asset;
+    address public manager;
     address public override pool;
-    address public immutable override spvAddress;
+    address public override spvAddress;
+
     
     bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
     
@@ -69,28 +71,45 @@ contract PoolEscrow is IPoolEscrow, ReentrancyGuard, AccessControl {
         _;
     }
     
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+    
     /**
-     * @dev Initialize escrow with simplified single SPV configuration
+     * @notice Initialize the PoolEscrow contract
      * @param _asset The ERC20 token to be held in escrow
      * @param _manager The manager contract address
      * @param _spvAddress The SPV address for this pool
      */
-    constructor(
+    function initialize(
         address _asset,
         address _manager,
         address _spvAddress
-    ) {
+    ) public initializer {
         require(_asset != address(0), "PoolEscrow/invalid-asset");
         require(_manager != address(0), "PoolEscrow/invalid-manager");
         require(_spvAddress != address(0), "PoolEscrow/invalid-spv");
+        
+        __ReentrancyGuard_init();
+        __AccessControl_init();
+        __UUPSUpgradeable_init();
         
         asset = IERC20(_asset);
         manager = _manager;
         spvAddress = _spvAddress;
         pool = address(0);
         
-        _grantRole(DEFAULT_ADMIN_ROLE, _manager);
-        _grantRole(EMERGENCY_ROLE, _manager);
+        _grantRole(DEFAULT_ADMIN_ROLE, manager);
+        _grantRole(EMERGENCY_ROLE, manager);
+    }
+    
+    /**
+     * @notice Disable upgrades for live escrows
+     * @dev Escrows should never be upgraded once deployed with user funds
+     */
+    function _authorizeUpgrade(address) internal pure override {
+        revert("Escrow upgrades disabled for security");
     }
 
      function setPool(address _pool) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -219,123 +238,9 @@ contract PoolEscrow is IPoolEscrow, ReentrancyGuard, AccessControl {
         emit FundsReleased(user, amount, bytes32(uint256(0xc0ff)));
     }
     
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// MULTISIG WORKFLOW ///////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+
     
-    // MULTISIG FUNCTIONALITY COMMENTED OUT - NOT CURRENTLY USED
-    // future consideration. in the future we want multiple signers for transactions
-    
-    /*
-    function proposeTransfer(
-        TransferType transferType,
-        address recipient,
-        uint256 amount,
-        bytes memory data
-    ) external override onlySignerOrManager notInEmergencyMode returns (bytes32 transferId) {
-        require(recipient != address(0), "PoolEscrow/invalid-recipient");
-        require(amount > 0, "PoolEscrow/invalid-amount");
-        require(amount <= getAvailableBalance(), "PoolEscrow/insufficient-balance");
-        
-        transferId = keccak256(abi.encodePacked(
-            transferType,
-            recipient,
-            amount,
-            data,
-            block.timestamp,
-            msg.sender
-        ));
-        require(transfers[transferId].amount == 0, "PoolEscrow/transfer-exists");
-        
-        transfers[transferId] = Transfer({
-            transferType: transferType,
-            recipient: recipient,
-            amount: amount,
-            data: data,
-            confirmations: 0,
-            executed: false,
-            timestamp: block.timestamp
-        });
-        
-        transferCreationTime[transferId] = block.timestamp;
-        
-        if (amount > LARGE_TRANSFER_THRESHOLD) {
-            emit LargeTransferDetected(transferId, amount, LARGE_TRANSFER_THRESHOLD);
-        }
-        
-        emit TransferProposed(transferId, transferType, recipient, amount, msg.sender);
-        
-        return transferId;
-    }
-    
-    function approveTransfer(bytes32 transferId) external override onlyRole(SIGNER_ROLE) validTransfer(transferId) {
-        require(!transfers[transferId].executed, "PoolEscrow/already-executed");
-        require(!transferApprovals[transferId][msg.sender], "PoolEscrow/already-approved");
-        
-        transferApprovals[transferId][msg.sender] = true;
-        transfers[transferId].confirmations += 1;
-        
-        emit TransferApproved(transferId, msg.sender, transfers[transferId].confirmations);
-    }
-    
-    function executeTransfer(bytes32 transferId) external override onlySignerOrManager validTransfer(transferId) nonReentrant {
-        Transfer storage transfer = transfers[transferId];
-        
-        require(!transfer.executed, "PoolEscrow/already-executed");
-        require(transfer.confirmations >= requiredConfirmations, "PoolEscrow/insufficient-confirmations");
-        
-        transfer.executed = true;
-        
-        asset.safeTransfer(transfer.recipient, transfer.amount);
-        
-        emit TransferExecuted(transferId, transfer.recipient, transfer.amount);
-        emit FundsReleased(transfer.recipient, transfer.amount, transferId);
-    }
-    
-    function revokeTransfer(bytes32 transferId) external override onlyRole(SIGNER_ROLE) validTransfer(transferId) {
-        require(!transfers[transferId].executed, "PoolEscrow/already-executed");
-        require(transfers[transferId].confirmations < requiredConfirmations, "PoolEscrow/cannot-revoke-approved");
-        
-        transfers[transferId].executed = true;
-    }
-    */
-    
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// SIGNER MANAGEMENT ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    // SIGNER MANAGEMENT COMMENTED OUT - PART OF MULTISIG SYSTEM
-    /*
-    function addSigner(address signer) external override onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(signer != address(0), "PoolEscrow/invalid-signer");
-        require(!hasRole(SIGNER_ROLE, signer), "PoolEscrow/already-signer");
-        
-        _grantRole(SIGNER_ROLE, signer);
-        signerCount += 1;
-        
-        emit SignerAdded(signer);
-    }
-    
-    function removeSigner(address signer) external override onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(hasRole(SIGNER_ROLE, signer), "PoolEscrow/not-signer");
-        require(signerCount > requiredConfirmations, "PoolEscrow/would-break-multisig");
-        
-        _revokeRole(SIGNER_ROLE, signer);
-        signerCount -= 1;
-        
-        emit SignerRemoved(signer);
-    }
-    
-    function changeRequiredConfirmations(uint256 newRequired) external override onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newRequired >= 2, "PoolEscrow/insufficient-confirmations");
-        require(newRequired <= signerCount, "PoolEscrow/too-many-confirmations");
-        
-        uint256 oldRequired = requiredConfirmations;
-        requiredConfirmations = newRequired;
-        
-        emit RequiredConfirmationsChanged(oldRequired, newRequired);
-    }
-    */
+
     
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
@@ -350,18 +255,13 @@ contract PoolEscrow is IPoolEscrow, ReentrancyGuard, AccessControl {
         return totalBalance > totalLocked ? totalBalance - totalLocked : 0;
     }
     
-    // function isSigner(address account) external pure returns (bool) {
-    //     return false;
-    // }
+
     
     function getTransfer(bytes32 transferId) external view override returns (Transfer memory) {
         return transfers[transferId];
     }
     
-    // Removed multisig functions - isSigner now always returns false
-    // function isTransferApproved, addSigner, removeSigner, changeRequiredConfirmations
-    // proposeTransfer, approveTransfer, executeTransfer, revokeTransfer are commented out above
-    
+
     function canWithdrawForInvestment(uint256 amount) external view returns (bool) {
         return amount <= getAvailableBalance() && !emergencyMode;
     }
