@@ -61,6 +61,11 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
             bytes(config.instrumentName).length > 0,
             "Invalid config"
         );
+        require(
+            config.minimumFundingThreshold > 0 && 
+            config.minimumFundingThreshold <= 10000,
+            "Invalid minimum funding threshold"
+        );
         require(config.maturityDate > block.timestamp + config.epochDuration, "Invalid maturity");
         
         escrow = address(new PoolEscrow(config.asset, manager, config.spvAddress));
@@ -101,7 +106,8 @@ contract PoolFactory is IPoolFactory, ReentrancyGuard {
             couponDates: config.couponDates,
             couponRates: config.couponRates,
             refundGasFee: 0,
-            discountRate: config.discountRate
+            discountRate: config.discountRate,
+            minimumFundingThreshold: config.minimumFundingThreshold
         }));
         
         emit PoolCreated(pool, manager, config.asset, config.instrumentName, config.targetRaise, config.maturityDate);

@@ -4,7 +4,6 @@ pragma solidity ^0.8.19;
 import "../types/IPoolTypes.sol";
 
 interface IPoolManager {
-    // Custom Errors
     error CallerNotPool();
     error InvalidPool();
     error OnlyFactory();
@@ -86,11 +85,12 @@ interface IPoolManager {
     
     function calculateUserReturn(address user) external view returns (uint256);
     function calculateUserDiscount(address user) external view returns (uint256);
-    function calculateMaturityValue() external view returns (uint256);
     function getUserAvailableCoupon(address liquidityPool, address user) external view returns (uint256);
+    function getUnclaimedCoupons(address liquidityPool) external view returns (uint256);
+    function getUndistributedCoupons(address liquidityPool) external view returns (uint256);
     function claimMaturityEntitlement(address user) external view returns (uint256);
     
-    function getUserRefund(address user) external view returns (uint256);
+  
     
     function emergencyExit() external;
     function pausePool(address liquidityPool) external;
@@ -105,4 +105,9 @@ interface IPoolManager {
     function isMatured() external view returns (bool);
     function getTimeToMaturity() external view returns (uint256);
     function getExpectedReturn() external view returns (uint256);
+    
+
+    function getPoolStatus() external view returns (uint8);
+    
+    function poolTotalRaised(address pool) external view returns (uint256);
 }

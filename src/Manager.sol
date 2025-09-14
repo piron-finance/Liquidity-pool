@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19; 
 
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IManager.sol";
 import "./interfaces/IPoolRegistry.sol";
 import "./interfaces/IPoolEscrow.sol";
@@ -8,11 +10,11 @@ import "./interfaces/ILiquidityPool.sol";
 import "./types/IPoolTypes.sol";
 import "./AccessManager.sol";
 import "./libraries/CalculationLibrary.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./libraries/ValidationLibrary.sol";
+
 
 contract Manager is IPoolManager, ReentrancyGuard {
-     
+
     IPoolRegistry public registry;
     AccessManager public accessManager;
     
@@ -28,6 +30,9 @@ contract Manager is IPoolManager, ReentrancyGuard {
     event CouponPaymentReceived(address indexed pool, uint256 amount);
     event PoolFilled(address indexed pool, uint256 totalRaised, uint256 timestamp);
     event PoolFullyWithdrawn(address indexed pool, uint256 timestamp);
+    event EmergencyStateChanged(address indexed poolAddress, string trigger, uint256 totalAmount, uint256 totalShares, uint256 timestamp);
+    event PoolCancelled(address indexed poolAddress, address indexed cancelledBy, uint256 timestamp);
+    event DiscountsDistributed(address indexed poolAddress, uint256 totalDiscount, uint256 totalShares);
     
     modifier onlyValidPool() {
         require(registry.isActivePool(msg.sender), CallerNotPool());
@@ -66,6 +71,10 @@ contract Manager is IPoolManager, ReentrancyGuard {
         registry = IPoolRegistry(_registry);
         accessManager = AccessManager(_accessManager);
     }
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// ACCESS CONTROL ///////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
     
     function setAccessManager(address newAccessManager) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
         require(newAccessManager != address(0), InvalidAccessManager());
@@ -81,9 +90,14 @@ contract Manager is IPoolManager, ReentrancyGuard {
     function initializePool(
         address pool,
         IPoolTypes.PoolConfig memory poolConfig
-    ) external onlyFactory whenNotPaused {
+    ) external override onlyFactory whenNotPaused {
         require(pools[pool].config.targetRaise == 0, AlreadyInitialized());
         require(registry.isRegisteredPool(pool), PoolNotRegistered());
+        require(
+            poolConfig.minimumFundingThreshold > 0 && 
+            poolConfig.minimumFundingThreshold <= 10000,
+            "Invalid minimum funding threshold"
+        );
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(pool);
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
@@ -98,17 +112,12 @@ contract Manager is IPoolManager, ReentrancyGuard {
     /////////////////////////////// DEPOSIT AND WITHDRAWAL FLOW /////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external override onlyValidPool whenNotPaused nonReentrant returns (uint256 shares) {  // maybe more access control here. 
-        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
-        require(poolInfo.createdAt != 0, InvalidPool());
-        require(registry.isApprovedAsset(poolInfo.asset), AssetNotApproved());
-        
+    function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external override onlyValidPool whenNotPaused nonReentrant returns (uint256 shares) {   
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
-        IPoolTypes.PoolStatus currentStatus = pools[liquidityPool].status;
+        ValidationLibrary.validateDeposit(poolData, registry, liquidityPool, assets, receiver);
+        ValidationLibrary.validateAddress(sender, false);     
+        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         
-        require(currentStatus == IPoolTypes.PoolStatus.FUNDING, NotFundingPhase());
-        require(poolData.totalRaised + assets <= poolData.config.targetRaise, ExceedsTarget());
-        require(block.timestamp <= poolData.config.epochEndTime, FundingEnded());  // what happens if a deposit is made to a closed pool. yes we can handle it on the fe. but what if by anything we have fuinds in the pool contract. what to do to unclaimed funds. not important now anyway
         
         if (poolUsers[liquidityPool][receiver].depositTime == 0) {
             poolUsers[liquidityPool][receiver].depositTime = block.timestamp;
@@ -127,17 +136,14 @@ contract Manager is IPoolManager, ReentrancyGuard {
     }
 
     function handleWithdraw(address liquidityPool, uint256 assets, address receiver, address owner, address sender) external override onlyRegisteredPool whenNotPaused nonReentrant returns (uint256 shares) {
-        require(msg.sender == liquidityPool, CallerMustBePool());
-        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
-        require(poolInfo.createdAt != 0, InvalidPool());
-       
-        IPoolTypes.PoolData storage poolData = pools[liquidityPool];
-        IPoolTypes.PoolStatus currentStatus = pools[liquidityPool].status;
+         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
+        IPoolTypes.PoolStatus currentStatus = poolData.status;
+
+        ValidationLibrary.validateWithdrawal(poolData, registry, liquidityPool, owner);
+        ValidationLibrary.validateAddress(receiver, true);
+        ValidationLibrary.validateAddress(sender, false);
+        ValidationLibrary.validateAmount(assets);
         
-        require(receiver != address(0), InvalidReceiver());
-        require(owner != address(0), InvalidOwner());
-        require(sender != address(0), InvalidSender());
-        require(assets != 0, InvalidAmount());
         
         if (sender != owner) {
             uint256 allowed = IERC20(liquidityPool).allowance(owner, sender);
@@ -161,54 +167,58 @@ contract Manager is IPoolManager, ReentrancyGuard {
     /////////////////////////////// EPOCH MANAGEMENT /////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function handlePoolFilled(address pool) external onlyRole(accessManager.OPERATOR_ROLE()) {
-        IPoolTypes.PoolData storage poolData = pools[pool];
+    function handlePoolFilled(address liquidityPool) external whenNotPaused onlyRole(accessManager.OPERATOR_ROLE()) {
+        require(registry.isRegisteredPool(liquidityPool), InvalidPool());
+        IPoolTypes.PoolData storage poolData = pools[liquidityPool];
         require(poolData.status == IPoolTypes.PoolStatus.FUNDING, "Not in funding");
         require(poolData.totalRaised >= poolData.config.targetRaise, "Not filled");
 
         poolData.status = IPoolTypes.PoolStatus.FILLED;
 
-        emit PoolFilled(pool, poolData.totalRaised, block.timestamp);
+        emit PoolFilled(liquidityPool, poolData.totalRaised, block.timestamp);
     }
 
     function closeEpoch(address liquidityPool) external override onlyRole(accessManager.OPERATOR_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), InvalidPool());
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
-        require(pools[liquidityPool].status == IPoolTypes.PoolStatus.FUNDING || 
-               pools[liquidityPool].status == IPoolTypes.PoolStatus.FILLED, 
+        require(poolData.status == IPoolTypes.PoolStatus.FUNDING || 
+               poolData.status == IPoolTypes.PoolStatus.FILLED, 
                NotInFunding());
 
-        if (pools[liquidityPool].status == IPoolTypes.PoolStatus.FUNDING ) {
+        if (poolData.status == IPoolTypes.PoolStatus.FUNDING ) {
         require(block.timestamp >= poolData.config.epochEndTime, EpochNotEnded());
         }
         
-        uint256 amountRaised = pools[liquidityPool].totalRaised;
+        uint256 amountRaised = poolData.totalRaised;
         
-        if (amountRaised >= poolData.config.targetRaise * 50 / 100) { // check if we should just have operator set minimum rather than 50 percent
+        if (amountRaised >= poolData.config.targetRaise * poolData.config.minimumFundingThreshold / 10000) {
             if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
-                poolData.config.faceValue = _calculateFaceValue(amountRaised, poolData.config.discountRate);
+                poolData.config.faceValue = CalculationLibrary.calculateFaceValue(amountRaised, poolData.config.discountRate);
             } else {
-                poolData.config.faceValue = amountRaised;
+                // For interest-bearing instruments, faceValue is not applicable
+                // Amount raised is tracked separately in poolData.totalRaised
+                poolData.config.faceValue = 0;
             }
             
             _updateStatus(liquidityPool, IPoolTypes.PoolStatus.PENDING_INVESTMENT);
         } else {
             _updateStatus(liquidityPool, IPoolTypes.PoolStatus.EMERGENCY);
+            _emitEmergencyMetrics(liquidityPool, "UNDERFUNDED_EPOCH");
         }
     }
 
     function forceCloseEpoch(address liquidityPool) external onlyRole(accessManager.EMERGENCY_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), InvalidPool());
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
-        require(pools[liquidityPool].status == IPoolTypes.PoolStatus.FUNDING, NotInFunding());
+        require(poolData.status == IPoolTypes.PoolStatus.FUNDING, NotInFunding());
         
-        uint256 raisedAmount = pools[liquidityPool].totalRaised;
+        uint256 raisedAmount = poolData.totalRaised;
         
-        if (raisedAmount >= poolData.config.targetRaise * 50 / 100) {
+        if (raisedAmount >= poolData.config.targetRaise * poolData.config.minimumFundingThreshold / 10000) {
             if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
-                poolData.config.faceValue = _calculateFaceValue(raisedAmount, poolData.config.discountRate);
+                poolData.config.faceValue = CalculationLibrary.calculateFaceValue(raisedAmount, poolData.config.discountRate);
             } else {
-                poolData.config.faceValue = raisedAmount;
+                poolData.config.faceValue = 0;
             }
             
             _updateStatus(liquidityPool, IPoolTypes.PoolStatus.PENDING_INVESTMENT);
@@ -237,27 +247,23 @@ contract Manager is IPoolManager, ReentrancyGuard {
         emit SPVFundsWithdrawn(liquidityPool, amount, transferId);
     }
 
-    function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
+    function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external override onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), InvalidPool());
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
-        require(pools[liquidityPool].status == IPoolTypes.PoolStatus.PENDING_INVESTMENT, NotPendingInvestment());
+        require(poolData.status == IPoolTypes.PoolStatus.PENDING_INVESTMENT, NotPendingInvestment());
         
-        uint256 expectedAmount = pools[liquidityPool].totalRaised;
+        require(actualAmount <= poolData.totalRaised, "Manager/Cannot invest more than raised");
+        require(actualAmount > 0, "Manager/invalid amount");
         
-        // Simple 5% slippage protection
-        uint256 minAmount = (expectedAmount * 9500) / 10000; // 5% below expected
-        uint256 maxAmount = (expectedAmount * 10500) / 10000; // 5% above expected
-        if (actualAmount < minAmount || actualAmount > maxAmount) {
-            emit SlippageProtectionActivated(liquidityPool, expectedAmount, actualAmount, 500);
-            revert SlippageProtectionTriggered();
-        }
-        
-        pools[liquidityPool].actualInvested = actualAmount;
+        poolData.actualInvested = actualAmount;
         
         if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
+            poolData.config.faceValue = CalculationLibrary.calculateFaceValue(actualAmount, poolData.config.discountRate);
             uint256 totalDiscount = poolData.config.faceValue - actualAmount;
-            pools[liquidityPool].totalDiscountEarned = totalDiscount;
+            poolData.totalDiscountEarned = totalDiscount;
         } else if (poolData.config.instrumentType == IPoolTypes.InstrumentType.INTEREST_BEARING) {
+
+            poolData.config.faceValue = 0;
             if (poolData.config.couponDates.length > 0) {
                 require(poolData.config.couponDates.length == poolData.config.couponRates.length, CouponConfigMismatch());
                 require(poolData.config.couponDates[0] > block.timestamp, InvalidCouponDates());
@@ -270,12 +276,9 @@ contract Manager is IPoolManager, ReentrancyGuard {
     }
     
     function processMaturity(address liquidityPool, uint256 finalAmount) external override onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
-        require(registry.isRegisteredPool(liquidityPool), InvalidPool());
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
-        
-        require(pools[liquidityPool].status == IPoolTypes.PoolStatus.INVESTED, NotInvested());
-        require(block.timestamp >= poolData.config.maturityDate, NotMatured());
-        require(finalAmount != 0, InvalidAmount());
+        ValidationLibrary.validateMaturityProcessing(poolData, registry, liquidityPool, finalAmount);
+       
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         require(IERC20(poolInfo.asset).balanceOf(msg.sender) >= finalAmount, InsufficientSpvBalance());
@@ -285,12 +288,25 @@ contract Manager is IPoolManager, ReentrancyGuard {
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
         escrowContract.trackMaturityReturn(finalAmount);
         
-        pools[liquidityPool].fundsReturnedBySPV += finalAmount;
+        poolData.fundsReturnedBySPV += finalAmount;
         
         _updateStatus(liquidityPool, IPoolTypes.PoolStatus.MATURED);
         
+        
         emit MaturityProcessed(finalAmount);
         emit SPVFundsReturned(liquidityPool, finalAmount);
+    }
+
+    function markPoolWithdrawn(address pool) external onlyRole(accessManager.OPERATOR_ROLE()) { 
+         IPoolTypes.PoolData storage poolData = pools[pool];
+        require(poolData.status ==  IPoolTypes.PoolStatus.MATURED, "Pool not matured");
+
+        uint256 remainingShares = IERC20(pool).totalSupply();
+        require(remainingShares == 0, "Manager/Shares still outstanding");
+
+        poolData.status =  IPoolTypes.PoolStatus.WITHDRAWN;
+
+        emit PoolFullyWithdrawn(pool, block.timestamp);
     }
     
     ////////////////////////////////////////////////////////////////////////////////
@@ -301,11 +317,11 @@ contract Manager is IPoolManager, ReentrancyGuard {
         require(registry.isRegisteredPool(liquidityPool), InvalidPool());
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
         
-        require(pools[liquidityPool].status == IPoolTypes.PoolStatus.INVESTED, NotInvested());
+        require(poolData.status == IPoolTypes.PoolStatus.INVESTED, NotInvested());
         require(poolData.config.instrumentType == IPoolTypes.InstrumentType.INTEREST_BEARING, NotInterestBearing());
         require(amount != 0, InvalidAmount());
         
-        require(_isValidCouponDate(poolData.config), InvalidCouponDate());
+        require(_isValidCouponDate(poolData.config), InvalidCouponDate()); //note to self: we might need to revise this
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         require(IERC20(poolInfo.asset).balanceOf(msg.sender) >= amount, InsufficientSpvBalance());
@@ -315,7 +331,7 @@ contract Manager is IPoolManager, ReentrancyGuard {
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
         escrowContract.trackCouponPayment(amount);
         
-        pools[liquidityPool].totalCouponsReceived += amount;
+        poolData.totalCouponsReceived += amount;
         
         emit CouponReceived(amount, block.timestamp);
         emit CouponPaymentReceived(liquidityPool, amount);
@@ -326,23 +342,22 @@ contract Manager is IPoolManager, ReentrancyGuard {
         require(registry.isRegisteredPool(liquidityPool), InvalidPool());
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
         
-        require(pools[liquidityPool].status == IPoolTypes.PoolStatus.INVESTED, NotInvested());
+        require(poolData.status == IPoolTypes.PoolStatus.INVESTED, NotInvested());
         require(poolData.config.instrumentType == IPoolTypes.InstrumentType.INTEREST_BEARING, NotInterestBearing());
         
-        uint256 undistributedCoupons = pools[liquidityPool].totalCouponsReceived - pools[liquidityPool].totalCouponsDistributed;
+        uint256 undistributedCoupons = poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
         require(undistributedCoupons != 0, NoCouponsToDistribute());
         
         uint256 totalShares = IERC20(liquidityPool).totalSupply();
         require(totalShares != 0, NoSharesOutstanding());
         
         // Mark all received coupons as distributed and available for claiming
-        pools[liquidityPool].totalCouponsDistributed = pools[liquidityPool].totalCouponsReceived;
+        poolData.totalCouponsDistributed = poolData.totalCouponsReceived;
         
         emit CouponDistributed(liquidityPool, undistributedCoupons, block.timestamp);
     }
     
-    function claimUserCoupon(address liquidityPool, address user) external onlyRegisteredPool whenNotPaused returns (uint256) {
-        require(msg.sender == liquidityPool, OnlyPool());
+    function claimUserCoupon(address liquidityPool, address user) external override onlyRegisteredPool whenNotPaused returns (uint256) {
         require(user != address(0), InvalidUser());
         
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
@@ -353,7 +368,7 @@ contract Manager is IPoolManager, ReentrancyGuard {
         require(userShares != 0, NoShares());
         
         uint256 totalShares = IERC20(liquidityPool).totalSupply();
-        uint256 totalDistributedCoupons = pools[liquidityPool].totalCouponsDistributed;
+        uint256 totalDistributedCoupons = poolData.totalCouponsDistributed;
         require(totalDistributedCoupons != 0, NoCouponsDistributed());
         
       
@@ -365,8 +380,9 @@ contract Manager is IPoolManager, ReentrancyGuard {
         require(userTotalEntitlement > userAlreadyClaimed, NoNewCoupons());
         uint256 claimableAmount = userTotalEntitlement - userAlreadyClaimed;
         
-       
         poolUsers[liquidityPool][user].couponsClaimed = userTotalEntitlement;
+        
+        poolData.totalCouponsClaimed += claimableAmount;
         
 
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
@@ -378,7 +394,7 @@ contract Manager is IPoolManager, ReentrancyGuard {
         return claimableAmount;
     }
     
-    function getUserAvailableCoupon(address liquidityPool, address user) external view returns (uint256) {
+    function getUserAvailableCoupon(address liquidityPool, address user) external onlyRegisteredPool view override returns (uint256) {
         if (user == address(0)) return 0;
         
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
@@ -391,7 +407,7 @@ contract Manager is IPoolManager, ReentrancyGuard {
         uint256 totalShares = IERC20(liquidityPool).totalSupply();
         if (totalShares == 0) return 0;
         
-        uint256 totalDistributedCoupons = pools[liquidityPool].totalCouponsDistributed;
+        uint256 totalDistributedCoupons = poolData.totalCouponsDistributed;
         if (totalDistributedCoupons == 0) return 0;
         
         uint256 userTotalEntitlement = (userShares * totalDistributedCoupons) / totalShares;
@@ -400,17 +416,88 @@ contract Manager is IPoolManager, ReentrancyGuard {
         return userTotalEntitlement > userAlreadyClaimed ? userTotalEntitlement - userAlreadyClaimed : 0;
     }
 
-      function markPoolWithdrawn(address pool) external onlyRole(accessManager.OPERATOR_ROLE()) {
-         IPoolTypes.PoolData storage poolData = pools[pool];
-        require(poolData.status ==  IPoolTypes.PoolStatus.MATURED, "Pool not matured");
+    /**
+     * @dev Get the total amount of distributed but unclaimed coupons for a pool
+     * @param liquidityPool The address of the liquidity pool
+     * @return Total unclaimed coupon amount
+     */
+    function getUnclaimedCoupons(address liquidityPool) external view override  returns (uint256) {
+        require(registry.isRegisteredPool(liquidityPool), InvalidPool());
+        IPoolTypes.PoolData storage poolData = pools[liquidityPool];
+        
+        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.INTEREST_BEARING) return 0;
+        if (poolData.totalCouponsDistributed == 0) return 0;
+        
+        return poolData.totalCouponsDistributed - poolData.totalCouponsClaimed;
+    }
 
-        // Check if all funds have been withdrawn
-        uint256 remainingShares = IERC20(pool).totalSupply();
-        require(remainingShares == 0, "Shares still outstanding");
+    /**
+     * @dev Get the total amount of received but undistributed coupons for a pool
+     * @param liquidityPool The address of the liquidity pool
+     * @return Total undistributed coupon amount
+     * @notice Restricted to operators - contains sensitive operational timing data
+     */
+    function getUndistributedCoupons(address liquidityPool) external view onlyRole(accessManager.OPERATOR_ROLE()) returns (uint256) {
+        require(registry.isRegisteredPool(liquidityPool), InvalidPool());
+        IPoolTypes.PoolData storage poolData = pools[liquidityPool];
+        
+        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.INTEREST_BEARING) return 0;
+        if (poolData.totalCouponsReceived == 0) return 0;
+        
+        return poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
+    }
 
-        poolData.status =  IPoolTypes.PoolStatus.WITHDRAWN;
 
-        emit PoolFullyWithdrawn(pool, block.timestamp);
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// USER CALCULATIONS ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    function calculateUserReturn(address user) external view override onlyRegisteredPool returns (uint256) {
+        require (user != address(0), "Manager/user cannot be empty");
+        address poolAddress = msg.sender;
+        IPoolTypes.PoolData storage poolData = pools[poolAddress];
+
+        return CalculationLibrary.calculateUserReturn(
+            poolData,
+            user,
+            poolAddress
+        );
+      
+    }
+    
+    function calculateUserDiscount(address user) external view override onlyRegisteredPool returns (uint256) {
+        require(user != address(0), "Manager/user cannot be empty");
+        address poolAddress = msg.sender;
+        IPoolTypes.PoolData storage poolData = pools[poolAddress];
+        
+        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.DISCOUNTED) return 0;
+        
+        uint256 userShares = IERC20(poolAddress).balanceOf(user);
+        if (userShares == 0) return 0;
+        
+        uint256 totalShares = IERC20(poolAddress).totalSupply();
+        if (totalShares == 0) return 0;
+        
+        return (userShares * poolData.totalDiscountEarned) / totalShares;
+    }
+    
+
+    function claimMaturityEntitlement(address user) external view override onlyRegisteredPool returns (uint256) {
+        require(user != address(0), "Manager/user cannot be empty");
+        address poolAddress = msg.sender;
+        IPoolTypes.PoolData storage poolData = pools[poolAddress];
+        
+        require(poolData.status == IPoolTypes.PoolStatus.MATURED, NotMatured());
+        require(block.timestamp >= poolData.config.maturityDate, NotMatured());
+        
+        uint256 userShares = IERC20(poolAddress).balanceOf(user);
+        if (userShares == 0) return 0;
+        
+        uint256 totalReturns = _calculateTotalReturns(poolAddress);
+        uint256 totalShares = IERC20(poolAddress).totalSupply();
+        
+        return (userShares * totalReturns) / totalShares;
     }
 
 
@@ -420,9 +507,6 @@ contract Manager is IPoolManager, ReentrancyGuard {
     /////////////////////////////// INTERNAL HELPERS ///////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function _calculateFaceValue(uint256 actualRaised, uint256 discountRate) internal pure returns (uint256) {
-        return CalculationLibrary.calculateFaceValue(actualRaised, discountRate);
-    }
     
     function _handleFundingWithdrawal(
         address poolAddress, 
@@ -441,11 +525,14 @@ contract Manager is IPoolManager, ReentrancyGuard {
         require(pools[poolAddress].totalRaised >= assets, InsufficientPoolBalance());
         pools[poolAddress].totalRaised -= assets;
         
-        if (userShares <= shares) {
-            poolUsers[poolAddress][owner].depositTime = 0;
-        }
         
         ILiquidityPool(poolAddress).burnShares(owner, shares);
+
+        uint256 remainingShares = IERC20(poolAddress).balanceOf(owner);
+
+        if (remainingShares == 0 ) {
+            poolUsers[poolAddress][owner].depositTime = 0;
+        }
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
@@ -474,6 +561,8 @@ contract Manager is IPoolManager, ReentrancyGuard {
         shares = userShares;
         ILiquidityPool(poolAddress).burnShares(owner, shares);
         
+        poolUsers[poolAddress][owner].depositTime = 0;
+        
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
         escrowContract.releaseFunds(receiver, userEntitlement);
@@ -483,41 +572,35 @@ contract Manager is IPoolManager, ReentrancyGuard {
     }
     
     function _handleEmergencyWithdrawal(
-        address poolAddress, 
-        uint256 assets, 
-        address receiver, 
-        address owner
-    ) internal returns (uint256 shares) {
-        uint256 userShares = IERC20(poolAddress).balanceOf(owner);
-        require(userShares != 0, NoShares());
-        
-        uint256 maxRefund = _getUserRefundInternal(poolAddress, owner);
-        require(maxRefund != 0, NoRefundAvailable());
-        require(assets <= maxRefund, ExceedsRefundAmount());
-        
-        shares = (assets * userShares) / maxRefund;
-        
-        ILiquidityPool(poolAddress).burnShares(owner, shares);
-        
-        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
-        IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
-        escrowContract.releaseFunds(receiver, assets);
-        
-        emit Withdraw(msg.sender, receiver, owner, assets, shares);
-        return shares;
+    address poolAddress, 
+    uint256 assets, 
+    address receiver, 
+    address owner
+) internal returns (uint256 shares) {
+    uint256 userShares = IERC20(poolAddress).balanceOf(owner);
+    require(userShares != 0, NoShares());
+    
+    
+    require(assets <= userShares, ExceedsRefundAmount());
+    
+
+    shares = assets;
+    
+    ILiquidityPool(poolAddress).burnShares(owner, shares);
+
+    uint256 remainingShares = IERC20(poolAddress).balanceOf(owner);
+    if (remainingShares == 0) {
+        poolUsers[poolAddress][owner].depositTime = 0;
     }
     
-    function _getUserRefundInternal(address poolAddress, address user) internal view returns (uint256) {
-        if (pools[poolAddress].status != IPoolTypes.PoolStatus.EMERGENCY) return 0;
-        
-        uint256 userShares = IERC20(poolAddress).balanceOf(user);
-        if (userShares == 0) return 0;
-        
-        uint256 totalShares = IERC20(poolAddress).totalSupply();
-        if (totalShares == 0) return 0;
-        
-        return (userShares * pools[poolAddress].totalRaised) / totalShares;
-    }
+    IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
+    IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
+    escrowContract.releaseFunds(receiver, assets);
+    
+    emit Withdraw(msg.sender, receiver, owner, assets, shares);
+    return shares;
+}
+    
     
     function _calculateCurrentPoolValue(address poolAddress) internal view returns (uint256) {
         require(poolAddress != address(0), "Manager/address cannot be null");
@@ -531,7 +614,7 @@ contract Manager is IPoolManager, ReentrancyGuard {
     }
     
     function _calculateTotalReturns(address poolAddress) internal view returns (uint256) {
-                require(poolAddress != address(0), "Manager/ address cannot be null");
+        require(poolAddress != address(0), "Manager/ address cannot be null");
         require(registry.isRegisteredPool(poolAddress), InvalidPool());
 
         IPoolTypes.PoolData storage poolData = pools[poolAddress];
@@ -555,10 +638,6 @@ contract Manager is IPoolManager, ReentrancyGuard {
         return false;
     }
     
-    function _calculateExpectedCoupons(IPoolTypes.PoolData storage poolData) internal view returns (uint256) {
-
-        return CalculationLibrary.calculateExpectedCoupons(poolData);
-    }
 
     
     function _updateStatus(address poolAddress, IPoolTypes.PoolStatus newStatus) internal {
@@ -567,123 +646,64 @@ contract Manager is IPoolManager, ReentrancyGuard {
         emit StatusChanged(oldStatus, newStatus);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// USER CALCULATIONS ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
-    function calculateUserReturn(address user) external view override onlyRegisteredPool returns (uint256) {
-        require (user != address(0), "Manager/user cannot be empty");
-        address poolAddress = msg.sender;
-        IPoolTypes.PoolData storage poolData = pools[poolAddress];
-
-        return CalculationLibrary.calculateUserReturn(
-            poolData,
-            user,
-            poolAddress
-        );
-      
-    }
-    
-    function calculateUserDiscount(address user) external view override onlyRegisteredPool returns (uint256) {
-        address poolAddress = msg.sender;
-        IPoolTypes.PoolData storage poolData = pools[poolAddress];
-        
-        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.DISCOUNTED) return 0;
-        
-        uint256 userShares = IERC20(poolAddress).balanceOf(user);
-        if (userShares == 0) return 0;
-        
-        uint256 totalShares = IERC20(poolAddress).totalSupply();
-        if (totalShares == 0) return 0;
-        
-        return (userShares * pools[poolAddress].totalDiscountEarned) / totalShares;
-    }
-    
-    function calculateMaturityValue() external view override onlyRegisteredPool returns (uint256) {
-        address poolAddress = msg.sender;
-        IPoolTypes.PoolData storage poolData = pools[poolAddress];
-        
-        if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
-            if (poolData.config.faceValue > 0) {
-                return poolData.config.faceValue;
-            } else {
-                // During funding phase, calculate estimated face value
-                return _calculateFaceValue(poolData.config.targetRaise, poolData.config.discountRate);
-            }
-        } else {
-            uint256 principal = pools[poolAddress].actualInvested;
-            if (principal == 0) {
-                // During funding phase, use target raise as estimated principal
-                principal = poolData.config.targetRaise;
-            }
-            uint256 expectedCoupons = _calculateExpectedCoupons(poolData);
-            return principal + expectedCoupons;
-        }
-    }
-
-    function claimMaturityEntitlement(address user) external view override returns (uint256) {
-        address poolAddress = msg.sender;
-        IPoolTypes.PoolData storage poolData = pools[poolAddress];
-        
-        require(pools[poolAddress].status == IPoolTypes.PoolStatus.MATURED, NotMatured());
-        require(block.timestamp >= poolData.config.maturityDate, NotMatured());
-        
-        uint256 userShares = IERC20(poolAddress).balanceOf(user);
-        if (userShares == 0) return 0;
-        
-        uint256 totalReturns = _calculateTotalReturns(poolAddress);
-        uint256 totalShares = IERC20(poolAddress).totalSupply();
-        
-        return (userShares * totalReturns) / totalShares;
-    }
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// EMERGENCY FUNCTIONS //////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
+    /**
+     * @notice Pool self-reports emergency situation
+     * @dev Called by pool contract when it detects issues requiring emergency status
+     */
     function emergencyExit() external override onlyValidPool {
         address poolAddress = msg.sender;
-        _updateStatus(poolAddress, IPoolTypes.PoolStatus.EMERGENCY);
-        emit EmergencyExit(msg.sender, block.timestamp);
-    }
-    
-    function cancelPool(address poolAddress) external  onlyRole(accessManager.EMERGENCY_ROLE()) {
-        require(registry.isRegisteredPool(poolAddress), InvalidPool());
-        require(pools[poolAddress].status == IPoolTypes.PoolStatus.FUNDING, NotInFunding());
         
         _updateStatus(poolAddress, IPoolTypes.PoolStatus.EMERGENCY);
-        emit EmergencyExit(msg.sender, block.timestamp);
+        _emitEmergencyMetrics(poolAddress, "POOL_SELF_REPORT");
+        
+        emit EmergencyExit(poolAddress, block.timestamp);
+    }
+    
+    /**
+     * @notice Admin cancels a pool and puts it in emergency state
+     * @dev Called by emergency role for governance/regulatory cancellations
+     * @param poolAddress Pool to cancel
+     */
+    function cancelPool(address poolAddress) external onlyRole(accessManager.EMERGENCY_ROLE()) {
+        ValidationLibrary.validatePoolCancellation(pools[poolAddress], registry, poolAddress);
+        
+        _updateStatus(poolAddress, IPoolTypes.PoolStatus.EMERGENCY);
+        _emitEmergencyMetrics(poolAddress, "ADMIN_CANCELLATION");
+        
+        emit PoolCancelled(poolAddress, msg.sender, block.timestamp);
     }
 
-   
-    
 
 
-    function getUserRefund(address user) external view override returns (uint256) {
-        address poolAddress = msg.sender;
-        
-        if (pools[poolAddress].status != IPoolTypes.PoolStatus.EMERGENCY) return 0;
-        
-        uint256 userShares = IERC20(poolAddress).balanceOf(user);
-        if (userShares == 0) return 0;
-        
+
+    /**
+     * @notice Internal helper to emit emergency state change metrics
+     * @param poolAddress Pool entering emergency state
+     * @param trigger Source of emergency (self-report, admin cancel, etc.)
+     */
+    function _emitEmergencyMetrics(address poolAddress, string memory trigger) internal {
+        uint256 totalRefundable = pools[poolAddress].totalRaised;
         uint256 totalShares = IERC20(poolAddress).totalSupply();
-        if (totalShares == 0) return 0;
-        
-        return (userShares * pools[poolAddress].totalRaised) / totalShares;
+        emit EmergencyStateChanged(poolAddress, trigger, totalRefundable, totalShares, block.timestamp);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// ADMIN FUNCTIONS //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function pausePool(address poolAddress) external onlyRole(accessManager.OPERATOR_ROLE()) {
+    function pausePool(address poolAddress) external override onlyRole(accessManager.OPERATOR_ROLE()) {
         require(registry.isRegisteredPool(poolAddress), InvalidPool());
         ILiquidityPool(poolAddress).pause();
         emit PoolPaused(poolAddress, block.timestamp);
     }
     
-    function unpausePool(address poolAddress) external onlyRole(accessManager.OPERATOR_ROLE()) {
+    function unpausePool(address poolAddress) external override onlyRole(accessManager.OPERATOR_ROLE()) {
         require(registry.isRegisteredPool(poolAddress), InvalidPool());
         ILiquidityPool(poolAddress).unpause();
         emit PoolUnpaused(poolAddress, block.timestamp);
@@ -741,9 +761,6 @@ contract Manager is IPoolManager, ReentrancyGuard {
         return poolUsers[pool][user].depositTime;
     }
     
-    function poolStatus(address pool) external view returns (IPoolTypes.PoolStatus) {
-        return pools[pool].status;
-    }
     
     function poolFundsWithdrawnBySPV(address pool) external view returns (uint256) {
         return pools[pool].fundsWithdrawnBySPV;
@@ -789,4 +806,9 @@ contract Manager is IPoolManager, ReentrancyGuard {
         
        return  CalculationLibrary.calculateExpectedReturn(poolData);
     }
+
+    function getPoolStatus() external view override onlyRegisteredPool returns (uint8) {
+        return uint8(pools[msg.sender].status);
+    }
+
 } 

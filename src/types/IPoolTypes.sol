@@ -47,6 +47,7 @@ interface IPoolTypes {
      * @param couponRates Array of coupon rates in basis points
      * @param refundGasFee Gas fee for refunds
      * @param discountRate Discount rate in basis points for discounted instruments
+     * @param minimumFundingThreshold Minimum percentage of targetRaise required to proceed (basis points)
      */
     struct PoolConfig {
         InstrumentType instrumentType;
@@ -59,6 +60,7 @@ interface IPoolTypes {
         uint256[] couponRates;
         uint256 refundGasFee;
         uint256 discountRate; // (basis points)
+        uint256 minimumFundingThreshold; // (basis points) 
     }
     
     /**
@@ -70,6 +72,7 @@ interface IPoolTypes {
      * @param totalDiscountEarned Total discount earned for discounted instruments
      * @param totalCouponsReceived Total coupon payments received from SPV
      * @param totalCouponsDistributed Total coupons distributed to users
+     * @param totalCouponsClaimed Total coupons actually claimed by users
      * @param fundsWithdrawnBySPV Total funds withdrawn by SPV for investment
      * @param fundsReturnedBySPV Total funds returned by SPV
      */
@@ -81,6 +84,7 @@ interface IPoolTypes {
         uint256 totalDiscountEarned;
         uint256 totalCouponsReceived;
         uint256 totalCouponsDistributed;
+        uint256 totalCouponsClaimed;
         uint256 fundsWithdrawnBySPV;
         uint256 fundsReturnedBySPV;
     }

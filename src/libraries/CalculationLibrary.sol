@@ -128,15 +128,16 @@ library CalculationLibrary {
      * @param poolData Storage reference to pool data
      * @return Total returns amount available for withdrawal
      * @notice For discounted instruments: returns the full face value
-     * @notice For interest-bearing instruments: returns invested amount plus undistributed coupons
+     * @notice For interest-bearing instruments: returns maturity principal plus undistributed coupons
      * @notice Used when pool reaches MATURED status
      */
     function calculateTotalReturns(IPoolTypes.PoolData storage poolData) public view returns (uint256) {
         if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
             return poolData.config.faceValue;
         } else {
+           
             uint256 undistributedCoupons = poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
-            return poolData.actualInvested + undistributedCoupons;
+            return poolData.fundsReturnedBySPV + undistributedCoupons;
         }
     }
 

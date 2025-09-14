@@ -92,7 +92,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     /////////////////////////////// EMERGENCY FUNCTIONS //////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function claimRefund() external whenNotPaused {
+    function claimRefund() external {
         require(pendingRefunds[msg.sender] > 0, "LiquidityPool/no-refund-available");
         
         uint256 refundAmount = pendingRefunds[msg.sender];
@@ -112,17 +112,36 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         emit RefundClaimed(msg.sender, refundAmount);
     }
     
-    function emergencyWithdraw() external whenNotPaused {
+    function emergencyWithdraw() external {
+        // Check pool is in emergency status
+        require(manager.getPoolStatus() == 6, "LiquidityPool/not-in-emergency"); // EMERGENCY = 6
+        
         uint256 userShares = balanceOf(msg.sender);
         require(userShares > 0, "LiquidityPool/no-shares");
         
-        uint256 refundAmount = manager.getUserRefund(msg.sender);
-        require(refundAmount > 0, "LiquidityPool/no-refund-available");
+        // Calculate proportional refund on-the-fly based on pool status
+        uint256 totalShares = totalSupply();
+        require(totalShares > 0, "LiquidityPool/no-total-shares");
         
+        // Get available funds based on pool state
+        uint256 totalAvailable = _getEmergencyRefundPool();
+        uint256 userRefund = (userShares * totalAvailable) / totalShares;
+        require(userRefund > 0, "LiquidityPool/no-refund-available");
+        
+        // Burn user's shares and process withdrawal
         _burn(msg.sender, userShares);
-        manager.handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
+        manager.handleWithdraw(address(this), userRefund, msg.sender, msg.sender, msg.sender);
         
-        emit EmergencyWithdrawal(msg.sender, refundAmount, userShares);
+        emit EmergencyWithdrawal(msg.sender, userRefund, userShares);
+    }
+    
+    /**
+     * @dev Get total funds available for emergency distribution
+     * @return Total amount available for proportional emergency refunds
+     */
+    function _getEmergencyRefundPool() internal view returns (uint256) {
+        // Get total raised amount (what users deposited)
+        return manager.poolTotalRaised(address(this));
     }
     
     /**
@@ -218,7 +237,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         return manager.isInFundingPeriod();
     }
     
-    function isMatured() external view returns (bool) {
+    function isPoolMatured() external view returns (bool) {
         return manager.isMatured();
     }
     
@@ -228,6 +247,27 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     
     function getExpectedReturn() external view returns (uint256) {
         return manager.getExpectedReturn();
+    }
+    
+
+    function getPoolStatus() external view returns (uint8) {
+        return manager.getPoolStatus();
+    }
+    
+    function isInFundingPhase() external view returns (bool) {
+        return manager.getPoolStatus() == 0; // FUNDING = 0
+    }
+    
+    function isActive() external view returns (bool) {
+        return manager.getPoolStatus() == 2; // INVESTED = 2  
+    }
+    
+    function isMatured() external view returns (bool) {
+        return manager.getPoolStatus() == 3; // MATURED = 3
+    }
+    
+    function isInEmergency() external view returns (bool) {
+        return manager.getPoolStatus() == 4; // EMERGENCY = 4
     }
 }
 
