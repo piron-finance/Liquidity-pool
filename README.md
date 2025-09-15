@@ -202,19 +202,18 @@ Manager.processInvestment(poolAddress, actualAmount, "proof-hash")
 1. `Manager.withdrawFundsForInvestment()` - SPV withdraws funds from escrow
 2. `PoolEscrow.withdrawForInvestment()` - Release funds to SPV
 3. `Manager.processInvestment()` - Process SPV investment confirmation
-4. `Manager._validateSlippageProtection()` - Validate investment amount (±5% tolerance)
-5. `Manager._updateStatus()` - Update to INVESTED status
+4. `Manager._updateStatus()` - Update to INVESTED status
 
 **Business Logic:**
 
 ```solidity
-uint256 expectedAmount = poolTotalRaised[pool];
-// Fixed 5% slippage protection (hardcoded)
-uint256 minAmount = (expectedAmount * 9500) / 10000; // 5% below expected
-uint256 maxAmount = (expectedAmount * 10500) / 10000; // 5% above expected
-require(actualAmount >= minAmount && actualAmount <= maxAmount, "SlippageProtectionTriggered");
+
+require(actualAmount <= poolTotalRaised[pool], "Cannot invest more than raised");
+require(actualAmount > 0, "Must invest some amount");
 
 if (instrumentType == DISCOUNTED) {
+
+    faceValue = calculateFaceValue(actualAmount, discountRate);
     uint256 totalDiscount = faceValue - actualAmount;
     poolTotalDiscountEarned[pool] = totalDiscount;
 }
@@ -542,3 +541,36 @@ forge test --gas-report
 3. **Emergency Mechanisms:** Multiple emergency exit options
 4. **Single Point Control:** Manager controls all fund releases from escrow
 5. **Withdrawal Restrictions:** Early withdrawals blocked during investment period
+
+## Known Limitations & Future Enhancements
+
+### Current Limitations
+
+1. **No Partial Allocation Refunds:** When SPV cannot secure full allocation (e.g., raises $100k but only invests $80k), there's no mechanism to refund the excess $20k to users proportionally.
+
+2. **Rigid Investment Flow:** The system assumes SPV will either invest the full amount or fail completely - no middle ground for partial investments.
+
+3. **Fee Integration:** FeeManager exists but is not integrated with core flows.
+
+### Planned Enhancements (TODO2.md)
+
+The following features are planned for implementation to handle real-world SPV allocation constraints:
+
+1. **Partial Allocation System**
+
+   - Allow SPV to invest less than total raised
+   - Implement proportional excess fund refunds
+   - New pool state: `PARTIALLY_ALLOCATED`
+
+2. **Enhanced User Experience**
+
+   - Users can claim excess refunds automatically
+   - Adjusted share calculations after partial allocation
+   - Clear UI indicators for partial allocation scenarios
+
+3. **Flexible Investment Processing**
+   - Remove rigid slippage protection (✅ **COMPLETED**)
+   - Support any investment amount ≤ total raised
+   - Auto-calculate user refunds and adjusted positions
+
+See `TODO2.md` for detailed implementation plan.

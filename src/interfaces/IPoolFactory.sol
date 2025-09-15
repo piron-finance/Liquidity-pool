@@ -28,6 +28,7 @@ interface IPoolFactory {
         address spvAddress;
         uint256[] couponDates;
         uint256[] couponRates;
+        uint256 minimumFundingThreshold;
     }
     
     function createPool(PoolConfig memory config) external returns (address pool, address escrow);

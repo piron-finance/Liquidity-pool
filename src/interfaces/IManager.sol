@@ -73,6 +73,7 @@ interface IPoolManager {
     function totalDiscountEarned() external view returns (uint256);
     function totalCouponsReceived() external view returns (uint256);
     function userDepositTime(address user) external view returns (uint256);
+    function poolTotalRaised(address pool) external view returns (uint256);
     
     function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external returns (uint256 shares);
     function handleWithdraw(address liquidityPool, uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
@@ -86,11 +87,8 @@ interface IPoolManager {
     
     function calculateUserReturn(address user) external view returns (uint256);
     function calculateUserDiscount(address user) external view returns (uint256);
-    function calculateMaturityValue() external view returns (uint256);
     function getUserAvailableCoupon(address liquidityPool, address user) external view returns (uint256);
     function claimMaturityEntitlement(address user) external view returns (uint256);
-    
-    function getUserRefund(address user) external view returns (uint256);
     
     function emergencyExit() external;
     function pausePool(address liquidityPool) external;
@@ -105,6 +103,11 @@ interface IPoolManager {
     function isMatured() external view returns (bool);
     function getTimeToMaturity() external view returns (uint256);
     function getExpectedReturn() external view returns (uint256);
+    function getPoolStatus() external view returns (uint8);
+    
+    // Coupon tracking functions
+    function getUnclaimedCoupons(address liquidityPool) external view returns (uint256);
+
     
     // Upgrade management functions
     function setTimelockController(address newTimelockController) external;

@@ -167,7 +167,8 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
             couponDates: config.couponDates,
             couponRates: config.couponRates,
             refundGasFee: 0,
-            discountRate: config.discountRate
+            discountRate: config.discountRate,
+            minimumFundingThreshold: config.minimumFundingThreshold
         }));
         
         emit PoolCreated(pool, manager, config.asset, config.instrumentName, config.targetRaise, config.maturityDate);
