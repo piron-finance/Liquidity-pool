@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 import "../types/IPoolTypes.sol";
 
 interface IPoolManager {
+    // Custom Errors
     error CallerNotPool();
     error InvalidPool();
     error OnlyFactory();
@@ -18,11 +19,13 @@ interface IPoolManager {
     error NotFundingPhase();
     error ExceedsTarget();
     error FundingEnded();
+    error CallerMustBePool();
     error InvalidReceiver();
     error InvalidOwner();
     error InvalidSender();
     error InvalidAmount();
     error InsufficientAllowance();
+    error InvalidShares();
     error InsufficientShares();
     error NotInFunding();
     error EpochNotEnded();
@@ -40,12 +43,15 @@ interface IPoolManager {
     error NoCouponsDistributed();
     error NoNewCoupons();
     error DiscountRateTooHigh();
-error InsufficientPoolBalance();
-error ExceedsRefundAmount();
+    error InsufficientPoolBalance();
+    error InsufficientLiquidity();
+    error NoRefundAvailable();
+    error ExceedsRefundAmount();
     error CouponConfigMismatch();
     error InvalidCouponDates();
     error NotEmergencyStatus();
     error WithdrawalNotAllowed();
+    error SlippageProtectionTriggered();
 
     
     event Deposit(address liquidityPool, address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
@@ -67,6 +73,7 @@ error ExceedsRefundAmount();
     function totalDiscountEarned() external view returns (uint256);
     function totalCouponsReceived() external view returns (uint256);
     function userDepositTime(address user) external view returns (uint256);
+    function poolTotalRaised(address pool) external view returns (uint256);
     
     function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external returns (uint256 shares);
     function handleWithdraw(address liquidityPool, uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
@@ -81,11 +88,7 @@ error ExceedsRefundAmount();
     function calculateUserReturn(address user) external view returns (uint256);
     function calculateUserDiscount(address user) external view returns (uint256);
     function getUserAvailableCoupon(address liquidityPool, address user) external view returns (uint256);
-    function getUnclaimedCoupons(address liquidityPool) external view returns (uint256);
-    function getUndistributedCoupons(address liquidityPool) external view returns (uint256);
     function claimMaturityEntitlement(address user) external view returns (uint256);
-    
-  
     
     function emergencyExit() external;
     function pausePool(address liquidityPool) external;
@@ -100,9 +103,16 @@ error ExceedsRefundAmount();
     function isMatured() external view returns (bool);
     function getTimeToMaturity() external view returns (uint256);
     function getExpectedReturn() external view returns (uint256);
-    
-
     function getPoolStatus() external view returns (uint8);
     
-    function poolTotalRaised(address pool) external view returns (uint256);
+    // Coupon tracking functions
+    function getUnclaimedCoupons(address liquidityPool) external view returns (uint256);
+    
+    // Upgrade management functions
+    function setTimelockController(address newTimelockController) external;
+    function version() external view returns (uint256);
+    
+    // Additional events for upgradeability
+    event ManagerUpgraded(address indexed oldImplementation, address indexed newImplementation, uint256 version);
+    event TimelockControllerUpdated(address indexed oldController, address indexed newController);
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../types/IPoolTypes.sol";
@@ -11,24 +11,6 @@ import "../interfaces/IPoolRegistry.sol";
  * @notice This library centralizes all validation logic 
  */
 library ValidationLibrary {
-    
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// CUSTOM ERRORS //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    error InvalidAmount();
-    error InvalidReceiver();
-    error InvalidOwner();
-    error InvalidSender();
-    error InvalidPool();
-    error AssetNotApproved();
-    error NotFundingPhase();
-    error FundingEnded();
-    error ExceedsTarget();
-    error NotInEmergency();
-    error NotMatured();
-    error WithdrawalsNotAllowed();
-    error NotDiscountedInstrument();
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// DEPOSIT VALIDATIONS //////////////////////////
@@ -50,20 +32,20 @@ library ValidationLibrary {
         uint256 assets,
         address receiver
     ) internal view {
-        require(assets != 0, InvalidAmount());
-        require(receiver != address(0), InvalidReceiver());
-        require(poolRegistry.isRegisteredPool(poolAddress), InvalidPool());
+        require(assets != 0, "ValidationLibrary/invalid amount");
+        require(receiver != address(0), "ValidationLibrary/invalid receiver");
+        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
         
 
-        require(poolData.status == IPoolTypes.PoolStatus.FUNDING, NotFundingPhase());
+        require(poolData.status == IPoolTypes.PoolStatus.FUNDING, "ValidationLibrary/not funding phase");
         
-        require(block.timestamp <= poolData.config.epochEndTime, FundingEnded());
+        require(block.timestamp <= poolData.config.epochEndTime, "ValidationLibrary/funding ended");
         
-        require(poolData.totalRaised + assets <= poolData.config.targetRaise, ExceedsTarget());
+        require(poolData.totalRaised + assets <= poolData.config.targetRaise, "ValidationLibrary/exceeds target");
         
         IPoolRegistry.PoolInfo memory poolInfo = poolRegistry.getPoolInfo(poolAddress);
-        require(poolInfo.createdAt != 0, InvalidPool());
-        require(poolRegistry.isApprovedAsset(poolInfo.asset), AssetNotApproved());
+        require(poolInfo.createdAt != 0, "ValidationLibrary/invalid pool");
+        require(poolRegistry.isApprovedAsset(poolInfo.asset), "ValidationLibrary/asset not approved");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -85,8 +67,8 @@ library ValidationLibrary {
         address owner
     ) internal view {
         // Basic parameter validation
-        require(owner != address(0), InvalidOwner());
-        require(poolRegistry.isRegisteredPool(poolAddress), InvalidPool());
+        require(owner != address(0), "ValidationLibrary/invalid owner");
+        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
         
         // Pool status validation - Allow withdrawals in specific states
         bool canWithdraw = poolData.status == IPoolTypes.PoolStatus.MATURED || 
@@ -94,7 +76,7 @@ library ValidationLibrary {
                           (poolData.status == IPoolTypes.PoolStatus.INVESTED && 
                            block.timestamp >= poolData.config.maturityDate);
         
-        require(canWithdraw, WithdrawalsNotAllowed());
+        require(canWithdraw, "ValidationLibrary/withdrawals not allowed");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -113,8 +95,8 @@ library ValidationLibrary {
         IPoolRegistry poolRegistry,
         address poolAddress
     ) internal view {
-        require(poolRegistry.isRegisteredPool(poolAddress), InvalidPool());
-        require(poolData.status == IPoolTypes.PoolStatus.EMERGENCY, NotInEmergency());
+        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
+        require(poolData.status == IPoolTypes.PoolStatus.EMERGENCY, "ValidationLibrary/not in emergency");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -133,9 +115,9 @@ library ValidationLibrary {
         IPoolRegistry poolRegistry,
         address poolAddress
     ) internal view {
-        require(poolRegistry.isRegisteredPool(poolAddress), InvalidPool());
-        require(poolData.status == IPoolTypes.PoolStatus.MATURED, NotMatured());
-        require(poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED, NotDiscountedInstrument());
+        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
+        require(poolData.status == IPoolTypes.PoolStatus.MATURED, "ValidationLibrary/not matured");
+        require(poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED, "ValidationLibrary/not discounted instrument");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -156,10 +138,10 @@ library ValidationLibrary {
         address poolAddress,
         uint256 finalAmount
     ) internal view {
-        require(poolRegistry.isRegisteredPool(poolAddress), InvalidPool());
-        require(poolData.status == IPoolTypes.PoolStatus.INVESTED, "NotInvested");
-        require(block.timestamp >= poolData.config.maturityDate, NotMatured());
-        require(finalAmount != 0, InvalidAmount());
+        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
+        require(poolData.status == IPoolTypes.PoolStatus.INVESTED, "ValidationLibrary/not invested");
+        require(block.timestamp >= poolData.config.maturityDate, "ValidationLibrary/not matured");
+        require(finalAmount != 0, "ValidationLibrary/invalid amount");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -178,8 +160,8 @@ library ValidationLibrary {
         IPoolRegistry poolRegistry,
         address poolAddress
     ) internal view {
-        require(poolRegistry.isRegisteredPool(poolAddress), InvalidPool());
-        require(poolData.status == IPoolTypes.PoolStatus.FUNDING, NotFundingPhase());
+        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
+        require(poolData.status == IPoolTypes.PoolStatus.FUNDING, "ValidationLibrary/not funding phase");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -194,9 +176,9 @@ library ValidationLibrary {
      */
     function validateAddress(address addr, bool isReceiver) internal pure {
         if (isReceiver) {
-            require(addr != address(0), InvalidReceiver());
+            require(addr != address(0), "ValidationLibrary/invalid receiver");
         } else {
-            require(addr != address(0), InvalidSender());
+            require(addr != address(0), "ValidationLibrary/invalid sender");
         }
     }
 
@@ -206,7 +188,7 @@ library ValidationLibrary {
      * @param amount Amount to validate
      */
     function validateAmount(uint256 amount) internal pure {
-        require(amount != 0, InvalidAmount());
+        require(amount != 0, "ValidationLibrary/invalid amount");
     }
 
     /**
@@ -219,6 +201,6 @@ library ValidationLibrary {
         IPoolRegistry poolRegistry,
         address poolAddress
     ) internal view {
-        require(poolRegistry.isRegisteredPool(poolAddress), InvalidPool());
+        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
     }
 }

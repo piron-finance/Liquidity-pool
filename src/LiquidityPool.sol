@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC4626Upgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "./interfaces/ILiquidityPool.sol";
 import "./interfaces/IManager.sol";
 
-contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
+contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, ILiquidityPool, PausableUpgradeable {
     using SafeERC20 for IERC20;
     
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// STATE VARIABLES //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
     
-    IPoolManager public immutable manager;
-    address public immutable escrow;
+    IPoolManager public manager;
+    address public escrow;
 
     mapping(address => uint256) public override pendingRefunds;
     mapping(address => uint256) public override discountedBillsAccrued; 
@@ -36,15 +38,33 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     /////////////////////////////// CONSTRUCTOR //////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    constructor(
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+    
+    /**
+     * @notice Initialize the LiquidityPool contract
+     * @param asset_ The underlying ERC20 asset
+     * @param name_ Pool token name
+     * @param symbol_ Pool token symbol
+     * @param _manager Manager contract address
+     * @param _escrow Pool escrow contract address
+     */
+    function initialize(
         IERC20 asset_, 
         string memory name_, 
         string memory symbol_, 
         address _manager, 
         address _escrow
-    ) ERC4626(asset_) ERC20(name_, symbol_) {
+    ) public initializer {
         require(_manager != address(0), "LiquidityPool/invalid-manager");
         require(_escrow != address(0), "LiquidityPool/invalid-escrow");
+        
+        __ERC4626_init(asset_);
+        __ERC20_init(name_, symbol_);
+        __Pausable_init();
+        __UUPSUpgradeable_init();
         
         manager = IPoolManager(_manager);
         escrow = _escrow;
@@ -54,7 +74,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     /////////////////////////////// ERC4626 DEPOSIT FUNCTIONS ///////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function deposit(uint256 assets, address receiver) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
+    function deposit(uint256 assets, address receiver) public override(ERC4626Upgradeable, IERC4626) whenNotPaused returns (uint256) {
         require(assets > 0, "LiquidityPool/Non zero deposits allowed");
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         require(IERC20(asset()).balanceOf(msg.sender) >= assets, "LiquidityPool/Insufficient balance");
@@ -68,7 +88,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         return shares;
     }
     
-    function mint(uint256 shares, address receiver) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
+    function mint(uint256 shares, address receiver) public override(ERC4626Upgradeable, IERC4626) whenNotPaused returns (uint256) {
         require(shares > 0, "LiquidityPool/Non zero shares allowed");
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         
@@ -90,7 +110,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     /////////////////////////////// ERC4626 WITHDRAWAL FUNCTIONS ////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function withdraw(uint256 assets, address receiver, address owner) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
+    function withdraw(uint256 assets, address receiver, address owner) public override(ERC4626Upgradeable, IERC4626) whenNotPaused returns (uint256) {
         require(assets > 0, "LiquidityPool/Non zero assets allowed");
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         require(owner != address(0), "LiquidityPool/Valid owner required");
@@ -203,11 +223,11 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function paused() public view override(ILiquidityPool, Pausable) returns (bool) {
+    function paused() public view override(ILiquidityPool, PausableUpgradeable) returns (bool) {
         return super.paused();
     }
 
-    function totalAssets() public view override(ERC4626, IERC4626) returns (uint256) {
+    function totalAssets() public view override(ERC4626Upgradeable, IERC4626) returns (uint256) {
         return manager.calculateTotalAssets();
     }
 
@@ -260,5 +280,17 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
      */
     function _getEmergencyRefundPool() internal view returns (uint256) {
         return manager.poolTotalRaised(address(this));
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// UPGRADE AUTHORIZATION ////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @notice Disable upgrades for live pools
+     * @dev Pools should never be upgraded once deployed with user funds
+     */
+    function _authorizeUpgrade(address) internal pure override {
+        revert("Pool upgrades disabled for security");
     }
 }
