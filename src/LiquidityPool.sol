@@ -10,6 +10,10 @@ import "./interfaces/IManager.sol";
 contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     using SafeERC20 for IERC20;
     
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// STATE VARIABLES //////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+    
     IPoolManager public immutable manager;
     address public immutable escrow;
 
@@ -19,10 +23,18 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     uint256 public override totalPendingRefunds;
     uint256 public override totalDiscountAccrued;
 
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// MODIFIERS ///////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
     modifier onlyManager() {
         require(msg.sender == address(manager), "Only manager can call");
         _;
     }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// CONSTRUCTOR //////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
 
     constructor(
         IERC20 asset_, 
@@ -39,7 +51,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    ///////////////////////////////  DEPOSIT FLOW /////////////////////////
+    /////////////////////////////// ERC4626 DEPOSIT FUNCTIONS ///////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
     function deposit(uint256 assets, address receiver) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
@@ -75,7 +87,7 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    ///////////////////////////////  WITHDRAWAL FLOW //////////////////////
+    /////////////////////////////// ERC4626 WITHDRAWAL FUNCTIONS ////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
     function withdraw(uint256 assets, address receiver, address owner) public override(ERC4626, IERC4626) whenNotPaused returns (uint256) {
@@ -87,18 +99,17 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         
         return actualShares;
     }
-    
+
     ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EMERGENCY FUNCTIONS //////////////////////////
+    /////////////////////////////// EMERGENCY & REFUND FUNCTIONS ////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    function claimRefund() external {
+    function claimRefund() external whenNotPaused {
         require(pendingRefunds[msg.sender] > 0, "LiquidityPool/no-refund-available");
         
         uint256 refundAmount = pendingRefunds[msg.sender];
         uint256 userShares = balanceOf(msg.sender);
         
-       
         uint256 totalUserValue = manager.calculateUserReturn(msg.sender);
         uint256 sharesToBurn = totalUserValue > 0 ? (userShares * refundAmount) / totalUserValue : userShares;
         
@@ -112,42 +123,20 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         emit RefundClaimed(msg.sender, refundAmount);
     }
     
-    function emergencyWithdraw() external {
-        // Check pool is in emergency status
-        require(manager.getPoolStatus() == 6, "LiquidityPool/not-in-emergency"); // EMERGENCY = 6
-        
+    function emergencyWithdraw() external whenNotPaused {
         uint256 userShares = balanceOf(msg.sender);
         require(userShares > 0, "LiquidityPool/no-shares");
         
-        // Calculate proportional refund on-the-fly based on pool status
-        uint256 totalShares = totalSupply();
-        require(totalShares > 0, "LiquidityPool/no-total-shares");
+        // Let Manager handle all emergency withdrawal logic
+        uint256 actualShares = manager.handleWithdraw(address(this), userShares, msg.sender, msg.sender, msg.sender);
         
-        // Get available funds based on pool state
-        uint256 totalAvailable = _getEmergencyRefundPool();
-        uint256 userRefund = (userShares * totalAvailable) / totalShares;
-        require(userRefund > 0, "LiquidityPool/no-refund-available");
-        
-        // Burn user's shares and process withdrawal
-        _burn(msg.sender, userShares);
-        manager.handleWithdraw(address(this), userRefund, msg.sender, msg.sender, msg.sender);
-        
-        emit EmergencyWithdrawal(msg.sender, userRefund, userShares);
+        emit EmergencyWithdrawal(msg.sender, userShares, actualShares);
     }
-    
-    /**
-     * @dev Get total funds available for emergency distribution
-     * @return Total amount available for proportional emergency refunds
-     */
-    function _getEmergencyRefundPool() internal view returns (uint256) {
-        // Get total raised amount (what users deposited)
-        return manager.poolTotalRaised(address(this));
-    }
-    
-    /**
-     * @dev User claims their proportional coupon payment
-     * @notice Users can call this to claim their share of distributed coupons
-     */
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// COUPON FUNCTIONS ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
     function claimCoupon() external override whenNotPaused returns (uint256) {
         uint256 couponAmount = manager.claimUserCoupon(address(this), msg.sender);
         require(couponAmount > 0, "LiquidityPool/no-coupon-available");
@@ -156,9 +145,6 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         return couponAmount;
     }
     
-    /**
-     * @dev Get user's potential coupon amount
-     */
     function getUserCouponAmount(address user) external view override returns (uint256) {
         return IPoolManager(address(manager)).getUserAvailableCoupon(address(this), user);
     }
@@ -225,12 +211,18 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         return manager.calculateTotalAssets();
     }
 
+    // User-specific view functions
     function getUserReturn(address user) external view returns (uint256) {
         return manager.calculateUserReturn(user);
     }
     
     function getUserDiscount(address user) external view returns (uint256) {
         return manager.calculateUserDiscount(user);
+    }
+    
+    // Pool status view functions (using Manager as single source of truth)
+    function getPoolStatus() external view returns (uint8) {
+        return manager.getPoolStatus();
     }
     
     function isInFundingPeriod() external view returns (bool) {
@@ -249,27 +241,24 @@ contract LiquidityPool is ERC4626, ILiquidityPool, Pausable {
         return manager.getExpectedReturn();
     }
     
-
-    function getPoolStatus() external view returns (uint8) {
-        return manager.getPoolStatus();
-    }
-    
-    function isInFundingPhase() external view returns (bool) {
-        return manager.getPoolStatus() == 0; // FUNDING = 0
-    }
-    
+    // Pool state convenience functions
     function isActive() external view returns (bool) {
         return manager.getPoolStatus() == 2; // INVESTED = 2  
-    }
-    
-    function isMatured() external view returns (bool) {
-        return manager.getPoolStatus() == 3; // MATURED = 3
     }
     
     function isInEmergency() external view returns (bool) {
         return manager.getPoolStatus() == 4; // EMERGENCY = 4
     }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// INTERNAL FUNCTIONS ///////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @dev Get total funds available for emergency distribution
+     * @return Total amount available for proportional emergency refunds
+     */
+    function _getEmergencyRefundPool() internal view returns (uint256) {
+        return manager.poolTotalRaised(address(this));
+    }
 }
-
-
-

@@ -18,13 +18,11 @@ interface IPoolManager {
     error NotFundingPhase();
     error ExceedsTarget();
     error FundingEnded();
-    error CallerMustBePool();
     error InvalidReceiver();
     error InvalidOwner();
     error InvalidSender();
     error InvalidAmount();
     error InsufficientAllowance();
-    error InvalidShares();
     error InsufficientShares();
     error NotInFunding();
     error EpochNotEnded();
@@ -42,15 +40,12 @@ interface IPoolManager {
     error NoCouponsDistributed();
     error NoNewCoupons();
     error DiscountRateTooHigh();
-    error InsufficientPoolBalance();
-    error InsufficientLiquidity();
-    error NoRefundAvailable();
-    error ExceedsRefundAmount();
+error InsufficientPoolBalance();
+error ExceedsRefundAmount();
     error CouponConfigMismatch();
     error InvalidCouponDates();
     error NotEmergencyStatus();
     error WithdrawalNotAllowed();
-    error SlippageProtectionTriggered();
 
     
     event Deposit(address liquidityPool, address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
