@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 import "forge-std/Test.sol";
 import "forge-std/console.sol";
@@ -85,9 +85,9 @@ contract ManagerTest is Test {
         // Deploy core contracts
         usdc = new MockUSDC();
         accessManager = new AccessManager(admin);
-        registry = new PoolRegistry(address(accessManager));
-        manager = new Manager(address(registry), address(accessManager));
-        factory = new PoolFactory(address(registry), address(manager), address(accessManager));
+        registry = new PoolRegistry();
+        manager = new Manager();
+        factory = new PoolFactory();
         
         // Setup system configuration
         vm.startPrank(admin);

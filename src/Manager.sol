@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22; 
 
+
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -17,6 +18,7 @@ import "./libraries/ValidationLibrary.sol";
 
 contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuardUpgradeable {
 
+
     IPoolRegistry public registry;
     AccessManager public accessManager;
     
@@ -25,6 +27,9 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     
     mapping(address => IPoolTypes.PoolData) public pools;
     mapping(address => mapping(address => IPoolTypes.UserPoolData)) public poolUsers;
+    
+    address public timelockController;
+    uint256 public version;
     
     event PoolPaused(address indexed pool, uint256 timestamp);
     event PoolUnpaused(address indexed pool, uint256 timestamp);
@@ -46,6 +51,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     
     modifier onlyRegisteredPool() {
         require(registry.isRegisteredPool(msg.sender), "Manager/invalid pool");
+
         _;
     }
     
@@ -75,6 +81,8 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         _disableInitializers();
     }
 
+
+
     /**
      * @notice Initialize the Manager contract
      * @param _registry PoolRegistry contract address
@@ -97,17 +105,50 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         accessManager = AccessManager(_accessManager);
         timelockController = _timelockController;
         version = 1;
+
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// Access Control ///////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+    
+    /**
+     * @notice Authorize contract upgrades
+     * @param newImplementation New implementation contract address
+     * @dev Can only be called by timelock controller after delay
+     */
+    function _authorizeUpgrade(address newImplementation) internal override {
+        require(msg.sender == timelockController, "Only timelock can upgrade");
+        require(newImplementation != address(0), "Invalid implementation");
+        
+        version += 1;
+        emit ManagerUpgraded(address(this), newImplementation, version);
     }
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// ACCESS CONTROL ///////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
     
+    /**
+     * @notice Update access manager
+     * @param newAccessManager New access manager address
+     */
     function setAccessManager(address newAccessManager) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
         require(newAccessManager != address(0), "Manager/invalid access manager");
         address oldManager = address(accessManager);
         accessManager = AccessManager(newAccessManager);
         emit AccessManagerUpdated(oldManager, newAccessManager);
+    }
+    
+    /**
+     * @notice Update timelock controller
+     * @param newTimelockController New timelock controller address
+     */
+    function setTimelockController(address newTimelockController) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(newTimelockController != address(0), "Invalid timelock controller");
+        address oldController = timelockController;
+        timelockController = newTimelockController;
+        emit TimelockControllerUpdated(oldController, newTimelockController);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -163,6 +204,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     }
 
     function handleWithdraw(address liquidityPool, uint256 assets, address receiver, address owner, address sender) external override onlyRegisteredPool whenNotPaused nonReentrant returns (uint256 shares) {
+
          IPoolTypes.PoolData storage poolData = pools[liquidityPool];
         IPoolTypes.PoolStatus currentStatus = poolData.status;
 
@@ -175,6 +217,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         if (sender != owner) {
             uint256 allowed = IERC20(liquidityPool).allowance(owner, sender);
             require(allowed >= assets, "Manager/insufficient allowance");
+
         }
         
         if (currentStatus == IPoolTypes.PoolStatus.FUNDING) {
@@ -259,9 +302,11 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     ////////////////////////////////////////////////////////////////////////////////
 
     function withdrawFundsForInvestment(address liquidityPool, uint256 amount) external onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
+
         require(registry.isRegisteredPool(liquidityPool), "Manager/invalid pool");
         require(pools[liquidityPool].status == IPoolTypes.PoolStatus.PENDING_INVESTMENT, "Manager/not pending investment");
         require(amount != 0, "Manager/invalid amount");
+
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
@@ -273,6 +318,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         
         emit SPVFundsWithdrawn(liquidityPool, amount, transferId);
     }
+
 
     function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external override onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
         require(registry.isRegisteredPool(liquidityPool), "Manager/invalid pool");
@@ -294,6 +340,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
             if (poolData.config.couponDates.length > 0) {
                 require(poolData.config.couponDates.length == poolData.config.couponRates.length, "Manager/coupon config mismatch");
                 require(poolData.config.couponDates[0] > block.timestamp, "Manager/invalid coupon dates");
+
             }
         }
         
@@ -303,6 +350,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     }
     
     function processMaturity(address liquidityPool, uint256 finalAmount) external override onlyRole(accessManager.SPV_ROLE()) whenNotPaused {
+
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
         ValidationLibrary.validateMaturityProcessing(poolData, registry, liquidityPool, finalAmount);
        
@@ -674,6 +722,71 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     }
 
 
+    function calculateUserReturn(address user) external view override onlyRegisteredPool returns (uint256) {
+        require (user != address(0), "Manager/user cannot be empty");
+        address poolAddress = msg.sender;
+        IPoolTypes.PoolData storage poolData = pools[poolAddress];
+
+        return CalculationLibrary.calculateUserReturn(
+            poolData,
+            user,
+            poolAddress
+        );
+      
+    }
+    
+    function calculateUserDiscount(address user) external view override onlyRegisteredPool returns (uint256) {
+        address poolAddress = msg.sender;
+        IPoolTypes.PoolData storage poolData = pools[poolAddress];
+        
+        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.DISCOUNTED) return 0;
+        
+        uint256 userShares = IERC20(poolAddress).balanceOf(user);
+        if (userShares == 0) return 0;
+        
+        uint256 totalShares = IERC20(poolAddress).totalSupply();
+        if (totalShares == 0) return 0;
+        
+        return (userShares * pools[poolAddress].totalDiscountEarned) / totalShares;
+    }
+    
+    function calculateMaturityValue() external view override onlyRegisteredPool returns (uint256) {
+        address poolAddress = msg.sender;
+        IPoolTypes.PoolData storage poolData = pools[poolAddress];
+        
+        if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
+            if (poolData.config.faceValue > 0) {
+                return poolData.config.faceValue;
+            } else {
+                // During funding phase, calculate estimated face value
+                return _calculateFaceValue(poolData.config.targetRaise, poolData.config.discountRate);
+            }
+        } else {
+            uint256 principal = pools[poolAddress].actualInvested;
+            if (principal == 0) {
+                // During funding phase, use target raise as estimated principal
+                principal = poolData.config.targetRaise;
+            }
+            uint256 expectedCoupons = _calculateExpectedCoupons(poolData);
+            return principal + expectedCoupons;
+        }
+    }
+
+    function claimMaturityEntitlement(address user) external view override returns (uint256) {
+        address poolAddress = msg.sender;
+        IPoolTypes.PoolData storage poolData = pools[poolAddress];
+        
+        require(pools[poolAddress].status == IPoolTypes.PoolStatus.MATURED, "Not matured");
+        require(block.timestamp >= poolData.config.maturityDate, "Not matured");
+        
+        uint256 userShares = IERC20(poolAddress).balanceOf(user);
+        if (userShares == 0) return 0;
+        
+        uint256 totalReturns = _calculateTotalReturns(poolAddress);
+        uint256 totalShares = IERC20(poolAddress).totalSupply();
+        
+        return (userShares * totalReturns) / totalShares;
+    }
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// EMERGENCY FUNCTIONS //////////////////////////
@@ -692,6 +805,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         emit EmergencyExit(poolAddress, block.timestamp);
     }
     
+
     /**
      * @notice Admin cancels a pool and puts it in emergency state
      * @dev Called by emergency role for governance/regulatory cancellations
@@ -730,7 +844,9 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         emit PoolPaused(poolAddress, block.timestamp);
     }
     
+
     function unpausePool(address poolAddress) external override onlyRole(accessManager.OPERATOR_ROLE()) {
+
         require(registry.isRegisteredPool(poolAddress), "Manager/invalid pool");
         ILiquidityPool(poolAddress).unpause();
         emit PoolUnpaused(poolAddress, block.timestamp);

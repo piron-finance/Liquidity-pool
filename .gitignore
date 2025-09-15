@@ -16,6 +16,9 @@ docs/
 .cursor/
 
 look.txt
+look2.txt
+TODO.md
+UNIMPLEMENTED_FEATURES.md
 MANAGED_POOLS_IMPLEMENTATION.md
 V1.1_ARCHITECTURE.md
 V1.1_IMPLEMENTATION_PLAN.md
@@ -25,3 +28,4 @@ look2.txt
 
 # TODO files
 TODO2.md
+
