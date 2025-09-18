@@ -5,6 +5,7 @@ import "./interfaces/IPoolRegistry.sol";
 import "./AccessManager.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
     address public override factory;
@@ -20,13 +21,66 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
     address[] private poolList;
     mapping(string => address[]) private poolsByType;
     
-    mapping(address => bool) private approvedAssets;
+    // Enhanced Asset Approval & Metadata System
+    struct AssetInfo {
+        bool isApproved;           // Asset approved for use
+        string name;               // "Nigerian Naira"
+        string symbol;             // "CNGN"
+        string country;            // "Nigeria" (empty for multi-country)
+        string region;             // "West Africa" (for regional pools)
+        address tokenAddress;      // CNGN token contract
+        uint8 decimals;           // 18
+        bool isStablecoin;        // true
+        uint256 approvedAt;       // Approval timestamp
+    }
+    
+    mapping(address => AssetInfo) public assetInfo;
+    address[] public approvedAssetsList;
     mapping(address => bool) public approvedImplementations;
+    
+
+    enum PoolCategory {
+        SINGLE_ASSET,
+        MANAGED_POOL
+    }
+
+    enum ManagedPoolType {
+        STABLE_YIELD,
+        LOCKED_YIELD,
+        INDEX_POOL,
+        TRANCHED_POOL
+    }
+
+    struct ManagedPoolInfo {
+        address managedPool;
+        PoolCategory category;
+        ManagedPoolType managedType;
+        address[] underlyingPools;
+        uint256 createdAt;
+        bool isActive;
+    }
+
+    mapping(address => ManagedPoolInfo) public managedPoolInfo;
+    mapping(address => bool) public isManagedPoolMapping;
+    uint256 public totalManagedPools;
+    mapping(uint256 => address) public managedPoolAtIndex;
     
     event FactoryUpdated(address indexed oldFactory, address indexed newFactory);
     event AccessManagerUpdated(address indexed oldAccessManager, address indexed newAccessManager);
     event ImplementationApproved(address indexed implementation);
     event ImplementationRevoked(address indexed implementation);
+    event ManagedPoolRegistered(address indexed managedPool, ManagedPoolType poolType, uint256 underlyingPoolsCount);
+    
+    // Asset Management Events
+    event AssetApproved(
+        address indexed asset,
+        string name,
+        string symbol,
+        string country,
+        string region
+    );
+    event AssetRevoked(address indexed asset);
+    event AssetMetadataUpdated(address indexed asset);
     
     modifier onlyFactory() {
         require(msg.sender == factory, "PoolRegistry/only-factory");
@@ -131,6 +185,62 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
         }
         
         emit PoolRegistered(pool, info.manager, info.asset, info.instrumentType, info.creator);
+    }
+
+    /**
+     * @notice Register a managed pool
+     * @param managedPool Address of the managed pool
+     * @param info Managed pool information
+     */
+    function registerManagedPool(
+        address managedPool,
+        ManagedPoolInfo memory info
+    ) external onlyFactory {
+        require(managedPool != address(0), "PoolRegistry/invalid managed pool");
+        require(!isManagedPoolMapping[managedPool], "PoolRegistry/managed pool already registered");
+        
+        // Validate underlying pools exist
+        for (uint256 i = 0; i < info.underlyingPools.length; i++) {
+            require(poolInfos[info.underlyingPools[i]].createdAt != 0, "PoolRegistry/underlying pool not registered");
+        }
+        
+        managedPoolInfo[managedPool] = info;
+        isManagedPoolMapping[managedPool] = true;
+        managedPoolAtIndex[totalManagedPools] = managedPool;
+        totalManagedPools++;
+        
+        emit ManagedPoolRegistered(managedPool, info.managedType, info.underlyingPools.length);
+    }
+
+    /**
+     * @notice Get managed pool information
+     * @param managedPool Address of the managed pool
+     * @return Managed pool information
+     */
+    function getManagedPoolInfo(address managedPool) external view returns (ManagedPoolInfo memory) {
+        require(isManagedPoolMapping[managedPool], "PoolRegistry/managed pool not registered");
+        return managedPoolInfo[managedPool];
+    }
+
+    /**
+     * @notice Check if address is a managed pool
+     * @param pool Address to check
+     * @return True if it's a managed pool
+     */
+    function isManagedPool(address pool) external view returns (bool) {
+        return isManagedPoolMapping[pool];
+    }
+
+    /**
+     * @notice Get all managed pools
+     * @return Array of managed pool addresses
+     */
+    function getAllManagedPools() external view returns (address[] memory) {
+        address[] memory pools = new address[](totalManagedPools);
+        for (uint256 i = 0; i < totalManagedPools; i++) {
+            pools[i] = managedPoolAtIndex[i];
+        }
+        return pools;
     }
     
     function updatePoolStatus(address pool, bool isActive) public override onlyRole(accessManager.OPERATOR_ROLE()) {
@@ -277,5 +387,115 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
      */
     function isApprovedImplementation(address implementation) external view returns (bool) {
         return approvedImplementations[implementation];
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// ASSET MANAGEMENT ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @notice Approve a new asset for use in managed pools
+     * @param asset Asset token address
+     * @param name Asset name (e.g., "Nigerian Naira")
+     * @param symbol Asset symbol (e.g., "CNGN")
+     * @param country Country name (empty for multi-country assets)
+     * @param region Region name (e.g., "West Africa")
+     * @param isStablecoin Whether asset is a stablecoin
+     */
+    function approveAsset(
+        address asset,
+        string memory name,
+        string memory symbol,
+        string memory country,
+        string memory region,
+        bool isStablecoin
+    ) external onlyRole(accessManager.ASSET_MANAGER_ROLE()) {
+        require(asset != address(0), "PoolRegistry/invalid asset");
+        require(bytes(name).length > 0, "PoolRegistry/invalid name");
+        require(bytes(symbol).length > 0, "PoolRegistry/invalid symbol");
+        require(!assetInfo[asset].isApproved, "PoolRegistry/already approved");
+        
+        // Get decimals from token contract
+        uint8 decimals = 18; // Default
+        try IERC20Metadata(asset).decimals() returns (uint8 d) {
+            decimals = d;
+        } catch {}
+        
+        assetInfo[asset] = AssetInfo({
+            isApproved: true,
+            name: name,
+            symbol: symbol,
+            country: country,
+            region: region,
+            tokenAddress: asset,
+            decimals: decimals,
+            isStablecoin: isStablecoin,
+            approvedAt: block.timestamp
+        });
+        
+        approvedAssetsList.push(asset);
+        
+        emit AssetApproved(asset, name, symbol, country, region);
+    }
+    
+    /**
+     * @notice Revoke asset approval
+     * @param asset Asset token address
+     */
+    function revokeAsset(address asset) external onlyRole(accessManager.ASSET_MANAGER_ROLE()) {
+        require(assetInfo[asset].isApproved, "PoolRegistry/asset not approved");
+        
+        assetInfo[asset].isApproved = false;
+        
+        emit AssetRevoked(asset);
+    }
+    
+    /**
+     * @notice Update asset metadata
+     * @param asset Asset token address
+     * @param name New asset name
+     * @param country New country name
+     * @param region New region name
+     */
+    function updateAssetMetadata(
+        address asset,
+        string memory name,
+        string memory country,
+        string memory region
+    ) external onlyRole(accessManager.ASSET_MANAGER_ROLE()) {
+        require(assetInfo[asset].isApproved, "PoolRegistry/asset not approved");
+        
+        AssetInfo storage info = assetInfo[asset];
+        info.name = name;
+        info.country = country;
+        info.region = region;
+        
+        emit AssetMetadataUpdated(asset);
+    }
+    
+    /**
+     * @notice Check if asset is approved
+     * @param asset Asset token address
+     * @return Whether asset is approved
+     */
+    function isApprovedAsset(address asset) external view returns (bool) {
+        return assetInfo[asset].isApproved;
+    }
+    
+    /**
+     * @notice Get asset information
+     * @param asset Asset token address
+     * @return Asset information struct
+     */
+    function getAssetInfo(address asset) external view returns (AssetInfo memory) {
+        return assetInfo[asset];
+    }
+    
+    /**
+     * @notice Get all approved assets
+     * @return Array of approved asset addresses
+     */
+    function getAllApprovedAssets() external view returns (address[] memory) {
+        return approvedAssetsList;
     }
 } 

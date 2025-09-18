@@ -9,7 +9,7 @@ import "../interfaces/IPoolRegistry.sol";
 import "../interfaces/IManager.sol";
 import "../types/IPoolTypes.sol";
 import "../AccessManager.sol";
-import "../PoolEscrow.sol";
+import "../escrows/PoolEscrow.sol";
 import "../LiquidityPool.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 

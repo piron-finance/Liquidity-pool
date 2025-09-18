@@ -2,33 +2,57 @@
 
 ## Project Overview
 
-**Piron Pools** is the liquidity pool for Piron finance that enables collective investment in off-chain financial instruments (Treasury Bills, Corporate Bonds, etc.) through on-chain liquidity pools. The system bridges traditional finance with DeFi, allowing users to earn fixed returns from real-world assets.
+**Piron Pools** is an enterprise-grade tokenized fixed-income platform that enables collective investment in real-world financial instruments. The v1.1 architecture introduces **composable, currency-agnostic Stable Yield Pools** with professional NAV-based pricing, enterprise SPV integration, and plug-and-play deployment across any approved stablecoin.
 
-## Core Concept
+## Core Architecture
+
+### **Two-Tier Pool System**
+
+#### **1. Single-Asset Pools** (v1.0)
 
 ```
-Users deposit USDC → Pool collects funds → SPV invests in real instruments → Users earn returns at maturity
+Users deposit stablecoin → Pool collects funds → SPV invests in specific instrument → Fixed maturity payout
 ```
 
-**Example:**
+#### **2. Stable Yield Pools** (v1.1 - New)
 
-- Pool target: $100,000 for 90-day Treasury Bills (18% discount)
-- Users deposit USDC during funding period
-- SPV invests $100,000 to buy $121,951 face value Treasury Bills
-- At maturity: Users receive $121,951 total (21.95% APY)
+```
+Users deposit any approved stablecoin → Professional NAV pricing → Tenor selection → Rolling T-bill portfolio → Early exit with penalties
+```
+
+**Example Stable Yield Pool:**
+
+- **Asset**: CNGN (Nigerian Naira stablecoin)
+- **Pool**: Piron Nigeria Treasury Pool
+- **Tenors**: 90d, 180d, 270d, 360d (user choice)
+- **NAV**: Daily updates, floating share price
+- **Reserves**: 10% cash buffer for immediate withdrawals
+- **Early Exit**: Available after 30 days with penalties
 
 ## System Architecture
 
 ### Core Contracts
 
-1. **PoolFactory** - Creates new investment pools
-2. **LiquidityPool** - ERC4626 vault for user deposits/withdrawals
-3. **Manager** - Core business logic and pool state management
-4. **PoolEscrow** - Secure custody of funds (single manager control)
-5. **AccessManager** - Role-based access control
-6. **PoolRegistry** - Pool registration and discovery
-7. **FeeManager** - Fee calculation (standalone, not integrated)
-8. **PoolOracle** - Investment proof verification (optional, not implemented)
+#### **Single-Asset Pools (v1.0)**
+
+1. **PoolFactory** - Creates single-asset investment pools
+2. **LiquidityPool** - ERC4626 vault (delegates to Manager)
+3. **Manager** - Business logic for single-asset pools
+4. **PoolEscrow** - Secure custody for single-asset pools
+
+#### **Stable Yield Pools (v1.1)**
+
+5. **ManagedPoolFactory** - Plug-and-play deployment for any approved asset
+6. **StableYieldPool** - Simple ERC4626 vault (delegates to StableYieldManager)
+7. **StableYieldManager** - Currency-agnostic business logic engine
+8. **ManagedPoolEscrow** - Asset-agnostic custody with SPV integration
+9. **YieldCalculator** - Sophisticated yield mathematics
+
+#### **Shared Infrastructure**
+
+10. **PoolRegistry** - Asset approval authority and unified pool registry
+11. **AccessManager** - Role-based access control
+12. **FeeManager** - Fee calculation (standalone, not integrated)
 
 ### System Flow Diagram
 

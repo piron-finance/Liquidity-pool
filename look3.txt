@@ -1,0 +1,218 @@
+Perfect — you’re now stitching together the **big vision for Piron pools**: government-backed yield (sovereign Tbills/bonds), non-sovereign MM instruments (CP, invoices, private credit), and eventually lending/credit utility on top. Let’s crystallize this into a **comprehensive feature document** that can guide both product design and roadmap.
+
+---
+
+# 📑 Piron Pools — Feature Document
+
+## 1. Product Categories
+
+### A. **Managed Pools (stable yield pools)**
+
+* ** Piron Emerging Markets Pool(for emerging markets, ngn, kes, ghs, turkey etc)**
+
+  * Assets: Short-term sovereign bills (≤6 months) across emerging markets (NGN, KES, GHS, etc.).
+  * Durations(users can choose): 90d, 180d, 270d, 360d.
+  * Redemption:
+
+    * Minimum 30 days invested before break(cliff period).
+    * Early break allowed with penalty fee; settlement T+0/1 .
+  * Yield: Published APY per tenor (e.g., 90d = 8%, 180d = 9.5%, 360d = 11%)(we need to ponder on the math to calculate this).
+  * NAV updated daily/weekly.
+
+* ** Piron Dollar Pool**
+
+  * Assets: US T-bills ≤6 months.
+  * Same rules as above.
+  * Target market: dollarized emerging market investors + global stablecoin users.
+
+* ** Piron  Bond Pools **
+
+  * Assets: Interest-bearing sovereign bonds (longer maturities than bills).
+  * Redemption: lockups aligned to bond maturity ladders (e.g., 1y–3y buckets).
+  * Use-case: For investors comfortable with longer duration and stable sovereign credit.
+
+---
+
+### B. **Single-Asset Pools (Non-sovereign credit instruments)**
+
+* **Commercial Paper Pools**
+
+  * Assets: Short-term corporate debt (30–270 days).
+  * Nature: Higher yield, higher risk than Tbills.
+  * Redemption: At maturity (fixed lock pools).
+  * Target market: Yield-seeking retail/institutional investors.
+
+* **Invoice Financing Pools**
+
+  * Assets: Factored invoices (30–120 days).
+  * Redemption: At maturity.
+  * Transparency: Show borrower, invoice counterparty, expected repayment.
+
+* **Private Credit Pools** (longer term SME/corporate loans).
+
+  * Assets: 6–24 month loans.
+  * Redemption: maturity only; possible early exit only via secondary market.
+  * Yield: higher, but disclosed risk.
+
+* **(Optional future)** Managed Credit Pools → diversified baskets of CP, invoices, SME loans.
+
+---
+
+### C. **Future: Piron Lending Layer**
+
+* Pools as collateral:
+
+  * Users holding Piron pool shares (e.g., Stable Yield Pool tokens, CP Pool tokens) can borrow stablecoins against them.
+  * Loan-to-Value (LTV) based on pool type:
+
+    * Tbill pools (government): high LTV (60–80%).
+    * CP/invoice pools: lower LTV (30–50%).
+  * If user defaults, Piron liquidates their pool tokens.
+
+* Product flow:
+
+  * User has 10k USDC in Stable Yield Pool.
+  * Borrows 5k USDC against it without selling → maintains yield exposure while accessing liquidity.
+
+---
+
+## 2. Redemption & Liquidity Rules
+
+* **Tbill / Sovereign Pools**
+
+  * Duration options: 90/180/270/360 days.
+  * Minimum hold: 30 days.
+  * Early exit penalty: 3-5% haircut, depending on tenor.
+  * Settlement:
+
+    * T+0/1 if liquidity buffer covers.
+    * Otherwise, queued until nearest maturity.
+
+* **Credit / CP / Invoice Pools**
+
+  * Fixed maturity lock.
+  * No early redemption (or only via OTC/secondary market).
+  * Payout at maturity.
+
+---
+
+## 3. Yield Calculation
+
+* **Published APY / Tenor yields**
+
+  * Example (illustrative):
+
+    * 90d: 8.0% APY
+    * 180d: 9.5% APY
+    * 360d: 11.0% APY
+
+* **How returns accrue**
+
+  * Yield accrues daily on user shares (NAV ↑ daily).
+  * Redemption = `shares * NAV_at_redeem`.
+  * For early exits, penalty applied → deducted from NAV payout.
+
+* **Transparency**
+
+  * Show user-specific yield projections at entry.
+  * Show live NAV updates + historical yield chart.
+
+---
+
+## 4. User-Facing Features
+
+* **Pool Dashboard**
+
+  * AUM, current APY, duration options.
+  * Asset breakdown (Tbills, bonds, CPs, invoices).
+  * Historical performance graph.
+  * Redemption status (available now / queued / locked).
+
+* **Flexible choice of tenor**
+
+  * Users can select 90d / 180d / 270d etc.
+  * UX: “Lock for 90 days → get estimated 8% APY.”
+
+* **Early Exit Option**
+
+  * Available after 30 days.
+  * Clear penalty disclosed before confirming.
+
+* **Risk Disclosure**
+
+  * Stable Yield Pool = government-backed.
+  * CP/Invoice Pools = corporate credit risk.
+
+---
+
+## 5. Institutional-Facing Features
+
+* **Bespoke Pools**
+
+  * Custom mandate pools (e.g., “USD 50m laddered 90/180d Tbill strategy”).
+
+* **Tranching**
+
+  * Senior / junior tranches within CP/credit pools.
+  * Senior gets first-loss protection, junior gets higher yield.
+
+* **API / Reporting**
+
+  * Daily NAV API.
+  * Portfolio breakdown, maturity ladder, concentration.
+
+* **Custodial Integration**
+
+  * Support Fireblocks, Anchorage, Coinbase Custody.
+
+---
+
+## 6. Roadmap
+
+**Phase 1 (MVP: 3–6 months)**
+
+* Launch Stable Yield Pools (Emerging Markets, Dollar).
+* Single-asset CP / Invoice Pools.
+* Dashboard + NAV updates.
+* Early exit penalty system.
+
+**Phase 2 (6–12 months)**
+
+* Sovereign Bond Pools (longer maturities).
+* Managed Credit Pools (basket of CP/invoices).
+* Institutional reporting APIs.
+* Fiat/stablecoin ramps.
+
+**Phase 3 (12–18 months)**
+
+* Lending layer: borrow against pool shares.
+* Senior/junior tranching for CP/invoice pools.
+* Cross-border products (multi-currency yield pools).
+* Whitelabel distribution to banks/fintechs.
+
+---
+
+✅ **Summary vision**:
+
+* Retail: **Stable Yield Pools** (government paper) + **Locked Pools** (CP, invoice, private credit).
+* Institutions: **Bespoke managed pools, tranching, reporting APIs, collateralized lending.**
+* Future: Piron evolves into a **yield + lending platform**, where users don’t just earn yield but can also unlock liquidity on top of their positions.
+
+---
+
+
+
+all soverign instrument pools are stable yield pools so thats like the group name. we should be able to create a piron emerging market pool or dollar pool or even euro pool(idea is same whats diff is markets served). these managed pools will consist (for the non bond pools) of tbills 6months or less. users can choose how long they want to invest for (how long their funds will be locked in the pool. we could give them options of 3,6 9months, a year etc and an option to reinvest or pull out at maturity)
+
+
+for early withdrawals:
+
+When you submit a withdrawal request:
+
+Your request is added to a queue
+Funds are prepared and released in batches
+You’ll see your estimated withdrawal time in the app
+Track your withdrawal status in your Portfolio tab — you’ll see labels like “Queued”, “Processing”, or “Available”
+Withdrawal Flow:
+
+Submit Withdrawal → In Queue → Funds Ready → Claim (if needed) → Tokens in Wallet (Wait up to 7 days)
