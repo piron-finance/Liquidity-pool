@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+
 pragma solidity ^0.8.19;
 
 import "forge-std/Test.sol";
@@ -88,6 +89,7 @@ contract ManagerTest is Test {
         registry = new PoolRegistry(address(accessManager));
         manager = new Manager(address(registry), address(accessManager));
         factory = new PoolFactory(address(registry), address(manager), address(accessManager));
+
         
         // Setup system configuration
         vm.startPrank(admin);
