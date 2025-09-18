@@ -4,7 +4,7 @@ pragma solidity ^0.8.19;
 import "forge-std/Script.sol";
 import "../src/Manager.sol";
 import "../src/LiquidityPool.sol";
-import "../src/PoolEscrow.sol";
+import "../src/escrows/PoolEscrow.sol";
 import "../src/AccessManager.sol";
 import "../src/PoolRegistry.sol";
 import "../src/factories/PoolFactory.sol";

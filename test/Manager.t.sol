@@ -5,7 +5,7 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import "../src/Manager.sol";
 import "../src/LiquidityPool.sol";
-import "../src/PoolEscrow.sol";
+import "../src/escrows/PoolEscrow.sol";
 import "../src/PoolRegistry.sol";
 import "../src/AccessManager.sol";
 import "../src/factories/PoolFactory.sol";

@@ -25,6 +25,9 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     
     mapping(address => IPoolTypes.PoolData) public pools;
     mapping(address => mapping(address => IPoolTypes.UserPoolData)) public poolUsers;
+
+    mapping(address => IPoolTypes.ManagedPoolConfig) public managedPoolConfigs;
+    mapping(address => bool) public isManagedPool;
     
     event PoolPaused(address indexed pool, uint256 timestamp);
     event PoolUnpaused(address indexed pool, uint256 timestamp);
@@ -38,6 +41,10 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     event EmergencyStateChanged(address indexed poolAddress, string trigger, uint256 totalAmount, uint256 totalShares, uint256 timestamp);
     event PoolCancelled(address indexed poolAddress, address indexed cancelledBy, uint256 timestamp);
     event DiscountsDistributed(address indexed poolAddress, uint256 totalDiscount, uint256 totalShares);
+
+    event ManagedPoolInitialized(address indexed managedPool, IPoolTypes.ManagedPoolType poolType, uint256 underlyingPoolsCount);
+    event ManagedPoolRebalanced(address indexed managedPool, uint256 timestamp);
+
     
     modifier onlyValidPool() {
         require(registry.isActivePool(msg.sender), "Manager/caller not active pool");
@@ -110,6 +117,35 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         emit AccessManagerUpdated(oldManager, newAccessManager);
     }
 
+    /**
+     * @notice Authorize contract upgrades
+     * @param newImplementation New implementation contract address
+     * @dev Can only be called by timelock controller after delay
+     */
+
+    function _authorizeUpgrade(address newImplementation) internal override {
+        require(msg.sender == timelockController, "Only timelock can upgrade");
+        require(newImplementation != address(0), "Invalid implementation");
+        
+        version += 1;
+        emit ManagerUpgraded(address(this), newImplementation, version);
+    }
+    
+    /**
+     * @notice Update timelock controller
+     * @param newTimelockController New timelock controller address
+     * @dev Can only be called by current timelock controller
+     */
+
+    function setTimelockController(address newTimelockController) external override {
+        require(msg.sender == timelockController, "Only current timelock can update");
+        require(newTimelockController != address(0), "Invalid timelock controller");
+        
+        address oldController = timelockController;
+        timelockController = newTimelockController;
+        emit TimelockControllerUpdated(oldController, newTimelockController);
+    }
+
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// POOL SETUP ///////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
@@ -133,6 +169,36 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         pools[pool].status = IPoolTypes.PoolStatus.FUNDING;
         
         emit StatusChanged(IPoolTypes.PoolStatus(0), IPoolTypes.PoolStatus.FUNDING);
+    }
+
+
+    /**
+     * @notice Initialize a managed pool configuration
+     * @param managedPool Address of the managed pool
+     * @param poolConfig Configuration for the managed pool
+     */
+    function initializeManagedPool(  // refactor again as multiple loops are expensive
+        address managedPool,
+        IPoolTypes.ManagedPoolConfig memory poolConfig
+    ) external onlyRole(accessManager.POOL_CREATOR_ROLE()) {
+        require(managedPool != address(0), "Manager/invalid managed pool");
+        require(poolConfig.underlyingPools.length > 0, "Manager/no underlying pools");
+        require(poolConfig.underlyingPools.length == poolConfig.allocationWeights.length, "Manager/length mismatch");
+        
+        for (uint256 i = 0; i < poolConfig.underlyingPools.length; i++) {
+            require(registry.isRegisteredPool(poolConfig.underlyingPools[i]), "Manager/underlying pool not registered");
+        }
+        
+        uint256 totalWeight = 0;
+        for (uint256 i = 0; i < poolConfig.allocationWeights.length; i++) {
+            totalWeight += poolConfig.allocationWeights[i];
+        }
+        require(totalWeight == 10000, "Manager/weights must equal 100%");
+        
+        managedPoolConfigs[managedPool] = poolConfig;
+        isManagedPool[managedPool] = true;
+        
+        emit ManagedPoolInitialized(managedPool, poolConfig.poolType, poolConfig.underlyingPools.length);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -528,6 +594,46 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     }
 
 
+  ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// MANAGED POOL FUNCTIONS ////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+
+
+    /**
+     * @notice Rebalance a managed pool to target allocations
+     * @param managedPool Address of the managed pool to rebalance
+     */
+    function rebalanceManagedPool(address managedPool) external onlyRole(accessManager.OPERATOR_ROLE()) {
+        require(isManagedPool[managedPool], "Manager/not a managed pool");
+        
+        ManagedPoolConfig memory poolConfig = managedPoolConfigs[managedPool];
+        
+        // Calculate current vs target allocations
+        // Execute rebalancing across underlying pools
+        // This is simplified - full implementation would calculate deviations
+        
+        emit ManagedPoolRebalanced(managedPool, block.timestamp);
+    }
+
+    /**
+     * @notice Get managed pool configuration
+     * @param managedPool Address of the managed pool
+     * @return Configuration of the managed pool
+     */
+    function getManagedPoolConfig(address managedPool) external view returns (ManagedPoolConfig memory) {
+        require(isManagedPool[managedPool], "Manager/not a managed pool");
+        return managedPoolConfigs[managedPool];
+    }
+
+    /**
+     * @notice Check if a pool is a managed pool
+     * @param pool Address to check
+     * @return True if the pool is a managed pool
+     */
+    function isPoolManaged(address pool) external view returns (bool) {
+        return isManagedPool[pool];
+    }
 
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -838,34 +944,5 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         return uint8(pools[msg.sender].status);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// UPGRADE AUTHORIZATION ////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
-    /**
-     * @notice Authorize contract upgrades
-     * @param newImplementation New implementation contract address
-     * @dev Can only be called by timelock controller after delay
-     */
-    function _authorizeUpgrade(address newImplementation) internal override {
-        require(msg.sender == timelockController, "Only timelock can upgrade");
-        require(newImplementation != address(0), "Invalid implementation");
-        
-        version += 1;
-        emit ManagerUpgraded(address(this), newImplementation, version);
-    }
-    
-    /**
-     * @notice Update timelock controller
-     * @param newTimelockController New timelock controller address
-     * @dev Can only be called by current timelock controller
-     */
-    function setTimelockController(address newTimelockController) external override {
-        require(msg.sender == timelockController, "Only current timelock can update");
-        require(newTimelockController != address(0), "Invalid timelock controller");
-        
-        address oldController = timelockController;
-        timelockController = newTimelockController;
-        emit TimelockControllerUpdated(oldController, newTimelockController);
-    }
 } 

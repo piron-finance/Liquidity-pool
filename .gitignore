@@ -16,6 +16,9 @@ docs/
 .cursor/
 
 look.txt
+look3.txt
+look4.txt
+look5.txt
 MANAGED_POOLS_IMPLEMENTATION.md
 V1.1_ARCHITECTURE.md
 V1.1_IMPLEMENTATION_PLAN.md
@@ -25,3 +28,7 @@ look2.txt
 
 # TODO files
 TODO2.md
+
+# Development checklists (local only)
+MANAGED_POOLS_CHECKLIST.md
+STABLE_YIELD_POOL_ARCHITECTURE.md
