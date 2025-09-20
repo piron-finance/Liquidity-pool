@@ -11,6 +11,7 @@ import "./interfaces/IPoolRegistry.sol";
 import "./interfaces/IPoolEscrow.sol";
 import "./interfaces/ILiquidityPool.sol";
 import "./types/IPoolTypes.sol";
+import "./types/IManagedPoolTypes.sol";
 import "./AccessManager.sol";
 import "./libraries/CalculationLibrary.sol";
 import "./libraries/ValidationLibrary.sol";
@@ -28,11 +29,8 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     mapping(address => IPoolTypes.PoolData) public pools;
     mapping(address => mapping(address => IPoolTypes.UserPoolData)) public poolUsers;
 
-    mapping(address => IPoolTypes.ManagedPoolConfig) public managedPoolConfigs;
+    mapping(address => IManagedPoolTypes.ManagedPoolConfig) public managedPoolConfigs;
     mapping(address => bool) public isManagedPool;
-    
-    address public timelockController;
-    uint256 public version;
     
     event PoolPaused(address indexed pool, uint256 timestamp);
     event PoolUnpaused(address indexed pool, uint256 timestamp);
@@ -47,7 +45,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     event PoolCancelled(address indexed poolAddress, address indexed cancelledBy, uint256 timestamp);
     event DiscountsDistributed(address indexed poolAddress, uint256 totalDiscount, uint256 totalShares);
 
-    event ManagedPoolInitialized(address indexed managedPool, IPoolTypes.ManagedPoolType poolType, uint256 underlyingPoolsCount);
+    event ManagedPoolInitialized(address indexed managedPool, IManagedPoolTypes.ManagedPoolType poolType, uint256 underlyingPoolsCount);
     event ManagedPoolRebalanced(address indexed managedPool, uint256 timestamp);
 
     
@@ -116,22 +114,6 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// Access Control ///////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    /**
-     * @notice Authorize contract upgrades
-     * @param newImplementation New implementation contract address
-     * @dev Can only be called by timelock controller after delay
-     */
-    function _authorizeUpgrade(address newImplementation) internal override {
-        require(msg.sender == timelockController, "Only timelock can upgrade");
-        require(newImplementation != address(0), "Invalid implementation");
-        
-        version += 1;
-        emit ManagerUpgraded(address(this), newImplementation, version);
-    }
-    ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// ACCESS CONTROL ///////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
@@ -147,16 +129,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         emit AccessManagerUpdated(oldManager, newAccessManager);
     }
     
-    /**
-     * @notice Update timelock controller
-     * @param newTimelockController New timelock controller address
-     */
-    function setTimelockController(address newTimelockController) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
-        require(newTimelockController != address(0), "Invalid timelock controller");
-        address oldController = timelockController;
-        timelockController = newTimelockController;
-        emit TimelockControllerUpdated(oldController, newTimelockController);
-    }
+
 
     /**
      * @notice Authorize contract upgrades
@@ -220,7 +193,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
      */
     function initializeManagedPool(  // refactor again as multiple loops are expensive
         address managedPool,
-        IPoolTypes.ManagedPoolConfig memory poolConfig
+        IManagedPoolTypes.ManagedPoolConfig memory poolConfig
     ) external onlyRole(accessManager.POOL_CREATOR_ROLE()) {
         require(managedPool != address(0), "Manager/invalid managed pool");
         require(poolConfig.underlyingPools.length > 0, "Manager/no underlying pools");
@@ -642,46 +615,6 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     }
 
 
-  ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// MANAGED POOL FUNCTIONS ////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-
-
-    /**
-     * @notice Rebalance a managed pool to target allocations
-     * @param managedPool Address of the managed pool to rebalance
-     */
-    function rebalanceManagedPool(address managedPool) external onlyRole(accessManager.OPERATOR_ROLE()) {
-        require(isManagedPool[managedPool], "Manager/not a managed pool");
-        
-        ManagedPoolConfig memory poolConfig = managedPoolConfigs[managedPool];
-        
-        // Calculate current vs target allocations
-        // Execute rebalancing across underlying pools
-        // This is simplified - full implementation would calculate deviations
-        
-        emit ManagedPoolRebalanced(managedPool, block.timestamp);
-    }
-
-    /**
-     * @notice Get managed pool configuration
-     * @param managedPool Address of the managed pool
-     * @return Configuration of the managed pool
-     */
-    function getManagedPoolConfig(address managedPool) external view returns (ManagedPoolConfig memory) {
-        require(isManagedPool[managedPool], "Manager/not a managed pool");
-        return managedPoolConfigs[managedPool];
-    }
-
-    /**
-     * @notice Check if a pool is a managed pool
-     * @param pool Address to check
-     * @return True if the pool is a managed pool
-     */
-    function isPoolManaged(address pool) external view returns (bool) {
-        return isManagedPool[pool];
-    }
 
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -828,35 +761,9 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     }
 
 
-    function calculateUserReturn(address user) external view override onlyRegisteredPool returns (uint256) {
-        require (user != address(0), "Manager/user cannot be empty");
-        address poolAddress = msg.sender;
-        IPoolTypes.PoolData storage poolData = pools[poolAddress];
 
-        return CalculationLibrary.calculateUserReturn(
-            poolData,
-            user,
-            poolAddress
-        );
-      
-    }
     
-    function calculateUserDiscount(address user) external view override onlyRegisteredPool returns (uint256) {
-        address poolAddress = msg.sender;
-        IPoolTypes.PoolData storage poolData = pools[poolAddress];
-        
-        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.DISCOUNTED) return 0;
-        
-        uint256 userShares = IERC20(poolAddress).balanceOf(user);
-        if (userShares == 0) return 0;
-        
-        uint256 totalShares = IERC20(poolAddress).totalSupply();
-        if (totalShares == 0) return 0;
-        
-        return (userShares * pools[poolAddress].totalDiscountEarned) / totalShares;
-    }
-    
-    function calculateMaturityValue() external view override onlyRegisteredPool returns (uint256) {
+    function calculateMaturityValue() external view onlyRegisteredPool returns (uint256) {
         address poolAddress = msg.sender;
         IPoolTypes.PoolData storage poolData = pools[poolAddress];
         
@@ -865,7 +772,7 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
                 return poolData.config.faceValue;
             } else {
                 // During funding phase, calculate estimated face value
-                return _calculateFaceValue(poolData.config.targetRaise, poolData.config.discountRate);
+                return CalculationLibrary.calculateFaceValue(poolData.config.targetRaise, poolData.config.discountRate);
             }
         } else {
             uint256 principal = pools[poolAddress].actualInvested;
@@ -873,25 +780,12 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
                 // During funding phase, use target raise as estimated principal
                 principal = poolData.config.targetRaise;
             }
-            uint256 expectedCoupons = _calculateExpectedCoupons(poolData);
+            uint256 expectedCoupons = CalculationLibrary.calculateExpectedCoupons(
+                poolData
+            );
+            
             return principal + expectedCoupons;
         }
-    }
-
-    function claimMaturityEntitlement(address user) external view override returns (uint256) {
-        address poolAddress = msg.sender;
-        IPoolTypes.PoolData storage poolData = pools[poolAddress];
-        
-        require(pools[poolAddress].status == IPoolTypes.PoolStatus.MATURED, "Not matured");
-        require(block.timestamp >= poolData.config.maturityDate, "Not matured");
-        
-        uint256 userShares = IERC20(poolAddress).balanceOf(user);
-        if (userShares == 0) return 0;
-        
-        uint256 totalReturns = _calculateTotalReturns(poolAddress);
-        uint256 totalShares = IERC20(poolAddress).totalSupply();
-        
-        return (userShares * totalReturns) / totalShares;
     }
 
     ////////////////////////////////////////////////////////////////////////////////

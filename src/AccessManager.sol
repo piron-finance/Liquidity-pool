@@ -41,7 +41,7 @@ contract AccessManager is AccessControl, Pausable {
         require(hasRole(role, msg.sender), "AccessManager: access denied");
         require(
             roleGrantTime[msg.sender] == 0 || roleGrantTime[msg.sender] + ROLE_DELAY <= block.timestamp, 
-            "AccessManager: role delay not met"
+            "AccessManager: role delay not met" 
         );
         _;
     }

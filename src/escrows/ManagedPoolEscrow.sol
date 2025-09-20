@@ -43,17 +43,10 @@ contract ManagedPoolEscrow is
     /// @dev Version for upgrade tracking
     uint256 public version;
     
-    /// @dev Country-specific configuration
-    IManagedPoolTypes.CountryPoolConfig public countryConfig;
+    /// @dev Pool name for identification (e.g., "Piron USDC Stable Yield Pool")
+    string public poolName;
     
-    /// @dev Current laddered allocation breakdown
-    IManagedPoolTypes.LadderedAllocation public ladderedAllocation;
-    
-    /// @dev Underlying T-bill pools for this country
-    address[] public underlyingPools;
-    
-    /// @dev Current allocation amounts per underlying pool
-    mapping(address => uint256) public poolAllocations;
+    /// @dev Legacy: underlying pools no longer used, SPV handles T-bill allocation directly
     
     /// @dev Cash buffer for early exits and liquidity management
     uint256 public cashBuffer;
@@ -66,6 +59,9 @@ contract ManagedPoolEscrow is
     
     /// @dev Emergency withdrawal enabled flag
     bool public emergencyWithdrawalEnabled;
+    
+    /// @dev SPV allocations for T-bill purchases
+    mapping(address => uint256) public spvAllocations;
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// EVENTS //////////////////////////////////////
@@ -73,18 +69,10 @@ contract ManagedPoolEscrow is
 
     event FundsDeposited(address indexed from, uint256 amount, uint256 newCashBuffer);
     event FundsWithdrawn(address indexed to, uint256 amount, uint256 remainingCashBuffer);
-    event LadderedAllocationExecuted(
-        uint256 shortTermAmount,
-        uint256 mediumTermAmount,
-        uint256 longTermAmount,
-        uint256 remainingCashBuffer
-    );
-    event UnderlyingPoolFunded(address indexed pool, uint256 amount, uint256 totalAllocated);
-    event UnderlyingPoolWithdrawn(address indexed pool, uint256 amount, uint256 remainingAllocated);
     event PenaltyFeeCollected(address indexed user, uint256 amount, uint256 totalCollected);
     event CashBufferUpdated(uint256 oldBuffer, uint256 newBuffer);
     event EmergencyWithdrawalToggled(bool enabled);
-    event CountryConfigUpdated(string countryCode, address stablecoin, uint256 penaltyRate);
+    event PoolNameUpdated(string newPoolName);
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// MODIFIERS ///////////////////////////////////
@@ -125,16 +113,14 @@ contract ManagedPoolEscrow is
      * @param managedPool_ The managed pool address
      * @param accessManager_ Access manager address
      * @param timelockController_ Timelock controller address
-     * @param countryConfig_ Country-specific configuration
-     * @param underlyingPools_ Array of underlying T-bill pools
+     * @param poolName_ Pool name for identification
      */
     function initialize(
         address asset_,
         address managedPool_,
         address accessManager_,
         address timelockController_,
-        IManagedPoolTypes.CountryPoolConfig memory countryConfig_,
-        address[] memory underlyingPools_
+        string memory poolName_
     ) public initializer {
         __UUPSUpgradeable_init();
         __AccessControl_init();
@@ -149,19 +135,8 @@ contract ManagedPoolEscrow is
         managedPool = managedPool_;
         accessManager = AccessManager(accessManager_);
         timelockController = timelockController_;
-        countryConfig = countryConfig_;
-        underlyingPools = underlyingPools_;
+        poolName = poolName_;
         version = 1;
-
-        // Initialize laddered allocation (default: 50%/30%/20% + 0% cash buffer)
-        ladderedAllocation = IManagedPoolTypes.LadderedAllocation({
-            shortTermAllocation: 5000,  // 50%
-            mediumTermAllocation: 3000, // 30%
-            longTermAllocation: 2000,   // 20%
-            cashBuffer: 0,              // 0% initially
-            totalAllocated: 0,
-            lastRebalanceTime: block.timestamp
-        });
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
@@ -217,112 +192,9 @@ contract ManagedPoolEscrow is
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// LADDERED ALLOCATION /////////////////////////
+    /////////////////////////////// SIMPLIFIED ALLOCATION //////////////////////
     ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Execute laddered allocation to underlying T-bill pools
-     * @param totalAmount Total amount to allocate
-     */
-    function executeLadderedAllocation(uint256 totalAmount) external onlyOperator nonReentrant {
-        require(totalAmount > 0, "ManagedPoolEscrow/invalid amount");
-        require(cashBuffer >= totalAmount, "ManagedPoolEscrow/insufficient cash buffer");
-
-        // Calculate allocation amounts based on percentages
-        uint256 shortTermAmount = (totalAmount * ladderedAllocation.shortTermAllocation) / 10000;
-        uint256 mediumTermAmount = (totalAmount * ladderedAllocation.mediumTermAllocation) / 10000;
-        uint256 longTermAmount = (totalAmount * ladderedAllocation.longTermAllocation) / 10000;
-
-        // Allocate to underlying pools (simplified - would need actual pool integration)
-        _allocateToUnderlyingPools(shortTermAmount, mediumTermAmount, longTermAmount);
-
-        // Update cash buffer
-        uint256 allocatedTotal = shortTermAmount + mediumTermAmount + longTermAmount;
-        cashBuffer -= allocatedTotal;
-        totalAllocatedFunds += allocatedTotal;
-
-        // Update last rebalance time
-        ladderedAllocation.lastRebalanceTime = block.timestamp;
-        ladderedAllocation.totalAllocated = totalAllocatedFunds;
-
-        emit LadderedAllocationExecuted(shortTermAmount, mediumTermAmount, longTermAmount, cashBuffer);
-    }
-
-    /**
-     * @notice Recall funds from underlying pools for liquidity
-     * @param amount Amount to recall
-     */
-    function recallFundsFromUnderlyingPools(uint256 amount) external onlyOperator nonReentrant {
-        require(amount > 0, "ManagedPoolEscrow/invalid amount");
-        require(totalAllocatedFunds >= amount, "ManagedPoolEscrow/insufficient allocated funds");
-
-        // Recall funds from underlying pools (simplified)
-        _recallFromUnderlyingPools(amount);
-
-        totalAllocatedFunds -= amount;
-        cashBuffer += amount;
-        ladderedAllocation.totalAllocated = totalAllocatedFunds;
-
-        emit CashBufferUpdated(cashBuffer - amount, cashBuffer);
-    }
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INTERNAL FUNCTIONS //////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @dev Allocate funds to underlying pools based on laddered strategy
-     * @param shortTermAmount Amount for short-term pools (30-90 days)
-     * @param mediumTermAmount Amount for medium-term pools (90-180 days)
-     * @param longTermAmount Amount for long-term pools (180-365 days)
-     */
-    function _allocateToUnderlyingPools(
-        uint256 shortTermAmount,
-        uint256 mediumTermAmount,
-        uint256 longTermAmount
-    ) internal {
-        // Simplified allocation - in production would integrate with actual pool contracts
-        
-        if (underlyingPools.length >= 3) {
-            // Allocate to first 3 pools representing short/medium/long term
-            if (shortTermAmount > 0) {
-                poolAllocations[underlyingPools[0]] += shortTermAmount;
-                emit UnderlyingPoolFunded(underlyingPools[0], shortTermAmount, poolAllocations[underlyingPools[0]]);
-            }
-            
-            if (mediumTermAmount > 0) {
-                poolAllocations[underlyingPools[1]] += mediumTermAmount;
-                emit UnderlyingPoolFunded(underlyingPools[1], mediumTermAmount, poolAllocations[underlyingPools[1]]);
-            }
-            
-            if (longTermAmount > 0) {
-                poolAllocations[underlyingPools[2]] += longTermAmount;
-                emit UnderlyingPoolFunded(underlyingPools[2], longTermAmount, poolAllocations[underlyingPools[2]]);
-            }
-        }
-    }
-
-    /**
-     * @dev Recall funds from underlying pools
-     * @param amount Total amount to recall
-     */
-    function _recallFromUnderlyingPools(uint256 amount) internal {
-        // Simplified recall - in production would integrate with actual pool contracts
-        uint256 remaining = amount;
-        
-        for (uint256 i = 0; i < underlyingPools.length && remaining > 0; i++) {
-            address pool = underlyingPools[i];
-            uint256 allocated = poolAllocations[pool];
-            
-            if (allocated > 0) {
-                uint256 toRecall = remaining > allocated ? allocated : remaining;
-                poolAllocations[pool] -= toRecall;
-                remaining -= toRecall;
-                
-                emit UnderlyingPoolWithdrawn(pool, toRecall, poolAllocations[pool]);
-            }
-        }
-    }
+    
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
@@ -337,28 +209,11 @@ contract ManagedPoolEscrow is
     }
 
     /**
-     * @notice Get total balance (cash buffer + allocated funds)
+     * @notice Get total balance (just cash buffer now)
      * @return balance Total balance
      */
     function getTotalBalance() external view returns (uint256 balance) {
-        return cashBuffer + totalAllocatedFunds;
-    }
-
-    /**
-     * @notice Get allocation for specific underlying pool
-     * @param pool Pool address
-     * @return allocation Current allocation amount
-     */
-    function getPoolAllocation(address pool) external view returns (uint256 allocation) {
-        return poolAllocations[pool];
-    }
-
-    /**
-     * @notice Get underlying pools array
-     * @return pools Array of underlying pool addresses
-     */
-    function getUnderlyingPools() external view returns (address[] memory pools) {
-        return underlyingPools;
+        return cashBuffer;
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -366,34 +221,13 @@ contract ManagedPoolEscrow is
     ////////////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice Update laddered allocation percentages
-     * @param shortTerm Short-term allocation (basis points)
-     * @param mediumTerm Medium-term allocation (basis points)
-     * @param longTerm Long-term allocation (basis points)
-     * @param cashBufferTarget Cash buffer target (basis points)
+     * @notice Update pool name
+     * @param newPoolName New pool name
      */
-    function updateLadderedAllocation(
-        uint256 shortTerm,
-        uint256 mediumTerm,
-        uint256 longTerm,
-        uint256 cashBufferTarget
-    ) external onlyAdmin {
-        require(shortTerm + mediumTerm + longTerm + cashBufferTarget == 10000, "ManagedPoolEscrow/invalid allocation");
-        
-        ladderedAllocation.shortTermAllocation = shortTerm;
-        ladderedAllocation.mediumTermAllocation = mediumTerm;
-        ladderedAllocation.longTermAllocation = longTerm;
-        ladderedAllocation.cashBuffer = cashBufferTarget;
-        ladderedAllocation.lastRebalanceTime = block.timestamp;
-    }
-
-    /**
-     * @notice Update country configuration
-     * @param newConfig New country configuration
-     */
-    function updateCountryConfig(IManagedPoolTypes.CountryPoolConfig memory newConfig) external onlyAdmin {
-        countryConfig = newConfig;
-        emit CountryConfigUpdated(newConfig.countryCode, newConfig.stablecoin, newConfig.penaltyRate);
+    function updatePoolName(string memory newPoolName) external onlyAdmin {
+        require(bytes(newPoolName).length > 0, "ManagedPoolEscrow/invalid pool name");
+        poolName = newPoolName;
+        emit PoolNameUpdated(newPoolName);
     }
 
     /**
@@ -470,4 +304,67 @@ contract ManagedPoolEscrow is
     function getVersion() external view returns (uint256) {
         return version;
     }
+    
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// SPV COORDINATION ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+    
+    /**
+     * @notice Allocate funds to SPV for T-bill purchases
+     * @param spvAddress SPV address
+     * @param amount Amount to allocate
+     */
+    function allocateToSPV(address spvAddress, uint256 amount) external onlyManagedPool {
+        require(spvAddress != address(0), "ManagedPoolEscrow/invalid SPV");
+        require(amount > 0, "ManagedPoolEscrow/invalid amount");
+        require(cashBuffer >= amount, "ManagedPoolEscrow/insufficient cash buffer");
+        
+        cashBuffer -= amount;
+        spvAllocations[spvAddress] += amount;
+        
+        // Transfer funds to SPV
+        asset.safeTransfer(spvAddress, amount);
+        
+        emit SPVAllocation(spvAddress, amount, cashBuffer);
+    }
+    
+    /**
+     * @notice Request liquidity from SPV by liquidating T-bills
+     * @param spvAddress SPV address
+     * @param amount Amount of liquidity needed
+     */
+    function requestSPVLiquidity(address spvAddress, uint256 amount) external onlyManagedPool {
+        require(spvAddress != address(0), "ManagedPoolEscrow/invalid SPV");
+        require(amount > 0, "ManagedPoolEscrow/invalid amount");
+        require(spvAllocations[spvAddress] >= amount, "ManagedPoolEscrow/insufficient SPV allocation");
+        
+        spvAllocations[spvAddress] -= amount;
+        
+        emit SPVLiquidityRequested(spvAddress, amount, block.timestamp);
+        
+        // Note: SPV will transfer funds back via receiveSPVLiquidity()
+    }
+    
+    /**
+     * @notice Receive liquidity back from SPV
+     * @param amount Amount received
+     */
+    function receiveSPVLiquidity(uint256 amount) external {
+        require(amount > 0, "ManagedPoolEscrow/invalid amount");
+        
+        // Only SPV or authorized addresses can call this
+        // In production, this would have proper SPV authentication
+        
+        cashBuffer += amount;
+        
+        emit SPVLiquidityReceived(msg.sender, amount, cashBuffer);
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// EVENTS //////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+    
+    event SPVAllocation(address indexed spv, uint256 amount, uint256 remainingCashBuffer);
+    event SPVLiquidityRequested(address indexed spv, uint256 amount, uint256 timestamp);
+    event SPVLiquidityReceived(address indexed spv, uint256 amount, uint256 newCashBuffer);
 }

@@ -75,11 +75,12 @@ contract StableYieldPool is
 
     /**
      * @notice Initialize the StableYieldPool contract
-     * @param stablecoin_ The underlying asset (all assets are stablecoins eg: CNGN, KES, USDT, etc.)
+     * @param asset_ The underlying asset (all assets are stablecoins eg: CNGN, KES, USDT, etc.)
      * @param name_ Pool token name
      * @param symbol_ Pool token symbol
      * @param stableYieldManager_ StableYieldManager contract address
      * @param accessManager_ AccessManager contract address
+     * @param escrow_ ManagedPoolEscrow contract address
      */
     function initialize(
         IERC20 asset_,
@@ -132,8 +133,13 @@ contract StableYieldPool is
     ) external whenNotPaused returns (uint256 shares) {
         require(amount > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
+        require(tenorDays == 90 || tenorDays == 180 || tenorDays == 270 || tenorDays == 360, "StableYieldPool/invalid tenor");
 
-        IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), amount);
+        IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
+        
+        // Approve and deposit to escrow
+        IERC20(asset()).approve(address(escrow), amount);
+        escrow.deposit(amount);
 
         shares = stableYieldManager.handleManagedDeposit(
             address(this),
@@ -148,6 +154,8 @@ contract StableYieldPool is
 
         emit TenorDepositDelegated(receiver, amount, tenorDays, maturityAction);
         emit Deposit(msg.sender, receiver, amount, shares);
+
+        return shares;
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -163,7 +171,6 @@ contract StableYieldPool is
         require(shares > 0, "StableYieldPool/invalid shares");
         require(balanceOf(msg.sender) >= shares, "StableYieldPool/insufficient balance");
 
-        // Delegate to StableYieldManager for withdrawal logic
         uint256 actualShares = stableYieldManager.handleManagedWithdraw(
             address(this),
             shares,
@@ -172,16 +179,15 @@ contract StableYieldPool is
             msg.sender
         );
 
-        // If shares were burned, withdrawal was processed immediately
         if (actualShares > 0) {
             _burn(msg.sender, actualShares);
             success = true;
         } else {
-            // Withdrawal was queued
             success = false;
         }
 
         emit EarlyExitDelegated(msg.sender, shares);
+        return success;
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -193,128 +199,51 @@ contract StableYieldPool is
      * @return Total assets under management
      */
     function totalAssets() public view override returns (uint256) {
-        try stableYieldManager.calculatePoolNAV(address(this)) returns (uint256 nav) {
-            return nav;
-        } catch {
-            return IERC20(asset()).balanceOf(address(this));
-        }
+        return stableYieldManager.calculatePoolNAV(address(this));
     }
 
     /**
-     * @notice Standard ERC4626 deposit (delegates to tenor deposit with default settings)
-     * @param assets Amount to deposit
-     * @param receiver Address to receive shares
-     * @return shares Number of shares minted
+     * @notice Standard ERC4626 deposit - DISABLED for managed pools
+     * @dev Managed pools require explicit tenor selection via depositWithTenor()
      */
-    function deposit(uint256 assets, address receiver) 
+    function deposit(uint256, address) 
         public 
-        override(ERC4626Upgradeable, IERC4626) 
-        whenNotPaused 
-        returns (uint256 shares) 
+        pure
+        override 
+        returns (uint256) 
     {
-        // Default: 180 days tenor, compound at maturity
-        return depositWithTenor(assets, 180, IManagedPoolTypes.MaturityAction.COMPOUND, receiver);
+        revert("StableYieldPool/use depositWithTenor");
     }
 
     /**
-     * @notice Standard ERC4626 mint (delegates to tenor deposit with default settings)
-     * @param shares Number of shares to mint
-     * @param receiver Address to receive shares
-     * @return assets Amount of assets deposited
+     * @notice Standard ERC4626 mint - DISABLED for managed pools
+     * @dev Managed pools require explicit tenor selection via depositWithTenor()
      */
-    function mint(uint256 shares, address receiver) 
+    function mint(uint256, address) 
         public 
-        override(ERC4626Upgradeable, IERC4626) 
-        whenNotPaused 
-        returns (uint256 assets) 
+        pure
+        override 
+        returns (uint256) 
     {
-        // Calculate assets needed for shares
-        assets = previewMint(shares);
-        
-        // Deposit with default settings
-        uint256 actualShares = depositWithTenor(assets, 180, IManagedPoolTypes.MaturityAction.COMPOUND, receiver);
-        
-        require(actualShares >= shares, "StableYieldPool/insufficient shares minted");
-        
-        return assets;
+        revert("StableYieldPool/use depositWithTenor");
     }
 
-    /**
-     * @notice Standard ERC4626 withdraw (delegates to early exit)
-     * @param assets Amount to withdraw
-     * @param receiver Address to receive assets
-     * @param owner Share owner address
-     * @return shares Number of shares burned
-     */
-    function withdraw(uint256 assets, address receiver, address owner) 
+    function withdraw(uint256, address, address) 
         public 
-        override(ERC4626Upgradeable, IERC4626) 
-        whenNotPaused 
-        returns (uint256 shares) 
+        pure
+        override 
+        returns (uint256) 
     {
-        // Calculate shares needed
-        shares = previewWithdraw(assets);
-        
-        // Check allowance if not owner
-        if (msg.sender != owner) {
-            uint256 allowed = allowance(owner, msg.sender);
-            require(allowed >= shares, "StableYieldPool/insufficient allowance");
-            _approve(owner, msg.sender, allowed - shares);
-        }
-        
-        // Delegate to manager
-        uint256 actualShares = stableYieldManager.handleManagedWithdraw(
-            address(this),
-            shares,
-            receiver,
-            owner,
-            msg.sender
-        );
-        
-        if (actualShares > 0) {
-            _burn(owner, actualShares);
-        }
-        
-        return actualShares;
+        revert("StableYieldPool/use requestEarlyExit");
     }
 
-    /**
-     * @notice Standard ERC4626 redeem (delegates to early exit)
-     * @param shares Number of shares to redeem
-     * @param receiver Address to receive assets
-     * @param owner Share owner address
-     * @return assets Amount of assets withdrawn
-     */
-    function redeem(uint256 shares, address receiver, address owner) 
+    function redeem(uint256, address, address) 
         public 
-        override(ERC4626Upgradeable, IERC4626) 
-        whenNotPaused 
-        returns (uint256 assets) 
+        pure
+        override 
+        returns (uint256) 
     {
-        // Check allowance if not owner
-        if (msg.sender != owner) {
-            uint256 allowed = allowance(owner, msg.sender);
-            require(allowed >= shares, "StableYieldPool/insufficient allowance");
-            _approve(owner, msg.sender, allowed - shares);
-        }
-        
-        // Calculate expected assets
-        assets = previewRedeem(shares);
-        
-        // Delegate to manager
-        uint256 actualShares = stableYieldManager.handleManagedWithdraw(
-            address(this),
-            shares,
-            receiver,
-            owner,
-            msg.sender
-        );
-        
-        if (actualShares > 0) {
-            _burn(owner, actualShares);
-        }
-        
-        return assets;
+        revert("StableYieldPool/use requestEarlyExit");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -325,7 +254,7 @@ contract StableYieldPool is
      * @notice Get managed pool data from manager
      * @return Pool configuration and status
      */
-    function getManagedPoolData() external view returns (StableYieldManager.ManagedPoolData memory) {
+    function getManagedPoolData() external view returns (IManagedPoolTypes.ManagedPoolData memory) {
         return stableYieldManager.getManagedPoolData(address(this));
     }
     
@@ -333,7 +262,7 @@ contract StableYieldPool is
      * @notice Get pool reserves information
      * @return Pool reserves data
      */
-    function getPoolReserves() external view returns (StableYieldManager.PoolReserves memory) {
+    function getPoolReserves() external view returns (IManagedPoolTypes.PoolReserves memory) {
         return stableYieldManager.getPoolReserves(address(this));
     }
     
@@ -342,7 +271,7 @@ contract StableYieldPool is
      * @param user User address
      * @return Array of user positions
      */
-    function getUserPositions(address user) external view returns (StableYieldManager.UserPosition[] memory) {
+    function getUserPositions(address user) external view returns (IManagedPoolTypes.UserPosition[] memory) {
         return stableYieldManager.getUserPositions(address(this), user);
     }
     
