@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Piron Pools** is an enterprise-grade tokenized fixed-income platform that enables collective investment in real-world financial instruments. The v1.1 architecture introduces **composable, currency-agnostic Stable Yield Pools** with professional NAV-based pricing, enterprise SPV integration, and plug-and-play deployment across any approved stablecoin.
+**Piron Pools** is an enterprise-grade tokenized fixed-income platform that enables collective investment in real-world financial instruments. The v1.1 architecture introduces **Managed Stable Yield Pools** - sophisticated, currency-agnostic investment products with professional NAV-based pricing, flexible tenor selection, early exit capabilities, and direct SPV integration for seamless T-bill portfolio management.
 
 ## Core Architecture
 
@@ -14,20 +14,26 @@
 Users deposit stablecoin → Pool collects funds → SPV invests in specific instrument → Fixed maturity payout
 ```
 
-#### **2. Stable Yield Pools** (v1.1 - New)
+#### **2. Managed Stable Yield Pools** (v1.1 - New)
 
 ```
-Users deposit any approved stablecoin → Professional NAV pricing → Tenor selection → Rolling T-bill portfolio → Early exit with penalties
+Users deposit stablecoin → Select tenor (90d-360d) → Professional NAV pricing → SPV manages T-bill portfolio → Early exit available with penalties after 30 days
 ```
 
-**Example Stable Yield Pool:**
+**Example Managed Pools:**
 
-- **Asset**: CNGN (Nigerian Naira stablecoin)
-- **Pool**: Piron Nigeria Treasury Pool
-- **Tenors**: 90d, 180d, 270d, 360d (user choice)
-- **NAV**: Daily updates, floating share price
-- **Reserves**: 10% cash buffer for immediate withdrawals
-- **Early Exit**: Available after 30 days with penalties
+- **Piron USDC Stable Yield Pool**: US Treasury Bills, Dollar-denominated returns
+- **Piron CNGN Stable Yield Pool**: Nigerian Treasury Bills, Naira-denominated returns
+- **Piron Emerging Markets Pool**: Multi-currency T-bill diversification
+- **Piron Bond Pool**: Longer-term sovereign bond exposure
+
+**Key Features:**
+
+- **Flexible Tenors**: 90d, 180d, 270d, 360d (user choice at deposit)
+- **NAV Pricing**: Daily NAV updates with floating share prices
+- **Early Exit**: Available after 30-day minimum hold with 3-5% penalties
+- **Cash Reserves**: 10% buffer for immediate withdrawals
+- **Direct SPV Integration**: No underlying pool complexity
 
 ## System Architecture
 
@@ -40,13 +46,13 @@ Users deposit any approved stablecoin → Professional NAV pricing → Tenor sel
 3. **Manager** - Business logic for single-asset pools
 4. **PoolEscrow** - Secure custody for single-asset pools
 
-#### **Stable Yield Pools (v1.1)**
+#### **Managed Stable Yield Pools (v1.1)**
 
-5. **ManagedPoolFactory** - Plug-and-play deployment for any approved asset
-6. **StableYieldPool** - Simple ERC4626 vault (delegates to StableYieldManager)
-7. **StableYieldManager** - Currency-agnostic business logic engine
-8. **ManagedPoolEscrow** - Asset-agnostic custody with SPV integration
-9. **YieldCalculator** - Sophisticated yield mathematics
+5. **ManagedPoolFactory** - Plug-and-play deployment for any approved stablecoin
+6. **StableYieldPool** - ERC4626 vault with tenor selection and early exit support
+7. **StableYieldManager** - Advanced business logic for NAV pricing, yield calculations, and penalty management
+8. **ManagedPoolEscrow** - Simplified custody contract with direct SPV integration
+9. **IManagedPoolTypes** - Comprehensive type definitions for managed pool operations
 
 #### **Shared Infrastructure**
 
@@ -58,30 +64,59 @@ Users deposit any approved stablecoin → Professional NAV pricing → Tenor sel
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                                PIRON POOLS SYSTEM                               │
+│                          PIRON POOLS SYSTEM v1.1                               │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Users     │    │ Pool Factory│    │ Pool Registry│   │Access Manager│
-│             │    │             │    │             │    │             │
-└──────┬──────┘    └──────┬──────┘    └──────┬──────┘    └──────┬──────┘
-       │                  │                  │                  │
-       │ 1. Deposit       │ 2. Create Pool   │ 3. Register     │ 4. Manage Roles
-       │                  │                  │                  │
-       ▼                  ▼                  ▼                  ▼
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│Liquidity    │◄──►│   Manager   │◄──►│   Escrow    │◄──►│ Fee Manager │
-│Pool (ERC4626)│   │             │    │ (Single Mgr)│    │(Standalone) │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-       ▲                  ▲                  ▲                  ▲
-       │                  │                  │                  │
-       │ 5. Withdraw      │ 6. Process       │ 7. Release      │ 8. Calculate Fees
-       │                  │    Investment    │    Funds        │    (Manual)
-       ▼                  ▼                  ▼                  ▼
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Frontend  │    │     SPV     │    │Pool Oracle  │    │  Treasury   │
-│             │    │ (Off-chain) │    │(Not Impl.)  │    │             │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+SINGLE-ASSET POOLS (v1.0)                    MANAGED STABLE YIELD POOLS (v1.1)
+┌─────────────────────────────┐              ┌─────────────────────────────────┐
+│                             │              │                                 │
+│  ┌─────────────┐            │              │    ┌─────────────────┐          │
+│  │   Users     │            │              │    │     Users       │          │
+│  └──────┬──────┘            │              │    │ (Tenor Select)  │          │
+│         │                   │              │    └─────────┬───────┘          │
+│         ▼                   │              │              │                  │
+│  ┌─────────────┐            │              │              ▼                  │
+│  │ Liquidity   │            │              │    ┌─────────────────┐          │
+│  │Pool (ERC4626)│           │              │    │ StableYieldPool │          │
+│  └──────┬──────┘            │              │    │   (ERC4626)     │          │
+│         │                   │              │    └─────────┬───────┘          │
+│         ▼                   │              │              │                  │
+│  ┌─────────────┐            │              │              ▼                  │
+│  │   Manager   │            │              │    ┌─────────────────┐          │
+│  │ (Business   │            │              │    │StableYieldMgr   │          │
+│  │  Logic)     │            │              │    │ (NAV, Penalties)│          │
+│  └──────┬──────┘            │              │    └─────────┬───────┘          │
+│         │                   │              │              │                  │
+│         ▼                   │              │              ▼                  │
+│  ┌─────────────┐            │              │    ┌─────────────────┐          │
+│  │ Pool Escrow │            │              │    │ManagedPoolEscrow│          │
+│  │ (Custody)   │            │              │    │ (SPV Direct)    │          │
+│  └─────────────┘            │              │    └─────────────────┘          │
+│                             │              │                                 │
+└─────────────────────────────┘              └─────────────────────────────────┘
+                │                                           │
+                └────────────┬──────────────────────────────┘
+                             │
+                             ▼
+                ┌─────────────────────────────┐
+                │     SHARED INFRASTRUCTURE   │
+                │                             │
+                │ ┌─────────────────────────┐ │
+                │ │    Pool Registry        │ │
+                │ │  (Asset Approval &      │ │
+                │ │   Pool Registration)    │ │
+                │ └─────────────────────────┘ │
+                │                             │
+                │ ┌─────────────────────────┐ │
+                │ │   Access Manager        │ │
+                │ │ (Role-Based Security)   │ │
+                │ └─────────────────────────┘ │
+                │                             │
+                │ ┌─────────────────────────┐ │
+                │ │        SPV              │ │
+                │ │  (Off-chain T-bills)    │ │
+                │ └─────────────────────────┘ │
+                └─────────────────────────────┘
 ```
 
 ## Pool Lifecycle & Status Flow
@@ -448,6 +483,192 @@ FeeConfig({
 
 **Note:** Fees are calculated by FeeManager but require manual integration to collect during transactions.
 
+## Managed Stable Yield Pools (v1.1) - Detailed Flows
+
+### Managed Pool Architecture
+
+Managed Stable Yield Pools represent a sophisticated evolution of the single-asset model, offering:
+
+- **Tenor Flexibility**: Users select investment duration (90d, 180d, 270d, 360d) at deposit
+- **NAV-Based Pricing**: Daily NAV updates with floating share prices
+- **Early Exit Capability**: Available after 30-day minimum hold with penalties
+- **Direct SPV Integration**: Simplified architecture with no underlying pool complexity
+- **Multi-Currency Support**: Deploy for any approved stablecoin (USDC, CNGN, etc.)
+
+### Managed Pool Lifecycle
+
+#### 1. Pool Deployment
+
+**Actors:** Admin  
+**Contracts:** ManagedPoolFactory, PoolRegistry
+
+```solidity
+// Deploy a new managed pool
+ManagedPoolFactory.createStableYieldPool(StableYieldPoolConfig({
+    asset: USDC_ADDRESS,
+    poolName: "USDC Stable Yield Pool",
+    spvAddress: SPV_ADDRESS,
+    supportedTenors: [90, 180, 270, 360],
+    minInvestment: 100e6,  // $100 minimum
+    expenseRatio: 50       // 0.5% annual fee
+}))
+```
+
+**Deployment Process:**
+
+1. `ManagedPoolFactory.createStableYieldPool()` - Deploy StableYieldPool and ManagedPoolEscrow
+2. `PoolRegistry.registerManagedPool()` - Register in unified registry
+3. Pool immediately available for deposits
+
+#### 2. Deposit with Tenor Selection
+
+**Actors:** Users  
+**Contracts:** StableYieldPool, StableYieldManager, ManagedPoolEscrow
+
+```solidity
+// User deposits $1,000 USDC for 180 days
+StableYieldPool.depositWithTenor(1000e6, 180, userAddress)
+```
+
+**Function Call Sequence:**
+
+1. `StableYieldPool.depositWithTenor()` - User entry point with tenor selection
+2. `USDC.transferFrom(user, escrow, amount)` - Transfer to escrow
+3. `ManagedPoolEscrow.deposit(amount)` - Update escrow cash buffer
+4. `StableYieldManager.handleManagedDeposit()` - Process deposit with tenor
+5. `StableYieldPool._mint(user, shares)` - Mint shares at current NAV
+
+**State Changes:**
+
+- User position created with selected tenor and maturity date
+- Escrow cash buffer increased
+- NAV recalculated and share price updated
+- User receives ERC4626 shares
+
+#### 3. NAV Calculation & Updates
+
+**Actors:** Operator, SPV  
+**Contracts:** StableYieldManager
+
+```solidity
+// Daily NAV update process
+StableYieldManager.updatePoolNAV(poolAddress, newInstrumentValues, attestationProof)
+```
+
+**NAV Components:**
+
+- **Cash Buffer**: Immediate liquidity (10% target)
+- **T-bill Holdings**: Current market value of SPV investments
+- **Accrued Interest**: Daily interest accrual on T-bill positions
+- **Pending Withdrawals**: Queued exit requests
+
+**NAV Formula:**
+
+```solidity
+NAV = (cashBuffer + instrumentValue + accruedInterest - pendingWithdrawals) / totalShares
+```
+
+#### 4. Early Exit with Penalties
+
+**Actors:** Users  
+**Contracts:** StableYieldPool, StableYieldManager
+
+```solidity
+// User requests early exit after 45 days (before 180-day maturity)
+StableYieldPool.requestEarlyExit(userShares, userAddress)
+```
+
+**Early Exit Process:**
+
+1. `StableYieldPool.requestEarlyExit()` - User initiates early exit
+2. `StableYieldManager.handleManagedWithdraw()` - Calculate penalty
+3. **Penalty Calculation**: Based on remaining time and withdrawal amount
+4. **Immediate vs Queued**: Depends on cash buffer availability
+
+**Penalty Structure:**
+
+- **Base Penalty**: 3-5% of withdrawal amount
+- **Time-Based Reduction**: Decreases as position approaches maturity
+- **Minimum Hold**: 30 days before any exit allowed
+
+```solidity
+// Simplified penalty calculation
+uint256 penalty = (withdrawAmount * basePenaltyRate * remainingDays) / (maxTenorDays * 10000);
+```
+
+#### 5. SPV Coordination
+
+**Actors:** SPV  
+**Contracts:** StableYieldManager, ManagedPoolEscrow
+
+```solidity
+// SPV allocates cash buffer to T-bill investments
+StableYieldManager.coordinateSPVInvestment(poolAddress, allocationAmount)
+
+// SPV provides liquidity for large withdrawals
+StableYieldManager.requestSPVLiquidity(poolAddress, liquidityAmount)
+```
+
+**SPV Integration:**
+
+- **Investment Allocation**: SPV draws from cash buffer for T-bill purchases
+- **Liquidity Provision**: SPV provides funds for large withdrawal queues
+- **Attestation**: SPV provides cryptographic proof of T-bill holdings
+- **Maturity Processing**: SPV handles T-bill maturities and reinvestment
+
+#### 6. Maturity Withdrawal (Full Returns)
+
+**Actors:** Users  
+**Contracts:** StableYieldPool, StableYieldManager
+
+```solidity
+// User withdraws at full maturity (180 days completed)
+StableYieldPool.withdraw(userShares, userAddress, userAddress)
+```
+
+**Maturity Withdrawal Process:**
+
+1. Position reaches selected tenor maturity
+2. No penalties applied for full-term holders
+3. User receives full NAV value of their shares
+4. Automatic processing from cash buffer or SPV liquidity
+
+### Example: Piron USDC Stable Yield Pool
+
+**Pool Configuration:**
+
+- **Asset**: USDC (US Dollar stablecoin)
+- **Pool Name**: "Piron USDC Stable Yield Pool"
+- **Supported Tenors**: 90d, 180d, 270d, 360d
+- **Minimum Investment**: $100
+- **Target Yield**: 4-6% APY (market dependent)
+
+**User Journey:**
+
+**Day 1: Deposit**
+
+- User deposits $10,000 USDC for 270-day tenor
+- Receives shares at current NAV (e.g., $1.00 per share = 10,000 shares)
+- Position maturity set to Day 271
+
+**Day 1-270: Investment Period**
+
+- SPV invests in rolling US Treasury Bills
+- Daily NAV updates reflect T-bill performance
+- User can monitor position value in real-time
+
+**Day 45: Early Exit Option**
+
+- User eligible for early exit (30-day minimum passed)
+- Early exit penalty: ~4% of withdrawal amount
+- Can withdraw immediately if cash buffer sufficient
+
+**Day 271: Maturity**
+
+- Position reaches full maturity
+- User withdraws with no penalties
+- Receives full NAV value: ~$10,600 (6% annual return)
+
 ## Real-World Example
 
 ### Treasury Bill Investment Pool
@@ -545,16 +766,19 @@ forge test --gas-report
 
 1. **AccessManager** - Deploy first for role management
 2. **PoolRegistry** - Deploy for pool registration
-3. **Manager** - Deploy for pool logic
-4. **PoolFactory** - Deploy with registry and manager addresses
-5. **FeeManager** - Deploy standalone (optional)
+3. **Manager** - Deploy for single-asset pool logic
+4. **PoolFactory** - Deploy for single-asset pools
+5. **StableYieldManager** - Deploy for managed pool logic
+6. **ManagedPoolFactory** - Deploy for managed stable yield pools
+7. **FeeManager** - Deploy standalone (optional)
 
 **Configuration Steps:**
 
 1. Set up roles in AccessManager
-2. Configure factory in PoolRegistry
-3. Approve assets in PoolRegistry
+2. Configure both factories in PoolRegistry
+3. Approve assets in PoolRegistry (USDC, CNGN, etc.)
 4. Grant necessary roles to SPV and operators
+5. Deploy managed pools for approved stablecoins
 
 ## Security Considerations
 
@@ -570,31 +794,40 @@ forge test --gas-report
 
 ### Current Limitations
 
+#### Single-Asset Pools (v1.0)
+
 1. **No Partial Allocation Refunds:** When SPV cannot secure full allocation (e.g., raises $100k but only invests $80k), there's no mechanism to refund the excess $20k to users proportionally.
-
 2. **Rigid Investment Flow:** The system assumes SPV will either invest the full amount or fail completely - no middle ground for partial investments.
+3. **No Early Exits:** Users must wait for full maturity - no early exit capability.
 
-3. **Fee Integration:** FeeManager exists but is not integrated with core flows.
+#### Managed Stable Yield Pools (v1.1)
 
-### Planned Enhancements (TODO2.md)
+1. **Fee Integration:** FeeManager exists but is not integrated with managed pool flows.
+2. **Oracle Dependency:** NAV updates require trusted SPV attestations - no on-chain price feeds yet.
+3. **Liquidity Management:** Cash buffer ratios are manually managed - no automated rebalancing.
 
-The following features are planned for implementation to handle real-world SPV allocation constraints:
+### Completed Enhancements ✅
 
-1. **Partial Allocation System**
+1. **Flexible Investment Processing** - Removed rigid slippage protection
+2. **Country Pool Simplification** - Removed unnecessary complexity, direct SPV model
+3. **Managed Pool Architecture** - Full NAV-based pricing with early exit capabilities
+4. **Multi-Tenor Support** - Users can select investment duration at deposit
 
-   - Allow SPV to invest less than total raised
-   - Implement proportional excess fund refunds
-   - New pool state: `PARTIALLY_ALLOCATED`
+### Planned Enhancements
 
-2. **Enhanced User Experience**
+1. **Enhanced Liquidity Management**
 
-   - Users can claim excess refunds automatically
-   - Adjusted share calculations after partial allocation
-   - Clear UI indicators for partial allocation scenarios
+   - Automated cash buffer rebalancing
+   - Dynamic penalty adjustments based on liquidity
+   - Improved SPV coordination protocols
 
-3. **Flexible Investment Processing**
-   - Remove rigid slippage protection (✅ **COMPLETED**)
-   - Support any investment amount ≤ total raised
-   - Auto-calculate user refunds and adjusted positions
+2. **Oracle Integration**
 
-See `TODO2.md` for detailed implementation plan.
+   - On-chain price feeds for T-bill valuations
+   - Automated NAV updates
+   - Decentralized attestation mechanisms
+
+3. **Fee System Integration**
+   - Automatic fee collection during deposits/withdrawals
+   - Performance fee calculations
+   - Gas optimization for fee processing
