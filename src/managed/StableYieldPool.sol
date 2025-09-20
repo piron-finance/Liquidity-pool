@@ -9,7 +9,9 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "../StableYieldManager.sol";
+import "../escrows/ManagedPoolEscrow.sol";
 import "../types/IPoolTypes.sol";
+import "../types/IManagedPoolTypes.sol";
 import "../AccessManager.sol";
 
 /**
@@ -30,6 +32,8 @@ contract StableYieldPool is
     ////////////////////////////////////////////////////////////////////////////////
 
     StableYieldManager public stableYieldManager;
+
+    ManagedPoolEscrow public escrow;
     
     AccessManager public accessManager;
     
@@ -43,7 +47,7 @@ contract StableYieldPool is
         address indexed user,
         uint256 amount,
         uint256 tenorDays,
-        IPoolTypes.MaturityAction maturityAction
+        IManagedPoolTypes.MaturityAction maturityAction
     );
     
     event EarlyExitDelegated(
@@ -123,16 +127,14 @@ contract StableYieldPool is
     function depositWithTenor(
         uint256 amount,
         uint256 tenorDays,
-        IPoolTypes.MaturityAction maturityAction,
+        IManagedPoolTypes.MaturityAction maturityAction,
         address receiver
     ) external whenNotPaused returns (uint256 shares) {
         require(amount > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
 
-        // Transfer asset directly from user to escrow
         IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), amount);
 
-        // Delegate to StableYieldManager for all business logic
         shares = stableYieldManager.handleManagedDeposit(
             address(this),
             amount,
@@ -142,7 +144,6 @@ contract StableYieldPool is
             msg.sender
         );
 
-        // Mint shares to receiver
         _mint(receiver, shares);
 
         emit TenorDepositDelegated(receiver, amount, tenorDays, maturityAction);
@@ -212,7 +213,7 @@ contract StableYieldPool is
         returns (uint256 shares) 
     {
         // Default: 180 days tenor, compound at maturity
-        return depositWithTenor(assets, 180, IPoolTypes.MaturityAction.COMPOUND, receiver);
+        return depositWithTenor(assets, 180, IManagedPoolTypes.MaturityAction.COMPOUND, receiver);
     }
 
     /**
@@ -231,7 +232,7 @@ contract StableYieldPool is
         assets = previewMint(shares);
         
         // Deposit with default settings
-        uint256 actualShares = depositWithTenor(assets, 180, IPoolTypes.MaturityAction.COMPOUND, receiver);
+        uint256 actualShares = depositWithTenor(assets, 180, IManagedPoolTypes.MaturityAction.COMPOUND, receiver);
         
         require(actualShares >= shares, "StableYieldPool/insufficient shares minted");
         

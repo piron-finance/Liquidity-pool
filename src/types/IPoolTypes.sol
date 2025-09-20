@@ -3,8 +3,8 @@ pragma solidity ^0.8.19;
 
 /**
  * @title IPoolTypes
- * @dev Shared type definitions for the pool system
- * @notice This interface defines all common types used across Manager, Library, and other contracts
+ * @dev Type definitions for single-asset pools
+ * @notice This interface defines types used for traditional single-asset pool operations
  */
 interface IPoolTypes {
     /**
@@ -100,106 +100,9 @@ interface IPoolTypes {
     }
 
 
-    // enum ManagedPoolType {
-    //     STABLE_YIELD,
-    //     LOCKED_YIELD,
-    //     INDEX_POOL,
-    //     TRANCHED_POOL
-    // }
-
-    //   struct ManagedPoolConfig {
-    //     ManagedPoolType poolType;
-    //     address[] underlyingPools;
-    //     uint256[] allocationWeights;
-    //     uint256 withdrawalFrequency;
-    //     uint256 rebalanceThreshold; // Basis points deviation trigger
-    //     bool autoReinvest;
-    // }
 
 
-     struct ManagedPoolData {
-        address poolAddress;        // StableYieldPool instance
-        address asset;              // Any approved stablecoin
-        address escrow;             // ManagedPoolEscrow instance
-        address spvAddress;         // SPV for this pool
-        uint256[] supportedTenors;  // [90, 180, 270, 360] days
-        uint256 minInvestment;      // In asset units
-        uint256 expenseRatio;       // Basis points
-        uint256 reserveRatio;       // Basis points (default 1000 = 10%)
-        bool isActive;
-        uint256 createdAt;
-    }
-
-      struct PoolReserves {
-        uint256 targetReserveRatio;    // 1000 = 10%
-        uint256 minReserveRatio;       // 500 = 5% (emergency minimum)
-        uint256 maxReserveRatio;       // 2000 = 20% (if high withdrawal demand)
-        uint256 currentCashBuffer;     // Current cash held
-        uint256 totalPoolAUM;          // Total pool assets
-        uint256 lastRebalanceTime;    // Last reserve rebalancing
-    }
-
-     struct UserPosition {
-        uint256 principal;             // Original deposit amount
-        uint256 shares;                // Pool shares owned
-        TenorDuration tenor; // Selected tenor
-        MaturityAction maturityAction; // Compound or withdraw
-        uint256 depositTime;           // When position was created
-        uint256 maturityTime;          // When tenor expires
-        uint256 accruedYield;          // Cached yield calculation
-        bool isActive;                 // Position status
-    }
 
 
-    enum TenorDuration {
-        TENOR_90D,   // 3 months
-        TENOR_180D,  // 6 months  
-        TENOR_270D,  // 9 months
-        TENOR_360D   // 12 months
-    }
-
-    enum MaturityAction {
-        COMPOUND,    // Auto-reinvest at maturity
-        WITHDRAW     // Withdraw principal + yield
-    }
-
-    struct CountryPoolConfig {
-        string countryCode;           // "NG", "US", "TR", "KE", etc.
-        string countryName;           // "Nigeria", "United States", "Turkey", etc.
-        address stablecoin;           // CNGN, USDT, USDC, etc. (flexible per country)
-        string stablecoinSymbol;      // "CNGN", "USDT", "USDC", etc.
-        uint256 penaltyRate;          // Early exit penalty (basis points, e.g., 300 = 3%)
-        uint256 minimumHoldPeriod;    // Minimum hold period in days (e.g., 30)
-        uint256 maxQueueTime;         // Maximum withdrawal queue time in days (e.g., 7)
-        bool isActive;                // Whether this country pool is active
-    }
-
-    struct TenorPosition {
-        uint256 principal;            // Original deposit amount
-        TenorDuration tenor;          // Selected tenor duration
-        MaturityAction maturityAction; // What to do at maturity
-        uint256 depositTime;          // Timestamp of deposit
-        uint256 maturityTime;         // Calculated maturity timestamp
-        uint256 accruedYield;         // Current accrued yield
-        bool isActive;                // Whether position is active
-    }
-
-    struct WithdrawalRequest {
-        address user;                 // User requesting withdrawal
-        uint256 shares;              // Shares to withdraw
-        uint256 requestTime;         // Timestamp of request
-        uint256 expectedAmount;      // Expected withdrawal amount (with penalty if early)
-        bool isPenalized;            // Whether this is an early exit (penalized)
-        bool isProcessed;            // Whether request has been processed
-    }
-
-    struct LadderedAllocation {
-        uint256 shortTermAllocation;  // 30-90 days (50%)
-        uint256 mediumTermAllocation; // 90-180 days (30%)
-        uint256 longTermAllocation;   // 180-365 days (20%)
-        uint256 cashBuffer;           // Emergency liquidity buffer
-        uint256 totalAllocated;       // Sum of all allocations
-        uint256 lastRebalanceTime;    // Last rebalancing timestamp
-    }
 
 }

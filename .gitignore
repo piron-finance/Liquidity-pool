@@ -15,16 +15,10 @@ docs/
 .cursor/rules
 .cursor/
 
-look.txt
-look2.txt
-TODO.md
-UNIMPLEMENTED_FEATURES.md
-MANAGED_POOLS_IMPLEMENTATION.md
-V1.1_ARCHITECTURE.md
-V1.1_IMPLEMENTATION_PLAN.md
-V1.1_SIMPLIFIED_ARCHITECTURE.md
-V1.1_SIMPLIFIED_IMPLEMENTATION.md
-look2.txt
+# All txt and md files (development/docs)
+*.txt
+*.md
 
-# TODO files
-TODO2.md
+# Except essential project files
+!README.md
+!CHANGELOG.md

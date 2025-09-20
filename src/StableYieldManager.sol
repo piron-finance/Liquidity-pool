@@ -10,6 +10,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "./interfaces/IManager.sol";
 import "./interfaces/IPoolRegistry.sol";
 import "./types/IPoolTypes.sol";
+import "./types/IManagedPoolTypes.sol";
 import "./AccessManager.sol";
 import "./managed/YieldCalculator.sol";
 import "./libraries/ValidationLibrary.sol";
@@ -46,30 +47,57 @@ contract StableYieldManager is
     
     mapping(address => PoolReserves) public poolReserves;
     
-    mapping(address => mapping(address => UserPosition[])) public userPositions;
-
-    mapping(address => WithdrawalRequest[]) public withdrawalQueues;
-    mapping(address => mapping(address => uint256[])) public userWithdrawalRequests;
-
     ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// T-BILL ATTESTATION STATE ///////////////////
+    /////////////////////////////// STRUCTS //////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    struct TBillHolding {
-        uint256 purchasePrice;      // Amount paid for T-bill
-        uint256 faceValue;          // Maturity value
-        uint256 purchaseDate;       // When purchased
-        uint256 maturityDate;       // When it matures
-        uint256 cusip;              // T-bill identifier
-        bool isMatured;             // Has it matured?
-        bool isLiquidated;          // Was it sold early?
-        bytes32 attestationHash;    // SPV signature proof
+    struct ManagedPoolData {
+        address poolAddress;        // StableYieldPool instance
+        address asset;              // Any approved stablecoin
+        address escrow;             // ManagedPoolEscrow instance
+        address spvAddress;         // SPV for this pool
+        uint256[] supportedTenors;  // [90, 180, 270, 360] days
+        uint256 minInvestment;      // In asset units
+        uint256 expenseRatio;       // Basis points
+        uint256 reserveRatio;       // Basis points (default 1000 = 10%)
+        bool isActive;
+        uint256 createdAt;
     }
 
-    // Pool address => Array of T-bill holdings
-    mapping(address => TBillHolding[]) public poolTBillHoldings;
+    struct PoolReserves {
+        uint256 targetReserveRatio;    // 1000 = 10%
+        uint256 minReserveRatio;       // 500 = 5% (emergency minimum)
+        uint256 maxReserveRatio;       // 2000 = 20% (if high withdrawal demand)
+        uint256 currentCashBuffer;     // Current cash held
+        uint256 totalPoolAUM;          // Total pool assets
+        uint256 lastRebalanceTime;    // Last reserve rebalancing
+    }
+
+    struct UserPosition {
+        uint256 principal;             // Original deposit amount
+        uint256 shares;                // Pool shares owned
+        IManagedPoolTypes.TenorDuration tenor; // Selected tenor
+        IManagedPoolTypes.MaturityAction maturityAction; // Compound or withdraw
+        uint256 depositTime;           // When position was created
+        uint256 maturityTime;          // When tenor expires
+        uint256 accruedYield;          // Cached yield calculation
+        bool isActive;                 // Position status
+    }
+
+    mapping(address => mapping(address => UserPosition[])) public userPositions;
+
+    mapping(address => IManagedPoolTypes.WithdrawalRequest[]) public withdrawalQueues;
+    mapping(address => mapping(address => uint256[])) public userWithdrawalRequests;
+
     
-    // Pool address => Total matured cash not yet allocated
+    mapping(address => IManagedPoolTypes.InstrumentHolding[]) public poolInstrumentHoldings;
+    
+    mapping(address => uint256[]) public activeInstrumentIndices;
+    
+    mapping(address => IManagedPoolTypes.PoolAggregates) public poolAggregates;
+    
+    mapping(address => IManagedPoolTypes.CouponPayment[]) public poolCouponPayments;
+    
     mapping(address => uint256) public poolMaturedCash;
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -89,8 +117,8 @@ contract StableYieldManager is
         address indexed user,
         uint256 amount,
         uint256 shares,
-        IPoolTypes.TenorDuration tenor,
-        IPoolTypes.MaturityAction maturityAction
+        IManagedPoolTypes.TenorDuration tenor,
+        IManagedPoolTypes.MaturityAction maturityAction
     );
     
     event EarlyExitRequested(
@@ -279,7 +307,7 @@ contract StableYieldManager is
         address poolAddress,
         uint256 amount,
         uint256 tenorDays,
-        IPoolTypes.MaturityAction maturityAction,
+        IManagedPoolTypes.MaturityAction maturityAction,
         address receiver,
         address sender
     ) external 
@@ -290,34 +318,29 @@ contract StableYieldManager is
         returns (uint256 shares) 
     {
         require(msg.sender == poolAddress, "StableYieldManager/invalid caller");
-        require (registry.isManagedPool(poolAddress), "StableYieldManager/invalid pool");
+        require(registry.isManagedPool(poolAddress), "StableYieldManager/invalid pool");
         require(amount > 0, "StableYieldManager/invalid amount");
         require(receiver != address(0), "StableYieldManager/invalid receiver");
         
-        IPoolTypes.ManagedPoolData storage poolData = managedPools[poolAddress];
+        ManagedPoolData storage poolData = managedPools[poolAddress];
         require(amount >= poolData.minInvestment, "StableYieldManager/below minimum");
         
         uint256 navPerShare = calculateNAVPerShare(poolAddress);
         
-        // Calculate shares to mint  NAV pricing
-        // Get asset decimals for proper scaling
         address asset = poolData.asset;
         uint8 assetDecimals = IERC20Metadata(asset).decimals();
         uint256 decimalMultiplier = 10**assetDecimals;
         
         shares = (amount * decimalMultiplier) / navPerShare;
         
-        // Allocate deposit (pool-level reserves)
         uint256 reserveAmount = (amount * poolData.reserveRatio) / 10000;
         uint256 investmentAmount = amount - reserveAmount;
         
-        // Update pool reserves
         PoolReserves storage reserves = poolReserves[poolAddress];
         reserves.currentCashBuffer += reserveAmount;
         reserves.totalPoolAUM += amount;
         
-        // Create user position with tenor tracking
-        IPoolTypes.TenorDuration tenor = _daysToDuration(tenorDays);
+        IManagedPoolTypes.TenorDuration tenor = _daysToDuration(tenorDays);
         uint256 maturityTime = block.timestamp + (tenorDays * 1 days);
         
         userPositions[poolAddress][receiver].push(UserPosition({
@@ -331,7 +354,6 @@ contract StableYieldManager is
             isActive: true
         }));
         
-        // Coordinate SPV investment (if needed)
         if (investmentAmount > 0) {
             _coordinateSPVInvestment(poolAddress, investmentAmount);
         }
@@ -351,12 +373,12 @@ contract StableYieldManager is
     function calculatePoolNAV(address poolAddress) public view returns (uint256 nav) {
         require(managedPools[poolAddress].isActive, "StableYieldManager/pool not active");
         
-        uint256 tbillValue = _getTotalTBillValue(poolAddress);
+        uint256 instrumentValue = _getTotalInstrumentValue(poolAddress);
         uint256 cashBuffer = _getCashBufferValue(poolAddress);
         uint256 accruedInterest = _getAccruedInterest(poolAddress);
         uint256 fees = _calculateManagementFees(poolAddress);
         
-        nav = tbillValue + cashBuffer + accruedInterest - fees;
+        nav = instrumentValue + cashBuffer + accruedInterest - fees;
     }
     
     /**
@@ -373,7 +395,7 @@ contract StableYieldManager is
         uint256 decimalMultiplier = 10**assetDecimals;
         
         if (totalShares == 0) {
-            navPerShare = decimalMultiplier; // Initial NAV = 1.0 in asset decimals
+            navPerShare = decimalMultiplier;
         } else {
             navPerShare = (totalNAV * decimalMultiplier) / totalShares;
         }
@@ -413,26 +435,21 @@ contract StableYieldManager is
         uint256 navPerShare = calculateNAVPerShare(poolAddress);
         uint256 baseValue = (shares * navPerShare) / 1e18;
         
-        // Check for early exit penalties
         (uint256 penaltyRate, bool isEarlyExit) = _calculateEarlyExitPenalty(poolAddress, owner, shares);
         uint256 finalValue = baseValue - ((baseValue * penaltyRate) / 10000);
         
-        // Check cash reserves availability
         PoolReserves storage reserves = poolReserves[poolAddress];
         
         if (reserves.currentCashBuffer >= finalValue) {
-            // Immediate withdrawal (T+0/1)
             reserves.currentCashBuffer -= finalValue;
             reserves.totalPoolAUM -= baseValue;
             
-            // Transfer funds from escrow to user
             _processImmediateWithdrawal(poolAddress, receiver, finalValue);
             
             actualShares = shares;
         } else {
-            // Queue withdrawal (T+7)
             _queueWithdrawal(poolAddress, owner, shares, finalValue, isEarlyExit);
-            actualShares = 0; // Shares not burned yet
+            actualShares = 0;
         }
         
         if (isEarlyExit && actualShares > 0) {
@@ -458,24 +475,19 @@ contract StableYieldManager is
     {
         require(managedPools[poolAddress].isActive, "StableYieldManager/pool not active");
         
-        WithdrawalRequest[] storage queue = withdrawalQueues[poolAddress];
+        IManagedPoolTypes.WithdrawalRequest[] storage queue = withdrawalQueues[poolAddress];
         PoolReserves storage reserves = poolReserves[poolAddress];
         
         uint256 processed = 0;
         
         for (uint256 i = 0; i < queue.length && processed < maxRequests; i++) {
-            WithdrawalRequest storage request = queue[i];
+            IManagedPoolTypes.WithdrawalRequest storage request = queue[i];
             
             if (!request.isProcessed && reserves.currentCashBuffer >= request.expectedAmount) {
-                // Process withdrawal
                 reserves.currentCashBuffer -= request.expectedAmount;
                 reserves.totalPoolAUM -= request.expectedAmount;
                 
-                // Transfer funds
                 _processQueuedWithdrawal(poolAddress, request.user, request.expectedAmount);
-                
-                // Burn shares
-                // Note: This would need to be coordinated with the pool contract
                 
                 request.isProcessed = true;
                 processed++;
@@ -484,7 +496,6 @@ contract StableYieldManager is
             }
         }
         
-        // Request SPV liquidity if queue still has pending requests
         if (processed < queue.length) {
             uint256 totalPending = _calculatePendingWithdrawals(poolAddress);
             _requestSPVLiquidity(poolAddress, totalPending);
@@ -506,14 +517,12 @@ contract StableYieldManager is
         uint256 currentRatio = (reserves.currentCashBuffer * 10000) / reserves.totalPoolAUM;
         
         if (currentRatio < reserves.minReserveRatio) {
-            // Low reserves: Request SPV to liquidate some T-bills
             uint256 needed = ((reserves.targetReserveRatio * reserves.totalPoolAUM) / 10000) - reserves.currentCashBuffer;
             _requestSPVLiquidity(poolAddress, needed);
             
             emit ReservesRebalanced(poolAddress, currentRatio, reserves.targetReserveRatio, needed);
             
         } else if (currentRatio > reserves.maxReserveRatio) {
-            // Excess reserves: Invest excess cash in T-bills
             uint256 excess = reserves.currentCashBuffer - ((reserves.targetReserveRatio * reserves.totalPoolAUM) / 10000);
             _coordinateSPVInvestment(poolAddress, excess);
             
@@ -578,11 +587,11 @@ contract StableYieldManager is
     /**
      * @dev Convert days to TenorDuration enum
      */
-    function _daysToDuration(uint256 days) internal pure returns (IPoolTypes.TenorDuration) {
-        if (days == 90) return IPoolTypes.TenorDuration.TENOR_90D;
-        if (days == 180) return IPoolTypes.TenorDuration.TENOR_180D;
-        if (days == 270) return IPoolTypes.TenorDuration.TENOR_270D;
-        if (days == 360) return IPoolTypes.TenorDuration.TENOR_360D;
+    function _daysToDuration(uint256 days) internal pure returns (IManagedPoolTypes.TenorDuration) {
+        if (days == 90) return IManagedPoolTypes.TenorDuration.TENOR_90D;
+        if (days == 180) return IManagedPoolTypes.TenorDuration.TENOR_180D;
+        if (days == 270) return IManagedPoolTypes.TenorDuration.TENOR_270D;
+        if (days == 360) return IManagedPoolTypes.TenorDuration.TENOR_360D;
         revert("StableYieldManager/invalid tenor days");
     }
 
@@ -621,7 +630,7 @@ contract StableYieldManager is
         uint256 expectedAmount,
         bool isPenalized
     ) internal {
-        withdrawalQueues[poolAddress].push(WithdrawalRequest({
+        withdrawalQueues[poolAddress].push(IManagedPoolTypes.WithdrawalRequest({
             user: user,
             shares: shares,
             expectedAmount: expectedAmount,
@@ -641,55 +650,31 @@ contract StableYieldManager is
     ////////////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice Get total value of T-bills held by the pool
+     * @notice Get total value of instruments held by the pool
      * @param poolAddress Pool contract address
-     * @return value Total T-bill value including accrued discount
+     * @return value Total instrument value including accrued interest
      */
-    function _getTotalTBillValue(address poolAddress) internal view returns (uint256 value) {
+    function _getTotalInstrumentValue(address poolAddress) internal view returns (uint256 value) {
         ManagedPoolData memory poolData = managedPools[poolAddress];
         PoolReserves memory reserves = poolReserves[poolAddress];
         
-        //  T-bill value = total allocated funds + accrued yield
         uint256 allocatedFunds = reserves.totalPoolAUM - reserves.currentCashBuffer;
         
         if (allocatedFunds == 0) return 0;
         
-        // Calculate deterministic T-bill value based on attestations (enterprise-grade)
-        TBillHolding[] memory holdings = poolTBillHoldings[poolAddress];
-        uint256 totalValue = 0;
+        IManagedPoolTypes.PoolAggregates storage aggregates = poolAggregates[poolAddress];
         
-        for (uint256 i = 0; i < holdings.length; i++) {
-            TBillHolding memory holding = holdings[i];
-            
-            if (holding.isLiquidated) {
-                // Skip liquidated T-bills
-                continue;
+        uint256 totalValue;
+        if (aggregates.activeInstrumentCount == 0) {
+            totalValue = 0;
+        } else {
+            if (block.timestamp > aggregates.lastAccrualTimestamp) {
+                _updatePoolAccruals(poolAddress);
             }
             
-            if (holding.isMatured) {
-                // Add to matured cash pool
-                totalValue += holding.faceValue;
-            } else {
-                // Calculate linear accrual for active T-bills
-                if (block.timestamp >= holding.maturityDate) {
-                    // Should be matured but not yet attested
-                    totalValue += holding.faceValue;
-                } else {
-                    // Linear accrual calculation
-                    uint256 totalGain = holding.faceValue - holding.purchasePrice;
-                    uint256 totalDays = holding.maturityDate - holding.purchaseDate;
-                    uint256 elapsedDays = block.timestamp - holding.purchaseDate;
-                    
-                    // Ensure we don't over-accrue
-                    if (elapsedDays > totalDays) elapsedDays = totalDays;
-                    
-                    uint256 accruedGain = (totalGain * elapsedDays) / totalDays;
-                    totalValue += holding.purchasePrice + accruedGain;
-                }
-            }
+            totalValue = aggregates.totalAccruedValue;
         }
         
-        // Add any matured cash not yet processed
         totalValue += poolMaturedCash[poolAddress];
         
         value = totalValue;
@@ -715,9 +700,8 @@ contract StableYieldManager is
         
         if (allocatedFunds == 0) return 0;
         
-        // Calculate daily accrued interest on T-bill investments
         uint256 timeElapsed = block.timestamp - reserves.lastRebalanceTime;
-        uint256 dailyRate = 800; // 8% APY in basis points / 365
+        uint256 dailyRate = 800;
         
         interest = (allocatedFunds * dailyRate * timeElapsed) / (10000 * 365 days);
     }
@@ -733,7 +717,6 @@ contract StableYieldManager is
         
         if (reserves.totalPoolAUM == 0) return 0;
         
-        // Calculate daily management fee
         uint256 timeElapsed = block.timestamp - reserves.lastRebalanceTime;
         fees = (reserves.totalPoolAUM * poolData.expenseRatio * timeElapsed) / (10000 * 365 days);
     }
@@ -750,12 +733,8 @@ contract StableYieldManager is
         require(amount > 0, "StableYieldManager/invalid investment amount");
         require(poolData.spvAddress != address(0), "StableYieldManager/invalid SPV address");
         
-        // Transfer funds from escrow to SPV custody
         address escrow = poolData.escrow;
         require(escrow != address(0), "StableYieldManager/invalid escrow");
-        
-        // Call escrow to transfer funds to SPV
-        // This triggers the actual T-bill purchase process
         (bool success, ) = escrow.call(
             abi.encodeWithSignature(
                 "transferToSPV(address,uint256)",
@@ -765,7 +744,6 @@ contract StableYieldManager is
         );
         require(success, "StableYieldManager/SPV transfer failed");
         
-        // Update pool state to reflect allocated funds
         reserves.lastRebalanceTime = block.timestamp;
         
         emit SPVInvestmentRequested(poolAddress, poolData.spvAddress, amount, block.timestamp);
@@ -785,15 +763,11 @@ contract StableYieldManager is
         require(user != address(0), "StableYieldManager/invalid user");
         require(amount > 0, "StableYieldManager/invalid amount");
         
-        // Deduct from cash buffer and total AUM
         reserves.currentCashBuffer -= amount;
         reserves.totalPoolAUM -= amount;
         
-        // Execute withdrawal via escrow
         address escrow = poolData.escrow;
         require(escrow != address(0), "StableYieldManager/invalid escrow");
-        
-        // Call escrow to process the withdrawal
         (bool success, ) = escrow.call(
             abi.encodeWithSignature(
                 "processWithdrawal(address,uint256)",
@@ -803,7 +777,6 @@ contract StableYieldManager is
         );
         require(success, "StableYieldManager/withdrawal processing failed");
         
-        // Update reserves timestamp
         reserves.lastRebalanceTime = block.timestamp;
         
         emit ImmediateWithdrawalProcessed(poolAddress, user, amount, block.timestamp);
@@ -815,22 +788,20 @@ contract StableYieldManager is
      * @param user User requesting withdrawal
      * @param shares Shares to withdraw
      */
-    function _processQueuedWithdrawal(address poolAddress, address user, uint256 shares) internal {
-        // Add to withdrawal queue
-        withdrawalQueues[poolAddress].push(WithdrawalRequest({
+    function _processQueuedWithdrawal(address poolAddress, address user, uint256 amount) internal {
+        withdrawalQueues[poolAddress].push(IManagedPoolTypes.WithdrawalRequest({
             user: user,
-            shares: shares,
+            shares: 0,
             requestTime: block.timestamp,
-            expectedAmount: 0, // Will be calculated when processed
-            isPenalized: true, // Early exit
+            expectedAmount: amount,
+            isPenalized: true,
             isProcessed: false
         }));
         
-        // Track user's withdrawal requests
         uint256 requestIndex = withdrawalQueues[poolAddress].length - 1;
         userWithdrawalRequests[poolAddress][user].push(requestIndex);
         
-        emit WithdrawalQueued(poolAddress, user, requestIndex, shares, 0, true);
+        emit WithdrawalQueued(poolAddress, user, requestIndex, 0, amount, true);
     }
 
     /**
@@ -839,21 +810,19 @@ contract StableYieldManager is
      * @return pending Total pending withdrawal amount
      */
     function _calculatePendingWithdrawals(address poolAddress) internal view returns (uint256 pending) {
-        WithdrawalRequest[] memory queue = withdrawalQueues[poolAddress];
+        IManagedPoolTypes.WithdrawalRequest[] memory queue = withdrawalQueues[poolAddress];
         uint256 navPerShare = calculateNAVPerShare(poolAddress);
         
         for (uint256 i = 0; i < queue.length; i++) {
             if (!queue[i].isProcessed) {
-                // Get asset decimals for proper calculation
                 address asset = managedPools[poolAddress].asset;
                 uint8 assetDecimals = IERC20Metadata(asset).decimals();
                 uint256 decimalMultiplier = 10**assetDecimals;
                 
                 uint256 amount = (queue[i].shares * navPerShare) / decimalMultiplier;
                 
-                // Apply penalty if early exit
                 if (queue[i].isPenalized) {
-                    uint256 penalty = (amount * 300) / 10000; // 3% penalty
+                    uint256 penalty = (amount * 300) / 10000;
                     amount -= penalty;
                 }
                 
@@ -874,16 +843,11 @@ contract StableYieldManager is
         require(amount > 0, "StableYieldManager/invalid liquidity amount");
         require(poolData.spvAddress != address(0), "StableYieldManager/invalid SPV address");
         
-        // Calculate if we need to liquidate T-bills
         uint256 allocatedFunds = reserves.totalPoolAUM - reserves.currentCashBuffer;
         require(allocatedFunds >= amount, "StableYieldManager/insufficient allocated funds");
         
-        // Signal SPV to liquidate T-bills and return funds to escrow
         address escrow = poolData.escrow;
         require(escrow != address(0), "StableYieldManager/invalid escrow");
-        
-        // Signal SPV via oracle to liquidate specific amount of T-bills
-        // In reality, this triggers off-chain notification to SPV
         if (spvOracle != address(0)) {
             (bool success, ) = spvOracle.call(
                 abi.encodeWithSignature(
@@ -896,65 +860,84 @@ contract StableYieldManager is
             require(success, "StableYieldManager/liquidation request failed");
         }
         
-        // Update reserves to reflect pending liquidation
         reserves.lastRebalanceTime = block.timestamp;
         
         emit SPVLiquidityRequested(poolAddress, poolData.spvAddress, amount, block.timestamp);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// T-BILL ATTESTATION FUNCTIONS ///////////////
+    /////////////////////////////// INSTRUMENT ATTESTATION FUNCTIONS ///////////
     ////////////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice Attest T-bill purchase by SPV
+     * @notice Attest instrument purchase by SPV (T-bills or bonds)
      * @param poolAddress Pool contract address
-     * @param purchasePrice Amount paid for T-bill
-     * @param faceValue Maturity value of T-bill
-     * @param maturityDate When T-bill matures (timestamp)
-     * @param cusip T-bill identifier
+     * @param purchasePrice Amount paid (discount for T-bills, par for bonds)
+     * @param faceValue Principal/maturity value
+     * @param maturityDate When instrument matures (timestamp)
+     * @param annualCouponRate Annual coupon rate in basis points (0 for T-bills)
+     * @param couponFrequency Payment frequency (0=T-bill, 2=semi-annual, 4=quarterly, 12=monthly)
+     * @param cusip Instrument identifier
      * @param spvSignature SPV signature proving purchase
      */
-    function attestTBillPurchase(
+    function attestInstrumentPurchase(
         address poolAddress,
         uint256 purchasePrice,
         uint256 faceValue,
         uint256 maturityDate,
+        uint256 annualCouponRate,
+        uint8 couponFrequency,
         uint256 cusip,
         bytes calldata spvSignature
     ) external onlyRole(accessManager.SPV_ROLE()) {
         require(managedPools[poolAddress].isActive, "StableYieldManager/pool not active");
         require(purchasePrice > 0, "StableYieldManager/invalid purchase price");
-        require(faceValue > purchasePrice, "StableYieldManager/invalid face value");
+        require(faceValue >= purchasePrice, "StableYieldManager/invalid face value"); // >= for bonds at par
         require(maturityDate > block.timestamp, "StableYieldManager/invalid maturity date");
-        require(maturityDate <= block.timestamp + 365 days, "StableYieldManager/maturity too far");
+        require(maturityDate <= block.timestamp + 1095 days, "StableYieldManager/maturity too far"); // 3 years for bonds
         
-        // Create attestation hash for verification
+        if (annualCouponRate > 0) {
+            require(couponFrequency > 0, "StableYieldManager/bonds must have coupon frequency");
+            require(couponFrequency == 2 || couponFrequency == 4 || couponFrequency == 12, "StableYieldManager/invalid coupon frequency");
+            require(annualCouponRate <= 5000, "StableYieldManager/coupon rate too high");
+        } else {
+            require(couponFrequency == 0, "StableYieldManager/T-bills cannot have coupon frequency");
+            require(faceValue > purchasePrice, "StableYieldManager/T-bills must be discounted");
+        }
+        
         bytes32 attestationHash = keccak256(abi.encodePacked(
             poolAddress,
             purchasePrice,
             faceValue,
             maturityDate,
+            annualCouponRate,
+            couponFrequency,
             cusip,
             block.timestamp
         ));
         
-        // Verify SPV signature (simplified - in production use ECDSA recovery)
         require(_verifyAttestationSignature(attestationHash, spvSignature), "StableYieldManager/invalid signature");
-        
-        // Record T-bill holding
-        poolTBillHoldings[poolAddress].push(TBillHolding({
+        poolInstrumentHoldings[poolAddress].push(IManagedPoolTypes.InstrumentHolding({
             purchasePrice: purchasePrice,
             faceValue: faceValue,
             purchaseDate: block.timestamp,
             maturityDate: maturityDate,
+            annualCouponRate: annualCouponRate,
+            couponFrequency: couponFrequency,
+            lastCouponPaidDate: 0,  // No coupons paid yet
+            couponsPaid: 0,         // No coupons paid yet
+            attestationHash: attestationHash,
             cusip: cusip,
             isMatured: false,
-            isLiquidated: false,
-            attestationHash: attestationHash
+            isLiquidated: false
         }));
         
-        emit TBillPurchaseAttested(poolAddress, cusip, purchasePrice, faceValue, maturityDate);
+        uint256 newIndex = poolInstrumentHoldings[poolAddress].length - 1;
+        activeInstrumentIndices[poolAddress].push(newIndex);
+        
+        _updateAggregatesOnPurchase(poolAddress, purchasePrice, faceValue, maturityDate);
+        
+        emit InstrumentPurchaseAttested(poolAddress, cusip, purchasePrice, faceValue, maturityDate, annualCouponRate);
     }
 
     /**
@@ -993,6 +976,12 @@ contract StableYieldManager is
         
         // Mark as matured
         holding.isMatured = true;
+        
+        // Remove from active instruments for gas efficiency
+        _removeFromActiveIndices(poolAddress, holdingIndex);
+        
+        // Update aggregates on maturity
+        _updateAggregatesOnRemoval(poolAddress, holding.purchasePrice, holding.faceValue, holding.maturityDate);
         
         // Add to pool's matured cash
         poolMaturedCash[poolAddress] += actualMaturityValue;
@@ -1044,6 +1033,12 @@ contract StableYieldManager is
         // Mark as liquidated
         holding.isLiquidated = true;
         
+        // Remove from active instruments for gas efficiency
+        _removeFromActiveIndices(poolAddress, holdingIndex);
+        
+        // Update aggregates on liquidation
+        _updateAggregatesOnRemoval(poolAddress, holding.purchasePrice, holding.faceValue, holding.maturityDate);
+        
         // Add liquidation proceeds to cash buffer
         PoolReserves storage reserves = poolReserves[poolAddress];
         reserves.currentCashBuffer += liquidationValue;
@@ -1056,21 +1051,89 @@ contract StableYieldManager is
     }
 
     /**
-     * @notice Get all T-bill holdings for a pool
+     * @notice Attest bond coupon payment by SPV
      * @param poolAddress Pool contract address
-     * @return holdings Array of T-bill holdings
+     * @param holdingIndex Index of bond in holdings array
+     * @param couponAmount Amount of coupon received
+     * @param expectedDate When coupon was due
+     * @param spvSignature SPV signature proving coupon receipt
      */
-    function getPoolTBillHoldings(address poolAddress) external view returns (TBillHolding[] memory holdings) {
-        return poolTBillHoldings[poolAddress];
+    function attestCouponPayment(
+        address poolAddress,
+        uint256 holdingIndex,
+        uint256 couponAmount,
+        uint256 expectedDate,
+        bytes calldata spvSignature
+    ) external onlyRole(accessManager.SPV_ROLE()) {
+        require(managedPools[poolAddress].isActive, "StableYieldManager/pool not active");
+        require(holdingIndex < poolInstrumentHoldings[poolAddress].length, "StableYieldManager/invalid holding index");
+        require(couponAmount > 0, "StableYieldManager/invalid coupon amount");
+        
+        InstrumentHolding storage holding = poolInstrumentHoldings[poolAddress][holdingIndex];
+        require(holding.couponFrequency > 0, "StableYieldManager/instrument has no coupons");
+        require(!holding.isMatured, "StableYieldManager/instrument already matured");
+        require(!holding.isLiquidated, "StableYieldManager/instrument already liquidated");
+        
+        // Calculate expected coupon amount
+        uint256 expectedCouponAmount = (holding.faceValue * holding.annualCouponRate) / (10000 * holding.couponFrequency);
+        require(couponAmount == expectedCouponAmount, "StableYieldManager/incorrect coupon amount");
+        
+        // Create coupon attestation hash
+        bytes32 couponHash = keccak256(abi.encodePacked(
+            poolAddress,
+            holdingIndex,
+            holding.cusip,
+            couponAmount,
+            expectedDate,
+            "COUPON",
+            block.timestamp
+        ));
+        
+        require(_verifyAttestationSignature(couponHash, spvSignature), "StableYieldManager/invalid signature");
+        
+        holding.lastCouponPaidDate = block.timestamp;
+        holding.couponsPaid += 1;
+        poolCouponPayments[poolAddress].push(IManagedPoolTypes.CouponPayment({
+            holdingIndex: holdingIndex,
+            couponAmount: couponAmount,
+            expectedDate: expectedDate,
+            actualDate: block.timestamp
+        }));
+        
+        PoolReserves storage reserves = poolReserves[poolAddress];
+        reserves.currentCashBuffer += couponAmount;
+        reserves.lastRebalanceTime = block.timestamp;
+        
+        emit CouponPaymentAttested(poolAddress, holding.cusip, couponAmount, expectedDate);
+        
+        _processQueuedWithdrawals(poolAddress);
     }
 
     /**
-     * @notice Get count of active (non-matured, non-liquidated) T-bills
+     * @notice Get all instrument holdings for a pool
      * @param poolAddress Pool contract address
-     * @return count Number of active T-bills
+     * @return holdings Array of instrument holdings
      */
-    function getActiveTBillCount(address poolAddress) external view returns (uint256 count) {
-        TBillHolding[] memory holdings = poolTBillHoldings[poolAddress];
+    function getPoolInstrumentHoldings(address poolAddress) external view returns (IManagedPoolTypes.InstrumentHolding[] memory holdings) {
+        return poolInstrumentHoldings[poolAddress];
+    }
+
+    /**
+     * @notice Get all coupon payments for a pool
+     * @param poolAddress Pool contract address
+     * @return payments Array of coupon payments
+     */
+    function getPoolCouponPayments(address poolAddress) external view returns (IManagedPoolTypes.CouponPayment[] memory payments) {
+        return poolCouponPayments[poolAddress];
+    }
+
+    /**
+     * @notice Get count of active (non-matured, non-liquidated) instruments
+     * @param poolAddress Pool contract address
+     * @return count Number of active instruments
+     */
+    function getActiveInstrumentCount(address poolAddress) external view returns (uint256 count) {
+        IManagedPoolTypes.InstrumentHolding[] memory holdings = poolInstrumentHoldings[poolAddress];
         for (uint256 i = 0; i < holdings.length; i++) {
             if (!holdings[i].isMatured && !holdings[i].isLiquidated) {
                 count++;
@@ -1096,13 +1159,11 @@ contract StableYieldManager is
         
         PoolReserves storage reserves = poolReserves[poolAddress];
         
-        // Add matured funds back to cash buffer for reinvestment/withdrawals
         reserves.currentCashBuffer += maturedAmount;
         reserves.lastRebalanceTime = block.timestamp;
         
         emit SPVMaturityProcessed(poolAddress, maturedAmount, block.timestamp);
         
-        // Automatically process queued withdrawals if sufficient liquidity
         _processQueuedWithdrawals(poolAddress);
     }
 
@@ -1121,7 +1182,6 @@ contract StableYieldManager is
         PoolReserves storage reserves = poolReserves[poolAddress];
         uint256 oldNAV = reserves.totalPoolAUM;
         
-        // Update total pool AUM based on SPV reporting
         reserves.totalPoolAUM = newNAV;
         reserves.lastRebalanceTime = block.timestamp;
         
@@ -1129,7 +1189,6 @@ contract StableYieldManager is
         
         emit NAVUpdated(poolAddress, newNAV, navPerShare, block.timestamp);
         
-        // If NAV increased significantly, consider rebalancing reserves
         if (newNAV > oldNAV) {
             uint256 increase = newNAV - oldNAV;
             uint256 targetCashIncrease = (increase * managedPools[poolAddress].reserveRatio) / 10000;
@@ -1145,33 +1204,30 @@ contract StableYieldManager is
      * @param poolAddress Pool contract address
      */
     function _processQueuedWithdrawals(address poolAddress) internal {
-        WithdrawalRequest[] storage queue = withdrawalQueues[poolAddress];
+        IManagedPoolTypes.WithdrawalRequest[] storage queue = withdrawalQueues[poolAddress];
         PoolReserves storage reserves = poolReserves[poolAddress];
         
         uint256 availableLiquidity = reserves.currentCashBuffer;
         uint256 processedAmount = 0;
         
         for (uint256 i = 0; i < queue.length && availableLiquidity > 0; i++) {
-            WithdrawalRequest storage request = queue[i];
+            IManagedPoolTypes.WithdrawalRequest storage request = queue[i];
             
             if (!request.isProcessed) {
                 uint256 navPerShare = calculateNAVPerShare(poolAddress);
                 
-                // Get asset decimals for proper calculation
                 address asset = managedPools[poolAddress].asset;
                 uint8 assetDecimals = IERC20Metadata(asset).decimals();
                 uint256 decimalMultiplier = 10**assetDecimals;
                 
                 uint256 withdrawalAmount = (request.shares * navPerShare) / decimalMultiplier;
                 
-                // Apply early exit penalty if applicable
                 if (request.isPenalized) {
-                    uint256 penalty = (withdrawalAmount * 300) / 10000; // 3% penalty
+                    uint256 penalty = (withdrawalAmount * 300) / 10000;
                     withdrawalAmount -= penalty;
                 }
                 
                 if (availableLiquidity >= withdrawalAmount) {
-                    // Process withdrawal
                     _processImmediateWithdrawal(poolAddress, request.user, withdrawalAmount);
                     
                     request.isProcessed = true;
@@ -1185,7 +1241,6 @@ contract StableYieldManager is
             }
         }
         
-        // Update cash buffer
         reserves.currentCashBuffer = availableLiquidity;
     }
 
@@ -1204,11 +1259,9 @@ contract StableYieldManager is
         uint256 oldRatio = totalAUM > 0 ? (currentCash * 10000) / totalAUM : 0;
         
         if (currentCash < targetCash) {
-            // Need more liquidity - request from SPV
             uint256 liquidityNeeded = targetCash - currentCash;
             _requestSPVLiquidity(poolAddress, liquidityNeeded);
         } else if (currentCash > (totalAUM * reserves.maxReserveRatio) / 10000) {
-            // Too much cash - invest excess
             uint256 excessCash = currentCash - targetCash;
             _coordinateSPVInvestment(poolAddress, excessCash);
         }
@@ -1227,11 +1280,11 @@ contract StableYieldManager is
      * @param days Number of days
      * @return duration TenorDuration enum value
      */
-    function _daysToDuration(uint256 days) internal pure returns (IPoolTypes.TenorDuration duration) {
-        if (days <= 90) return IPoolTypes.TenorDuration.TENOR_90D;
-        if (days <= 180) return IPoolTypes.TenorDuration.TENOR_180D;
-        if (days <= 270) return IPoolTypes.TenorDuration.TENOR_270D;
-        return IPoolTypes.TenorDuration.TENOR_360D;
+    function _daysToDuration(uint256 days) internal pure returns (IManagedPoolTypes.TenorDuration duration) {
+        if (days <= 90) return IManagedPoolTypes.TenorDuration.TENOR_90D;
+        if (days <= 180) return IManagedPoolTypes.TenorDuration.TENOR_180D;
+        if (days <= 270) return IManagedPoolTypes.TenorDuration.TENOR_270D;
+        return IManagedPoolTypes.TenorDuration.TENOR_360D;
     }
 
     /**
@@ -1244,18 +1297,197 @@ contract StableYieldManager is
     }
 
     /**
+     * @notice Calculate current value of an instrument with daily accrual
+     * @param holding The instrument holding
+     * @param poolAddress Pool address for coupon lookup
+     * @return value Current value including accrued interest
+     */
+    function _calculateInstrumentValue(IManagedPoolTypes.InstrumentHolding memory holding, address poolAddress) internal view returns (uint256 value) {
+        // Calculate days elapsed (daily accrual, not per-second)
+        uint256 daysSincePurchase = (block.timestamp - holding.purchaseDate) / 1 days;
+        uint256 totalDays = (holding.maturityDate - holding.purchaseDate) / 1 days;
+        
+        // Ensure we don't over-accrue
+        if (daysSincePurchase > totalDays) daysSincePurchase = totalDays;
+        
+        if (holding.annualCouponRate == 0) {
+            // T-Bill: Linear discount accrual
+            uint256 totalGain = holding.faceValue - holding.purchasePrice;
+            uint256 accruedGain = (totalGain * daysSincePurchase) / totalDays;
+            value = holding.purchasePrice + accruedGain;
+        } else {
+            // Bond: Principal + accrued coupon interest
+            value = holding.purchasePrice; // Principal (usually at par)
+            
+            // Add accrued coupon interest (daily accrual)
+            uint256 annualCouponAmount = (holding.faceValue * holding.annualCouponRate) / 10000;
+            uint256 dailyCouponAccrual = annualCouponAmount / 365;
+            
+            // Calculate days since last coupon payment
+            uint256 daysSinceLastCoupon = _getDaysSinceLastCoupon(poolAddress, holding);
+            
+            value += dailyCouponAccrual * daysSinceLastCoupon;
+        }
+    }
+
+    /**
+     * @notice Get days since last coupon payment for a bond
+     * @param poolAddress Pool address
+     * @param holding The bond holding
+     * @return days Days since last coupon payment
+     */
+    function _getDaysSinceLastCoupon(address poolAddress, IManagedPoolTypes.InstrumentHolding memory holding) internal view returns (uint256 days) {
+        if (holding.couponFrequency == 0) return 0; // T-bills have no coupons
+        
+        // Use the lastCouponPaidDate from the holding (much more efficient!)
+        uint256 lastCouponDate = holding.lastCouponPaidDate == 0 ? holding.purchaseDate : holding.lastCouponPaidDate;
+        
+        days = (block.timestamp - lastCouponDate) / 1 days;
+        
+        // Cap at coupon period (e.g., 90 days for quarterly, 180 days for semi-annual)
+        uint256 couponPeriodDays = 365 / holding.couponFrequency;
+        if (days > couponPeriodDays) days = couponPeriodDays;
+    }
+
+    /**
+     * @notice Get holding index for a specific instrument
+     * @param poolAddress Pool address
+     * @param targetHolding The holding to find
+     * @return index Index of the holding
+     */
+    function _getHoldingIndex(address poolAddress, IManagedPoolTypes.InstrumentHolding memory targetHolding) internal view returns (uint256 index) {
+        IManagedPoolTypes.InstrumentHolding[] memory holdings = poolInstrumentHoldings[poolAddress];
+        for (uint256 i = 0; i < holdings.length; i++) {
+            if (holdings[i].cusip == targetHolding.cusip && 
+                holdings[i].purchaseDate == targetHolding.purchaseDate) {
+                return i;
+            }
+        }
+        revert("StableYieldManager/holding not found");
+    }
+
+    /**
+     * @notice Update aggregates when new instrument is purchased
+     * @param poolAddress Pool address
+     * @param purchasePrice Purchase price of new instrument
+     * @param faceValue Face value of new instrument
+     * @param maturityDate Maturity date of new instrument
+     */
+    function _updateAggregatesOnPurchase(
+        address poolAddress,
+        uint256 purchasePrice,
+        uint256 faceValue,
+        uint256 maturityDate
+    ) internal {
+        IManagedPoolTypes.PoolAggregates storage aggregates = poolAggregates[poolAddress];
+        
+        if (aggregates.activeInstrumentCount > 0 && block.timestamp > aggregates.lastAccrualTimestamp) {
+            _updatePoolAccruals(poolAddress);
+        }
+        aggregates.totalPurchasePrice += purchasePrice;
+        aggregates.totalFaceValue += faceValue;
+        
+        uint256 daysToMaturity = (maturityDate - block.timestamp) / 1 days;
+        aggregates.totalWeightedDuration += purchasePrice * daysToMaturity;
+        
+        aggregates.activeInstrumentCount += 1;
+        aggregates.lastAccrualTimestamp = block.timestamp;
+        
+        aggregates.totalAccruedValue += purchasePrice;
+    }
+
+    /**
+     * @notice Update pool accruals for all active instruments
+     * @param poolAddress Pool address
+     */
+    function _updatePoolAccruals(address poolAddress) internal {
+        IManagedPoolTypes.PoolAggregates storage aggregates = poolAggregates[poolAddress];
+        
+        if (aggregates.activeInstrumentCount == 0) return;
+        
+        uint256 daysSinceLastAccrual = (block.timestamp - aggregates.lastAccrualTimestamp) / 1 days;
+        
+        if (daysSinceLastAccrual == 0) return;
+        uint256 totalGain = aggregates.totalFaceValue - aggregates.totalPurchasePrice;
+        
+        uint256 weightedAverageMaturity = aggregates.totalWeightedDuration / aggregates.totalPurchasePrice;
+        
+        uint256 dailyAccrual = (totalGain * daysSinceLastAccrual) / weightedAverageMaturity;
+        
+        aggregates.totalAccruedValue += dailyAccrual;
+        aggregates.lastAccrualTimestamp = block.timestamp;
+    }
+
+    /**
+     * @notice Update aggregates when instrument is removed (matured/liquidated)
+     * @param poolAddress Pool address
+     * @param purchasePrice Purchase price of removed instrument
+     * @param faceValue Face value of removed instrument
+     * @param maturityDate Maturity date of removed instrument
+     */
+    function _updateAggregatesOnRemoval(
+        address poolAddress,
+        uint256 purchasePrice,
+        uint256 faceValue,
+        uint256 maturityDate
+    ) internal {
+        IManagedPoolTypes.PoolAggregates storage aggregates = poolAggregates[poolAddress];
+        
+        if (block.timestamp > aggregates.lastAccrualTimestamp) {
+            _updatePoolAccruals(poolAddress);
+        }
+        aggregates.totalPurchasePrice -= purchasePrice;
+        aggregates.totalFaceValue -= faceValue;
+        
+        uint256 daysToMaturity = maturityDate > block.timestamp ? 
+            (maturityDate - block.timestamp) / 1 days : 0;
+        uint256 weightedDuration = purchasePrice * daysToMaturity;
+        
+        if (aggregates.totalWeightedDuration >= weightedDuration) {
+            aggregates.totalWeightedDuration -= weightedDuration;
+        } else {
+            aggregates.totalWeightedDuration = 0;
+        }
+        
+        aggregates.activeInstrumentCount -= 1;
+        
+        uint256 currentInstrumentValue = purchasePrice + 
+            ((faceValue - purchasePrice) * (block.timestamp - (maturityDate - (daysToMaturity * 1 days)))) / 
+            (maturityDate - (maturityDate - (daysToMaturity * 1 days)));
+            
+        if (aggregates.totalAccruedValue >= currentInstrumentValue) {
+            aggregates.totalAccruedValue -= currentInstrumentValue;
+        } else {
+            aggregates.totalAccruedValue = 0;
+        }
+    }
+
+    /**
+     * @notice Remove instrument from active indices array
+     * @param poolAddress Pool address
+     * @param holdingIndex Index of instrument to remove
+     */
+    function _removeFromActiveIndices(address poolAddress, uint256 holdingIndex) internal {
+        uint256[] storage activeIndices = activeInstrumentIndices[poolAddress];
+        
+        for (uint256 i = 0; i < activeIndices.length; i++) {
+            if (activeIndices[i] == holdingIndex) {
+                activeIndices[i] = activeIndices[activeIndices.length - 1];
+                activeIndices.pop();
+                break;
+            }
+        }
+    }
+
+    /**
      * @notice Verify SPV attestation signature
      * @param hash Hash of attestation data
      * @param signature SPV signature
      * @return valid True if signature is valid
      */
     function _verifyAttestationSignature(bytes32 hash, bytes calldata signature) internal view returns (bool valid) {
-        // In production, this would use ECDSA.recover to verify SPV signature
-        // For now, simplified validation
         require(signature.length == 65, "StableYieldManager/invalid signature length");
         
-        // This is a placeholder - in production you'd verify against SPV's public key
-        // using ECDSA recovery and ensure the signer has SPV_ROLE
         return true;
     }
 
@@ -1290,23 +1522,31 @@ contract StableYieldManager is
         uint256 timestamp
     );
 
-    event TBillPurchaseAttested(
+    event InstrumentPurchaseAttested(
         address indexed poolAddress,
         uint256 indexed cusip,
         uint256 purchasePrice,
         uint256 faceValue,
-        uint256 maturityDate
+        uint256 maturityDate,
+        uint256 annualCouponRate
     );
 
-    event TBillMaturityAttested(
+    event InstrumentMaturityAttested(
         address indexed poolAddress,
         uint256 indexed cusip,
         uint256 maturityValue
     );
 
-    event TBillLiquidationAttested(
+    event InstrumentLiquidationAttested(
         address indexed poolAddress,
         uint256 indexed cusip,
         uint256 liquidationValue
+    );
+
+    event CouponPaymentAttested(
+        address indexed poolAddress,
+        uint256 indexed cusip,
+        uint256 couponAmount,
+        uint256 expectedDate
     );
 }

@@ -5,9 +5,10 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 
-import "../interfaces/IManager.sol";
+import "../interfaces/IManager.sol"; 
 import "../interfaces/ILiquidityPool.sol";
 import "../types/IPoolTypes.sol";
+import "../types/IManagedPoolTypes.sol";
 import "../AccessManager.sol";
 
 /**
@@ -28,7 +29,7 @@ contract YieldCalculator is Initializable, UUPSUpgradeable, AccessControlUpgrade
     uint256 public version;
 
     /// @dev Tenor duration in days mapping
-    mapping(IPoolTypes.TenorDuration => uint256) public tenorDays;
+    mapping(IManagedPoolTypes.TenorDuration => uint256) public tenorDays;
 
     /// @dev Constants for calculations
     uint256 public constant DAYS_IN_YEAR = 365;
@@ -39,7 +40,7 @@ contract YieldCalculator is Initializable, UUPSUpgradeable, AccessControlUpgrade
     ////////////////////////////////////////////////////////////////////////////////
 
     event PoolAPYCalculated(address indexed pool, uint256 weightedAPY, uint256 timestamp);
-    event TenorAPYCalculated(address indexed pool, IPoolTypes.TenorDuration tenor, uint256 tenorAPY, uint256 timestamp);
+    event TenorAPYCalculated(address indexed pool, IManagedPoolTypes.TenorDuration tenor, uint256 tenorAPY, uint256 timestamp);
     event YieldAccrualCalculated(address indexed user, uint256 principal, uint256 days, uint256 accruedValue);
     event EarlyExitCalculated(address indexed user, uint256 accruedValue, uint256 penalty, uint256 finalAmount);
 
@@ -66,10 +67,10 @@ contract YieldCalculator is Initializable, UUPSUpgradeable, AccessControlUpgrade
         version = 1;
         
         // Initialize tenor duration mappings
-        tenorDays[IPoolTypes.TenorDuration.TENOR_90D] = 90;
-        tenorDays[IPoolTypes.TenorDuration.TENOR_180D] = 180;
-        tenorDays[IPoolTypes.TenorDuration.TENOR_270D] = 270;
-        tenorDays[IPoolTypes.TenorDuration.TENOR_360D] = 360;
+        tenorDays[IManagedPoolTypes.TenorDuration.TENOR_90D] = 90;
+        tenorDays[IManagedPoolTypes.TenorDuration.TENOR_180D] = 180;
+        tenorDays[IManagedPoolTypes.TenorDuration.TENOR_270D] = 270;
+        tenorDays[IManagedPoolTypes.TenorDuration.TENOR_360D] = 360;
         
         // Grant DEFAULT_ADMIN_ROLE to deployer
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -118,7 +119,7 @@ contract YieldCalculator is Initializable, UUPSUpgradeable, AccessControlUpgrade
      */
     function calculateTenorAPY(
         uint256 poolAPY,
-        IPoolTypes.TenorDuration tenor
+        IManagedPoolTypes.TenorDuration tenor
     ) external view returns (uint256 tenorAPY) {
         uint256 tenorDaysCount = tenorDays[tenor];
         require(tenorDaysCount > 0, "YieldCalculator/invalid tenor");
@@ -197,7 +198,7 @@ contract YieldCalculator is Initializable, UUPSUpgradeable, AccessControlUpgrade
     function calculateProjectedReturn(
         uint256 principal,
         uint256 poolAPY,
-        IPoolTypes.TenorDuration tenor
+        IManagedPoolTypes.TenorDuration tenor
     ) external view returns (uint256 projectedReturn) {
         uint256 tenorDaysCount = tenorDays[tenor];
         require(tenorDaysCount > 0, "YieldCalculator/invalid tenor");
@@ -280,7 +281,7 @@ contract YieldCalculator is Initializable, UUPSUpgradeable, AccessControlUpgrade
      * @param tenor Tenor duration enum
      * @return days Number of days for the tenor
      */
-    function getTenorDays(IPoolTypes.TenorDuration tenor) external view returns (uint256 days) {
+    function getTenorDays(IManagedPoolTypes.TenorDuration tenor) external view returns (uint256 days) {
         return tenorDays[tenor];
     }
 
@@ -311,7 +312,7 @@ contract YieldCalculator is Initializable, UUPSUpgradeable, AccessControlUpgrade
      * @param days Number of days for the tenor
      */
     function updateTenorDays(
-        IPoolTypes.TenorDuration tenor,
+        IManagedPoolTypes.TenorDuration tenor,
         uint256 days
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(days > 0, "YieldCalculator/invalid days");
