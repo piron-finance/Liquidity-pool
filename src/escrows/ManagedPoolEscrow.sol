@@ -8,8 +8,8 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import "../AccessManager.sol";
-import "../types/IPoolTypes.sol";
+import "../AccessManager.sol"; 
+import "../types/IManagedPoolTypes.sol";
 
 /**
  * @title ManagedPoolEscrow
@@ -44,10 +44,10 @@ contract ManagedPoolEscrow is
     uint256 public version;
     
     /// @dev Country-specific configuration
-    IPoolTypes.CountryPoolConfig public countryConfig;
+    IManagedPoolTypes.CountryPoolConfig public countryConfig;
     
     /// @dev Current laddered allocation breakdown
-    IPoolTypes.LadderedAllocation public ladderedAllocation;
+    IManagedPoolTypes.LadderedAllocation public ladderedAllocation;
     
     /// @dev Underlying T-bill pools for this country
     address[] public underlyingPools;
@@ -133,7 +133,7 @@ contract ManagedPoolEscrow is
         address managedPool_,
         address accessManager_,
         address timelockController_,
-        IPoolTypes.CountryPoolConfig memory countryConfig_,
+        IManagedPoolTypes.CountryPoolConfig memory countryConfig_,
         address[] memory underlyingPools_
     ) public initializer {
         __UUPSUpgradeable_init();
@@ -154,7 +154,7 @@ contract ManagedPoolEscrow is
         version = 1;
 
         // Initialize laddered allocation (default: 50%/30%/20% + 0% cash buffer)
-        ladderedAllocation = IPoolTypes.LadderedAllocation({
+        ladderedAllocation = IManagedPoolTypes.LadderedAllocation({
             shortTermAllocation: 5000,  // 50%
             mediumTermAllocation: 3000, // 30%
             longTermAllocation: 2000,   // 20%
@@ -391,7 +391,7 @@ contract ManagedPoolEscrow is
      * @notice Update country configuration
      * @param newConfig New country configuration
      */
-    function updateCountryConfig(IPoolTypes.CountryPoolConfig memory newConfig) external onlyAdmin {
+    function updateCountryConfig(IManagedPoolTypes.CountryPoolConfig memory newConfig) external onlyAdmin {
         countryConfig = newConfig;
         emit CountryConfigUpdated(newConfig.countryCode, newConfig.stablecoin, newConfig.penaltyRate);
     }

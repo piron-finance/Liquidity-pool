@@ -2,6 +2,7 @@
 pragma solidity ^0.8.22;
 
 import "../types/IPoolTypes.sol";
+import "../types/IManagedPoolTypes.sol";
 
 /**
  * @title IStableYieldManager
@@ -38,8 +39,8 @@ interface IStableYieldManager {
     struct UserPosition {
         uint256 principal;             // Original deposit amount
         uint256 shares;                // Pool shares owned
-        IPoolTypes.TenorDuration tenor; // Selected tenor
-        IPoolTypes.MaturityAction maturityAction; // Compound or withdraw
+        IManagedPoolTypes.TenorDuration tenor; // Selected tenor
+        IManagedPoolTypes.MaturityAction maturityAction; // Compound or withdraw
         uint256 depositTime;           // When position was created
         uint256 maturityTime;          // When tenor expires
         uint256 accruedYield;          // Cached yield calculation
@@ -72,8 +73,8 @@ interface IStableYieldManager {
         address indexed user,
         uint256 amount,
         uint256 shares,
-        IPoolTypes.TenorDuration tenor,
-        IPoolTypes.MaturityAction maturityAction
+        IManagedPoolTypes.TenorDuration tenor,
+        IManagedPoolTypes.MaturityAction maturityAction
     );
     
     event EarlyExitRequested(
@@ -135,7 +136,7 @@ interface IStableYieldManager {
         address poolAddress,
         uint256 amount,
         uint256 tenorDays,
-        IPoolTypes.MaturityAction maturityAction,
+        IManagedPoolTypes.MaturityAction maturityAction,
         address receiver,
         address sender
     ) external returns (uint256 shares);
