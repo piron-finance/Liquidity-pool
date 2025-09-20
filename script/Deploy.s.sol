@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.22;
 
 import "forge-std/Script.sol";
 import "../src/Manager.sol";
@@ -113,19 +113,15 @@ contract PironPoolsDeployment is Script {
         console.log("AccessManager deployed at: %s", contracts.accessManager);
         emit ContractDeployed("AccessManager", contracts.accessManager);
         
-        contracts.poolRegistry = address(new PoolRegistry(contracts.accessManager));
+        contracts.poolRegistry = address(new PoolRegistry());
         console.log("PoolRegistry deployed at: %s", contracts.poolRegistry);
         emit ContractDeployed("PoolRegistry", contracts.poolRegistry);
         
-        contracts.manager = address(new Manager(contracts.poolRegistry, contracts.accessManager));
+        contracts.manager = address(new Manager());
         console.log("Manager deployed at: %s", contracts.manager);
         emit ContractDeployed("Manager", contracts.manager);
         
-        contracts.poolFactory = address(new PoolFactory(
-            contracts.poolRegistry,
-            contracts.manager,
-            contracts.accessManager
-        ));
+        contracts.poolFactory = address(new PoolFactory());
         console.log("PoolFactory deployed at: %s", contracts.poolFactory);
         emit ContractDeployed("PoolFactory", contracts.poolFactory);
         

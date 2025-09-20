@@ -204,3 +204,4 @@ library ValidationLibrary {
         require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
     }
 }
+

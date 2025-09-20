@@ -8,16 +8,15 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "./interfaces/ILiquidityPool.sol";
 import "./interfaces/IManager.sol";
+import "./interfaces/IPoolEscrow.sol";
+
+
 
 contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, ILiquidityPool, PausableUpgradeable {
     using SafeERC20 for IERC20;
     
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STATE VARIABLES //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
     IPoolManager public manager;
-    address public escrow;
+    IPoolEscrow public escrow;
 
     mapping(address => uint256) public override pendingRefunds;
     mapping(address => uint256) public override discountedBillsAccrued; 
@@ -34,9 +33,6 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         _;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// CONSTRUCTOR //////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -67,7 +63,15 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         __UUPSUpgradeable_init();
         
         manager = IPoolManager(_manager);
-        escrow = _escrow;
+        escrow = IPoolEscrow(_escrow);
+    }
+    
+    /**
+     * @notice Disable upgrades for live pools
+     * @dev Pools should never be upgraded once deployed
+     */
+    function _authorizeUpgrade(address) internal pure override {
+        revert("Pool upgrades disabled for security");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -79,9 +83,9 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         require(IERC20(asset()).balanceOf(msg.sender) >= assets, "LiquidityPool/Insufficient balance");
        
-        IERC20(asset()).safeTransferFrom(msg.sender, escrow, assets);
+        IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), assets);
 
-        uint256 shares = manager.handleDeposit(address(this), assets, receiver, msg.sender);
+        uint256 shares = IPoolManager(manager).handleDeposit(address(this), assets, receiver, msg.sender);
 
         _mint(receiver, shares);
         
@@ -95,9 +99,9 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         uint256 assets = previewMint(shares);
         require(IERC20(asset()).balanceOf(msg.sender) >= assets, "LiquidityPool/Insufficient balance");
         
-        IERC20(asset()).safeTransferFrom(msg.sender, escrow, assets);
+        IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), assets);
 
-        uint256 actualShares = manager.handleDeposit(address(this), assets, receiver, msg.sender);
+        uint256 actualShares = IPoolManager(manager).handleDeposit(address(this), assets, receiver, msg.sender);
         
         require(actualShares >= shares, "LiquidityPool/Insufficient shares minted");
 
@@ -115,7 +119,7 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         require(receiver != address(0), "LiquidityPool/Valid addresses only");
         require(owner != address(0), "LiquidityPool/Valid owner required");
     
-        uint256 actualShares = manager.handleWithdraw(address(this), assets, receiver, owner, msg.sender);
+        uint256 actualShares = IPoolManager(manager).handleWithdraw(address(this), assets, receiver, owner, msg.sender);
         
         return actualShares;
     }
@@ -131,6 +135,7 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         uint256 userShares = balanceOf(msg.sender);
         
         uint256 totalUserValue = manager.calculateUserReturn(msg.sender);
+
         uint256 sharesToBurn = totalUserValue > 0 ? (userShares * refundAmount) / totalUserValue : userShares;
         
         pendingRefunds[msg.sender] = 0;
@@ -138,7 +143,7 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         
         _burn(msg.sender, sharesToBurn);
         
-        manager.handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
+        IPoolManager(manager).handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
         
         emit RefundClaimed(msg.sender, refundAmount);
     }
@@ -158,7 +163,7 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
     ////////////////////////////////////////////////////////////////////////////////
 
     function claimCoupon() external override whenNotPaused returns (uint256) {
-        uint256 couponAmount = manager.claimUserCoupon(address(this), msg.sender);
+        uint256 couponAmount = IPoolManager(manager).claimUserCoupon(address(this), msg.sender);
         require(couponAmount > 0, "LiquidityPool/no-coupon-available");
         
         emit CouponClaimed(msg.sender, couponAmount);
@@ -166,7 +171,7 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
     }
     
     function getUserCouponAmount(address user) external view override returns (uint256) {
-        return IPoolManager(address(manager)).getUserAvailableCoupon(address(this), user);
+        return IPoolManager(manager).getUserAvailableCoupon(address(this), user);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -233,11 +238,11 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
 
     // User-specific view functions
     function getUserReturn(address user) external view returns (uint256) {
-        return manager.calculateUserReturn(user);
+        return IPoolManager(manager).calculateUserReturn(user);
     }
     
     function getUserDiscount(address user) external view returns (uint256) {
-        return manager.calculateUserDiscount(user);
+        return IPoolManager(manager).calculateUserDiscount(user);
     }
     
     // Pool status view functions (using Manager as single source of truth)
@@ -246,19 +251,20 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
     }
     
     function isInFundingPeriod() external view returns (bool) {
-        return manager.isInFundingPeriod();
+        return IPoolManager(manager).isInFundingPeriod();
     }
     
+
     function isPoolMatured() external view returns (bool) {
         return manager.isMatured();
     }
     
     function getTimeToMaturity() external view returns (uint256) {
-        return manager.getTimeToMaturity();
+        return IPoolManager(manager).getTimeToMaturity();
     }
     
     function getExpectedReturn() external view returns (uint256) {
-        return manager.getExpectedReturn();
+        return IPoolManager(manager).getExpectedReturn();
     }
     
     // Pool state convenience functions

@@ -107,6 +107,7 @@ interface IPoolManager {
     
     // Coupon tracking functions
     function getUnclaimedCoupons(address liquidityPool) external view returns (uint256);
+
     
     // Upgrade management functions
     function setTimelockController(address newTimelockController) external;
