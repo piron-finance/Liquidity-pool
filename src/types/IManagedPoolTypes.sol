@@ -10,13 +10,21 @@ pragma solidity ^0.8.19;
 interface IManagedPoolTypes {
 
 
-        ////////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// STRUCTS //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
 
 
-        struct ManagedPoolData {
+    struct ManagedPoolConfig {
+        address[] underlyingPools;   // Array of underlying pool addresses
+        uint256[] allocationWeights; // Allocation weights for each pool (basis points)
+        ManagedPoolType poolType;   // Type of managed pool
+        uint256 minInvestment;      // Minimum investment amount
+        uint256 managementFee;      // Management fee in basis points
+    }
+
+    struct ManagedPoolData {
         address poolAddress;        // StableYieldPool instance
         address asset;              // Any approved stablecoin
         address escrow;             // ManagedPoolEscrow instance
@@ -50,18 +58,13 @@ interface IManagedPoolTypes {
     }
 
      /**
-     * @dev Country-specific configuration for managed pools
+     * @dev Global configuration constants for managed pools
+     * @notice These are now handled as global constants or per-pool settings in ManagedPoolData
+     * - Penalty rates: handled in StableYieldManager logic
+     * - Hold periods: 30 days minimum (global constant)
+     * - Queue time: 7 days maximum (global constant)
+     * - Asset/currency: determined by ManagedPoolData.asset
      */
-    struct CountryPoolConfig {
-        string countryCode;           // "NG", "US", "TR", "KE", etc.
-        string countryName;           // "Nigeria", "United States", "Turkey", etc.
-        address stablecoin;           // CNGN, USDT, USDC, etc. (flexible per country)
-        string stablecoinSymbol;      // "CNGN", "USDT", "USDC", etc.
-        uint256 penaltyRate;          // Early exit penalty (basis points, e.g., 300 = 3%)
-        uint256 minimumHoldPeriod;    // Minimum hold period in days (e.g., 30)
-        uint256 maxQueueTime;         // Maximum withdrawal queue time in days (e.g., 7)
-        bool isActive;                // Whether this country pool is active
-    }
 
     /**
      * @dev Withdrawal request for managed pools
@@ -76,16 +79,9 @@ interface IManagedPoolTypes {
     }
 
     /**
-     * @dev Laddered allocation strategy for managed pools
+     * @dev Laddered allocation is now simplified to just reserve ratios in PoolReserves
+     * @notice SPV handles T-bill laddering automatically based on pool's cash flow needs
      */
-    struct LadderedAllocation {
-        uint256 shortTermAllocation;  // 30-90 days (50%)
-        uint256 mediumTermAllocation; // 90-180 days (30%)
-        uint256 longTermAllocation;   // 180-365 days (20%)
-        uint256 cashBuffer;           // Emergency liquidity buffer
-        uint256 totalAllocated;       // Sum of all allocations
-        uint256 lastRebalanceTime;    // Last rebalancing timestamp
-    }
 
     /**
      * @dev Instrument holding for T-bills and bonds
@@ -142,6 +138,12 @@ interface IManagedPoolTypes {
     enum MaturityAction {
         COMPOUND,    // Auto-reinvest at maturity
         WITHDRAW     // Withdraw principal + yield
+    }
+
+    enum ManagedPoolType {
+        STABLE_YIELD,    // Government T-bills and bonds
+        CORPORATE_BOND,  // Corporate bonds
+        MIXED_PORTFOLIO  // Mixed asset allocation
     }
 
 

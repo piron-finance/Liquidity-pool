@@ -267,7 +267,6 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         return IPoolManager(manager).getExpectedReturn();
     }
     
-    // Pool state convenience functions
     function isActive() external view returns (bool) {
         return manager.getPoolStatus() == 2; // INVESTED = 2  
     }
@@ -288,15 +287,4 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         return manager.poolTotalRaised(address(this));
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// UPGRADE AUTHORIZATION ////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Disable upgrades for live pools
-     * @dev Pools should never be upgraded once deployed with user funds
-     */
-    function _authorizeUpgrade(address) internal pure override {
-        revert("Pool upgrades disabled for security");
-    }
 }

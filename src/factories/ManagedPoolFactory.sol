@@ -184,11 +184,12 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
             config.expenseRatio
         );
         
-        // Register with PoolRegistry
+        // Register with PoolRegistry (no underlying pools needed for direct SPV model)
+        address[] memory emptyUnderlyingPools = new address[](0);
         registry.registerManagedPool(
             poolAddress,
             IPoolRegistry.ManagedPoolType.STABLE_YIELD,
-            config.underlyingPools
+            emptyUnderlyingPools
         );
         
         // Increment deployment nonce
@@ -219,12 +220,15 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         // Clone the escrow implementation
         escrowAddress = Clones.cloneDeterministic(managedPoolEscrowImplementation, salt);
         
-        // Initialize the escrow
+        // Initialize the escrow with simplified parameters
+        string memory poolName = string(abi.encodePacked("Piron ", config.poolName));
+        
         ManagedPoolEscrow(escrowAddress).initialize(
             config.asset,
             address(0), // managedPool will be set after pool deployment
             address(accessManager),
-            timelockController
+            timelockController,
+            poolName
         );
         
         return escrowAddress;

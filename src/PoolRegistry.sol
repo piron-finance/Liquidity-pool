@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity ^0.8.22; 
 
 import "./interfaces/IPoolRegistry.sol";
 import "./AccessManager.sol";
@@ -21,7 +21,7 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
     address[] private poolList;
     mapping(string => address[]) private poolsByType;
     
-    // Enhanced Asset Approval & Metadata System
+
     struct AssetInfo {
         bool isApproved;           // Asset approved for use
         string name;               // "Nigerian Naira"
@@ -44,21 +44,8 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
         MANAGED_POOL
     }
 
-    enum ManagedPoolType {
-        STABLE_YIELD,
-        LOCKED_YIELD,
-        INDEX_POOL,
-        TRANCHED_POOL
-    }
 
-    struct ManagedPoolInfo {
-        address managedPool;
-        PoolCategory category;
-        ManagedPoolType managedType;
-        address[] underlyingPools;
-        uint256 createdAt;
-        bool isActive;
-    }
+
 
     mapping(address => ManagedPoolInfo) public managedPoolInfo;
     mapping(address => bool) public isManagedPoolMapping;
@@ -79,7 +66,7 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
         string country,
         string region
     );
-    event AssetRevoked(address indexed asset);
+  
     event AssetMetadataUpdated(address indexed asset);
     
     modifier onlyFactory() {
@@ -173,7 +160,7 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
     function registerPool(address pool, PoolInfo memory info) external override onlyFactory {
         require(pool != address(0), "PoolRegistry/invalid-pool");
         require(poolInfos[pool].createdAt == 0, "PoolRegistry/pool-already-registered");
-        require(approvedAssets[info.asset], "PoolRegistry/asset-not-approved");
+        require(assetInfo[info.asset].isApproved, "PoolRegistry/asset-not-approved");
         
         poolInfos[pool] = info;
         poolList.push(pool);
@@ -190,26 +177,37 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
     /**
      * @notice Register a managed pool
      * @param managedPool Address of the managed pool
-     * @param info Managed pool information
+     * @param poolType Type of managed pool
+     * @param underlyingPools Array of underlying pool addresses
      */
     function registerManagedPool(
         address managedPool,
-        ManagedPoolInfo memory info
+        ManagedPoolType poolType,
+        address[] memory underlyingPools
     ) external onlyFactory {
         require(managedPool != address(0), "PoolRegistry/invalid managed pool");
         require(!isManagedPoolMapping[managedPool], "PoolRegistry/managed pool already registered");
         
-        // Validate underlying pools exist
-        for (uint256 i = 0; i < info.underlyingPools.length; i++) {
-            require(poolInfos[info.underlyingPools[i]].createdAt != 0, "PoolRegistry/underlying pool not registered");
+        // Validate underlying pools exist (if any)
+        for (uint256 i = 0; i < underlyingPools.length; i++) {
+            require(poolInfos[underlyingPools[i]].createdAt != 0, "PoolRegistry/underlying pool not registered");
         }
+        
+        // Create managed pool info
+        ManagedPoolInfo memory info = ManagedPoolInfo({
+            managedPool: managedPool,
+            managedType: poolType,
+            underlyingPools: underlyingPools,
+            createdAt: block.timestamp,
+            isActive: true
+        });
         
         managedPoolInfo[managedPool] = info;
         isManagedPoolMapping[managedPool] = true;
         managedPoolAtIndex[totalManagedPools] = managedPool;
         totalManagedPools++;
         
-        emit ManagedPoolRegistered(managedPool, info.managedType, info.underlyingPools.length);
+        emit ManagedPoolRegistered(managedPool, poolType, underlyingPools.length);
     }
 
     /**
@@ -230,7 +228,7 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
     function isManagedPool(address pool) external view returns (bool) {
         return isManagedPoolMapping[pool];
     }
-
+    
     /**
      * @notice Get all managed pools
      * @return Array of managed pool addresses
@@ -241,6 +239,24 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
             pools[i] = managedPoolAtIndex[i];
         }
         return pools;
+    }
+    
+    /**
+     * @notice Get total number of managed pools
+     * @return Total managed pools count
+     */
+    function getTotalManagedPools() external view returns (uint256) {
+        return totalManagedPools;
+    }
+    
+    /**
+     * @notice Get managed pool at specific index
+     * @param index Index of managed pool
+     * @return Managed pool address
+     */
+    function getManagedPoolAtIndex(uint256 index) external view returns (address) {
+        require(index < totalManagedPools, "PoolRegistry/index out of bounds");
+        return managedPoolAtIndex[index];
     }
     
     function updatePoolStatus(address pool, bool isActive) public override onlyRole(accessManager.OPERATOR_ROLE()) {
@@ -333,26 +349,31 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
         updatePoolStatus(pool, false);
     }
     
-    function approveAsset(address asset) external override onlyAdmin {
-        require(asset != address(0), "PoolRegistry/invalid-asset");
-        require(!approvedAssets[asset], "PoolRegistry/asset-already-approved");
+    function approveAsset(address asset) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(asset != address(0), "PoolRegistry/invalid asset");
+        require(!assetInfo[asset].isApproved, "PoolRegistry/already approved");
         
-        approvedAssets[asset] = true;
+        uint8 decimals = 18;
+        try IERC20Metadata(asset).decimals() returns (uint8 d) {
+            decimals = d;
+        } catch {}
         
+        assetInfo[asset] = AssetInfo({
+            isApproved: true,
+            name: "",
+            symbol: "",
+            country: "",
+            region: "",
+            tokenAddress: asset,
+            decimals: decimals,
+            isStablecoin: true,
+            approvedAt: block.timestamp
+        });
+        
+        approvedAssetsList.push(asset);
         emit AssetApproved(asset);
     }
     
-    function revokeAsset(address asset) external override onlyAdmin {
-        require(approvedAssets[asset], "PoolRegistry/asset-not-approved");
-        
-        approvedAssets[asset] = false;
-        
-        emit AssetRevoked(asset);
-    }
-    
-    function isApprovedAsset(address asset) external view override returns (bool) {
-        return approvedAssets[asset];
-    }
 
     /**
      * @notice Approve a new pool implementation

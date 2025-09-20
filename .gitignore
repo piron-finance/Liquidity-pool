@@ -17,7 +17,10 @@ docs/
 
 # All txt and md files (development/docs)
 *.txt
-*.md
+
+como.txt
+como1.txt
+como2.txt
 
 # Except essential project files
 !README.md
