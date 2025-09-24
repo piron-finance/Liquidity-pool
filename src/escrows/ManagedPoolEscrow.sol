@@ -13,7 +13,7 @@ import "../types/IManagedPoolTypes.sol";
 
 /**
  * @title ManagedPoolEscrow
- * @dev Enhanced escrow with flexible stablecoin support and laddered allocation for country-specific pools
+ * @dev  escrow with flexible stablecoin support and laddered allocation for country-specific pools
  * @notice Secure custody and allocation management for StableYieldPool instances
  */
 contract ManagedPoolEscrow is 
@@ -28,25 +28,18 @@ contract ManagedPoolEscrow is
     /////////////////////////////// STATE VARIABLES //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    /// @dev Flexible stablecoin based on country (CNGN, USDT, USDC, etc.)
+    /// @dev stablecoin based on country (CNGN, USDT, USDC, etc.)
     IERC20 public asset;
     
-    /// @dev The managed pool that owns this escrow
     address public managedPool;
     
-    /// @dev Access manager for role-based permissions
     AccessManager public accessManager;
     
-    /// @dev Timelock controller for upgrade authorization
     address public timelockController;
     
-    /// @dev Version for upgrade tracking
-    uint256 public version;
+    uint256 public version; // do we need?
     
-    /// @dev Pool name for identification (e.g., "Piron USDC Stable Yield Pool")
     string public poolName;
-    
-    /// @dev Legacy: underlying pools no longer used, SPV handles T-bill allocation directly
     
     /// @dev Cash buffer for early exits and liquidity management
     uint256 public cashBuffer;
@@ -57,10 +50,8 @@ contract ManagedPoolEscrow is
     /// @dev Total funds allocated to underlying pools
     uint256 public totalAllocatedFunds;
     
-    /// @dev Emergency withdrawal enabled flag
     bool public emergencyWithdrawalEnabled;
-    
-    /// @dev SPV allocations for T-bill purchases
+
     mapping(address => uint256) public spvAllocations;
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -73,6 +64,9 @@ contract ManagedPoolEscrow is
     event CashBufferUpdated(uint256 oldBuffer, uint256 newBuffer);
     event EmergencyWithdrawalToggled(bool enabled);
     event PoolNameUpdated(string newPoolName);
+    event SPVAllocation(address indexed spv, uint256 amount, uint256 remainingCashBuffer);
+    event SPVLiquidityRequested(address indexed spv, uint256 amount, uint256 timestamp);
+    event SPVLiquidityReceived(address indexed spv, uint256 amount, uint256 newCashBuffer);
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// MODIFIERS ///////////////////////////////////
@@ -99,7 +93,7 @@ contract ManagedPoolEscrow is
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INITIALIZATION /////////////////////////////
+    /////////////////////////////// INITIALIZATION AND ACCESS CONTROL /////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -108,18 +102,16 @@ contract ManagedPoolEscrow is
     }
 
     /**
-     * @notice Initialize the Enhanced Managed Pool Escrow
+     * @notice Initialize the Managed Pool Escrow
      * @param asset_ Country-specific stablecoin (CNGN, USDT, USDC, etc.)
      * @param managedPool_ The managed pool address
      * @param accessManager_ Access manager address
-     * @param timelockController_ Timelock controller address
      * @param poolName_ Pool name for identification
      */
     function initialize(
         address asset_,
         address managedPool_,
         address accessManager_,
-        address timelockController_,
         string memory poolName_
     ) public initializer {
         __UUPSUpgradeable_init();
@@ -129,16 +121,30 @@ contract ManagedPoolEscrow is
         require(asset_ != address(0), "ManagedPoolEscrow/invalid asset");
         require(managedPool_ != address(0), "ManagedPoolEscrow/invalid managed pool");
         require(accessManager_ != address(0), "ManagedPoolEscrow/invalid access manager");
-        require(timelockController_ != address(0), "ManagedPoolEscrow/invalid timelock");
 
         asset = IERC20(asset_);
         managedPool = managedPool_;
         accessManager = AccessManager(accessManager_);
-        timelockController = timelockController_;
         poolName = poolName_;
         version = 1;
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+    }
+
+
+       /**
+     * @notice Disable upgrades for live managed escrows
+     * @dev Escrows should never be upgraded once deployed with user funds
+     */
+    function _authorizeUpgrade(address) internal pure override {
+        revert("ManagedPoolEscrow/upgrades disabled for security");
+    }
+
+    /**
+     * @notice Get version number
+     */
+    function getVersion() external view returns (uint256) {
+        return version;
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -191,10 +197,6 @@ contract ManagedPoolEscrow is
         emit FundsWithdrawn(to, amount, cashBuffer);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// SIMPLIFIED ALLOCATION //////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
@@ -284,26 +286,6 @@ contract ManagedPoolEscrow is
         managedPool = newManagedPool;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// UPGRADE AUTHORIZATION //////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Authorize contract upgrades
-     * @param newImplementation New implementation contract address
-     */
-    function _authorizeUpgrade(address newImplementation) internal override {
-        require(msg.sender == timelockController, "ManagedPoolEscrow/only timelock");
-        require(newImplementation != address(0), "ManagedPoolEscrow/invalid implementation");
-        version += 1;
-    }
-
-    /**
-     * @notice Get version number
-     */
-    function getVersion() external view returns (uint256) {
-        return version;
-    }
     
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// SPV COORDINATION ////////////////////////////
@@ -360,11 +342,4 @@ contract ManagedPoolEscrow is
         emit SPVLiquidityReceived(msg.sender, amount, cashBuffer);
     }
     
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    event SPVAllocation(address indexed spv, uint256 amount, uint256 remainingCashBuffer);
-    event SPVLiquidityRequested(address indexed spv, uint256 amount, uint256 timestamp);
-    event SPVLiquidityReceived(address indexed spv, uint256 amount, uint256 newCashBuffer);
 }

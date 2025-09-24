@@ -2,11 +2,6 @@
 pragma solidity ^0.8.22;
 
 interface IPoolRegistry {
-    enum ManagedPoolType {
-        STABLE_YIELD,
-        FIXED_INCOME,
-        DIVERSIFIED
-    }
     
     struct PoolInfo {
         address pool;
@@ -21,13 +16,6 @@ interface IPoolRegistry {
         uint256 maturityDate;
     }
     
-    struct ManagedPoolInfo {
-        address managedPool;
-        ManagedPoolType managedType;
-        address[] underlyingPools;
-        uint256 createdAt;
-        bool isActive;
-    }
     
     event PoolRegistered(
         address indexed pool,
@@ -90,9 +78,14 @@ interface IPoolRegistry {
     function revokeImplementation(address implementation) external;
     function isApprovedImplementation(address implementation) external view returns (bool);
     
-    // Managed Pool Functions
-    function registerManagedPool(address managedPool, ManagedPoolType poolType, address[] memory underlyingPools) external;
-    function getManagedPoolInfo(address managedPool) external view returns (ManagedPoolInfo memory);
+    // StableYield Pool Functions (new architecture)
+    function isStableYieldPoolRegistered(address pool) external view returns (bool);
+    function getAllStableYieldPools() external view returns (address[] memory);
+    function getStableYieldPoolsByType(bool isLocked) external view returns (address[] memory);
+    function getTotalStableYieldPools() external view returns (uint256);
+    function getStableYieldPoolAtIndex(uint256 index) external view returns (address);
+    
+    // Managed Pool Functions (now refers to StableYield pools)
     function getAllManagedPools() external view returns (address[] memory);
     function getTotalManagedPools() external view returns (uint256);
     function getManagedPoolAtIndex(uint256 index) external view returns (address);
