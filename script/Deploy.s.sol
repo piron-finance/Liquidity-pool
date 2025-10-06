@@ -148,7 +148,14 @@ contract PironPoolsDeployment is Script {
         accessManager.grantRole(keccak256("POOL_CREATOR_ROLE"), config.admin);
         console.log("Roles granted successfully");
         
-        registry.approveAsset(contracts.baseToken);
+        registry.approveAsset(
+            contracts.baseToken,
+            "Mock USDC",
+            "USDC",
+            "",
+            "",
+            true
+        );
         console.log("Base token approved as valid asset");
         
         FeeManager feeManager = FeeManager(contracts.feeManager);

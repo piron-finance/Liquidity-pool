@@ -26,10 +26,7 @@ interface IStableYieldTypes {
         address poolAddress;
         address escrowAddress;
         address asset;
-        bool isLocked;
         string name;
-        string description;
-        uint256[] supportedTenors; // Empty for flexible pools
         uint256 minInvestment;
         bool isActive;
         uint256 createdAt;
@@ -59,20 +56,8 @@ interface IStableYieldTypes {
         uint256 shares;
         uint256 requestTime;
         uint256 estimatedValue;
-        bool isPenalized;
-        uint256 penaltyAmount;
         bool processed;
         uint256 processedTime;
-    }
-    
-    struct LockedPosition {
-        uint256 shares;
-        uint256 principal;
-        uint256 tenorDays;
-        uint256 depositTime;
-        uint256 maturityTime;
-        bool autoRollover;
-        bool isActive;
     }
 }
 

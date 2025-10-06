@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
+import "../types/IStableYieldTypes.sol";
+
 interface IPoolRegistry {
     
     struct PoolInfo {
@@ -57,11 +59,7 @@ interface IPoolRegistry {
     function updatePoolStatus(address pool, bool isActive) external;
     function updatePoolCategory(address pool, string memory newCategory) external;
     
-    function getActivePools() external view returns (address[] memory);
-    function getAllPools() external view returns (address[] memory);
     function getPoolsByType(string memory instrumentType) external view returns (address[] memory);
-    function getPoolsByMaturityRange(uint256 minMaturity, uint256 maxMaturity) external view returns (address[] memory);
-    
     function getPoolCount() external view returns (uint256);
     function getPoolAtIndex(uint256 index) external view returns (address);
     
@@ -69,7 +67,14 @@ interface IPoolRegistry {
     function unpausePool(address pool) external;
     function emergencyDeactivatePool(address pool) external;
     
-    function approveAsset(address asset) external;
+    function approveAsset(
+        address asset,
+        string memory name,
+        string memory symbol,
+        string memory country,
+        string memory region,
+        bool isStablecoin
+    ) external;
     function revokeAsset(address asset) external;
     function isApprovedAsset(address asset) external view returns (bool);
     function isManagedPool(address pool) external view returns (bool);
@@ -78,15 +83,9 @@ interface IPoolRegistry {
     function revokeImplementation(address implementation) external;
     function isApprovedImplementation(address implementation) external view returns (bool);
     
-    // StableYield Pool Functions (new architecture)
-    function isStableYieldPoolRegistered(address pool) external view returns (bool);
-    function getAllStableYieldPools() external view returns (address[] memory);
-    function getStableYieldPoolsByType(bool isLocked) external view returns (address[] memory);
+    function registerStableYieldPool(IStableYieldTypes.PoolData memory poolData) external;
     function getTotalStableYieldPools() external view returns (uint256);
     function getStableYieldPoolAtIndex(uint256 index) external view returns (address);
     
-    // Managed Pool Functions (now refers to StableYield pools)
-    function getAllManagedPools() external view returns (address[] memory);
-    function getTotalManagedPools() external view returns (uint256);
     function getManagedPoolAtIndex(uint256 index) external view returns (address);
 } 
