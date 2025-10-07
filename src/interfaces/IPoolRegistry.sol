@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
+import "../types/IStableYieldTypes.sol";
+
 interface IPoolRegistry {
-    enum ManagedPoolType {
-        STABLE_YIELD,
-        FIXED_INCOME,
-        DIVERSIFIED
-    }
     
     struct PoolInfo {
         address pool;
@@ -21,13 +18,6 @@ interface IPoolRegistry {
         uint256 maturityDate;
     }
     
-    struct ManagedPoolInfo {
-        address managedPool;
-        ManagedPoolType managedType;
-        address[] underlyingPools;
-        uint256 createdAt;
-        bool isActive;
-    }
     
     event PoolRegistered(
         address indexed pool,
@@ -69,11 +59,7 @@ interface IPoolRegistry {
     function updatePoolStatus(address pool, bool isActive) external;
     function updatePoolCategory(address pool, string memory newCategory) external;
     
-    function getActivePools() external view returns (address[] memory);
-    function getAllPools() external view returns (address[] memory);
     function getPoolsByType(string memory instrumentType) external view returns (address[] memory);
-    function getPoolsByMaturityRange(uint256 minMaturity, uint256 maxMaturity) external view returns (address[] memory);
-    
     function getPoolCount() external view returns (uint256);
     function getPoolAtIndex(uint256 index) external view returns (address);
     
@@ -81,7 +67,14 @@ interface IPoolRegistry {
     function unpausePool(address pool) external;
     function emergencyDeactivatePool(address pool) external;
     
-    function approveAsset(address asset) external;
+    function approveAsset(
+        address asset,
+        string memory name,
+        string memory symbol,
+        string memory country,
+        string memory region,
+        bool isStablecoin
+    ) external;
     function revokeAsset(address asset) external;
     function isApprovedAsset(address asset) external view returns (bool);
     function isManagedPool(address pool) external view returns (bool);
@@ -90,10 +83,9 @@ interface IPoolRegistry {
     function revokeImplementation(address implementation) external;
     function isApprovedImplementation(address implementation) external view returns (bool);
     
-    // Managed Pool Functions
-    function registerManagedPool(address managedPool, ManagedPoolType poolType, address[] memory underlyingPools) external;
-    function getManagedPoolInfo(address managedPool) external view returns (ManagedPoolInfo memory);
-    function getAllManagedPools() external view returns (address[] memory);
-    function getTotalManagedPools() external view returns (uint256);
+    function registerStableYieldPool(IStableYieldTypes.PoolData memory poolData) external;
+    function getTotalStableYieldPools() external view returns (uint256);
+    function getStableYieldPoolAtIndex(uint256 index) external view returns (address);
+    
     function getManagedPoolAtIndex(uint256 index) external view returns (address);
 } 

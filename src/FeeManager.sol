@@ -7,12 +7,35 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
+/**
+ * @title FeeManager - Protocol Treasury & Fee Collection
+ * @dev Acts as protocol treasury with daily expense ratio accrual and transaction fee collection
+ * @notice Manages all protocol fees, expense ratios, and treasury functions
+ */
 contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
     
     AccessManager public accessManager;
-    address private _protocolTreasury;
+    
+    /// @dev Treasury holdings by asset
+    mapping(address => uint256) public treasuryBalances;
+    
+    /// @dev Pool expense ratio configurations (annual basis points)
+    mapping(address => uint256) public poolExpenseRatios;
+    
+    /// @dev Last expense ratio accrual timestamp per pool
+    mapping(address => uint256) public lastExpenseAccrual;
+    
+    /// @dev Accumulated expense ratio fees per pool (in pool's base asset)
+    mapping(address => uint256) public accruedExpenseFees;
+    
+    /// @dev Transaction fees collected per pool per asset
+    mapping(address => mapping(address => uint256)) public transactionFees;
+    
+    /// @dev Performance fees collected per pool
+    mapping(address => uint256) public performanceFees;
     
     FeeConfig private _defaultFeeConfig;
     mapping(address => FeeConfig) public poolFeeConfigs;
@@ -24,6 +47,9 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
     uint256 public constant MAX_FEE_RATE = 1000; // 10% maximum fee rate
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant MIN_DISTRIBUTION_INTERVAL = 24 hours;
+    uint256 public constant SECONDS_PER_YEAR = 365 days;
+    uint256 public constant MAX_EXPENSE_RATIO = 500; // 5% maximum annual expense ratio
+    uint256 public constant DEFAULT_EXPENSE_RATIO = 80; // 0.8% default annual expense ratio
     
     event FeeConfigUpdated(
         address indexed pool,
@@ -51,6 +77,15 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
     
     event DefaultFeeConfigUpdated(uint256 protocolFee, uint256 spvFee, uint256 performanceFee);
     event EmergencyWithdrawal(address indexed token, uint256 amount, address indexed recipient);
+    
+    // Treasury & Expense Ratio Events
+    event ExpenseRatioUpdated(address indexed pool, uint256 oldRatio, uint256 newRatio);
+    event ExpenseRatioAccrued(address indexed pool, uint256 amount, uint256 timestamp);
+    event ExpenseRatioPartiallyCollected(address indexed pool, uint256 paidAmount, uint256 remainingAccrued);
+    event TransactionFeeCollected(address indexed pool, address indexed asset, uint256 amount, string feeType);
+    event TreasuryDeposit(address indexed asset, uint256 amount, uint256 newBalance);
+    event TreasuryWithdrawal(address indexed asset, address indexed recipient, uint256 amount, uint256 remainingBalance);
+    event PerformanceFeeCollected(address indexed pool, uint256 amount, uint256 totalCollected);
 
     
     modifier onlyRole(bytes32 role) {
@@ -76,21 +111,21 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         require(_treasury != address(0), "FeeManager/invalid-treasury");
         
         accessManager = AccessManager(_accessManager);
-        _protocolTreasury = _treasury;
         
         // Set default fee configuration
         _defaultFeeConfig = FeeConfig({
-            protocolFee: 50,      // 0.5%
+            protocolFee: 6,       // 0.06% transaction fee for deposits/withdrawals
             spvFee: 100,          // 1%
-            performanceFee: 200,  // 2%
-            earlyWithdrawalFee: 100, // 1%
+            managementFee: 200,   // 2% annual management fee
+            performanceFee: 1000, // 10% performance fee
+            earlyWithdrawalFee: 0, // No early withdrawal fees for flex pools (function kept for interface compatibility)
             refundGasFee: 10,     // 0.1%
             isActive: true
         });
     }
     
     function protocolTreasury() external view override returns (address) {
-        return _protocolTreasury;
+        return address(this); // FeeManager acts as the treasury
     }
     
     function defaultFeeConfig() external view override returns (FeeConfig memory) {
@@ -99,6 +134,246 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
     
     function paused() public view override(IFeeManager, Pausable) returns (bool) {
         return Pausable.paused();
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// TREASURY MANAGEMENT //////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @notice Deposit funds to treasury
+     * @param asset Asset to deposit
+     * @param amount Amount to deposit
+     */
+    function depositToTreasury(address asset, uint256 amount) external onlyRole(accessManager.OPERATOR_ROLE()) nonReentrant {
+        require(asset != address(0), "FeeManager/invalid asset");
+        require(amount > 0, "FeeManager/invalid amount");
+        
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        treasuryBalances[asset] += amount;
+        
+        emit TreasuryDeposit(asset, amount, treasuryBalances[asset]);
+    }
+
+    /**
+     * @notice Withdraw funds from treasury
+     * @param asset Asset to withdraw
+     * @param recipient Recipient address
+     * @param amount Amount to withdraw
+     */
+    function withdrawFromTreasury(
+        address asset,
+        address recipient,
+        uint256 amount
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) nonReentrant {
+        require(asset != address(0), "FeeManager/invalid asset");
+        require(recipient != address(0), "FeeManager/invalid recipient");
+        require(amount > 0, "FeeManager/invalid amount");
+        require(treasuryBalances[asset] >= amount, "FeeManager/insufficient treasury balance");
+        
+        treasuryBalances[asset] -= amount;
+        IERC20(asset).safeTransfer(recipient, amount);
+        
+        emit TreasuryWithdrawal(asset, recipient, amount, treasuryBalances[asset]);
+    }
+
+    /**
+     * @notice Get treasury balance for an asset
+     */
+    function getTreasuryBalance(address asset) external view returns (uint256) {
+        return treasuryBalances[asset];
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// EXPENSE RATIO MANAGEMENT ////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @notice Set expense ratio for a pool (annual basis points)
+     * @param pool Pool address
+     * @param expenseRatioBps Annual expense ratio in basis points
+     */
+    function setPoolExpenseRatio(
+        address pool,
+        uint256 expenseRatioBps
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) onlyValidPool(pool) {
+        require(expenseRatioBps <= MAX_EXPENSE_RATIO, "FeeManager/expense ratio too high");
+        
+        uint256 oldRatio = poolExpenseRatios[pool];
+        poolExpenseRatios[pool] = expenseRatioBps;
+        
+        // Initialize accrual timestamp if first time setting
+        if (lastExpenseAccrual[pool] == 0) {
+            lastExpenseAccrual[pool] = block.timestamp;
+        }
+        
+        emit ExpenseRatioUpdated(pool, oldRatio, expenseRatioBps);
+    }
+
+    /**
+     * @notice Set default expense ratio for a new pool
+     * @param pool Pool address
+     */
+    function setDefaultExpenseRatio(address pool) external onlyRole(accessManager.OPERATOR_ROLE()) {
+        require(pool != address(0), "FeeManager/invalid pool");
+        require(poolExpenseRatios[pool] == 0, "FeeManager/expense ratio already set");
+        
+        poolExpenseRatios[pool] = DEFAULT_EXPENSE_RATIO;
+        lastExpenseAccrual[pool] = block.timestamp;
+        
+        emit ExpenseRatioUpdated(pool, 0, DEFAULT_EXPENSE_RATIO);
+    }
+
+    /**
+     * @notice Accrue daily expense ratio fees for a pool
+     * @param pool Pool address
+     * @param poolTotalAssets Current total assets in the pool
+     * @return accruedAmount Amount of expense fees accrued
+     */
+    function accrueExpenseRatio(
+        address pool,
+        uint256 poolTotalAssets
+    ) external onlyRole(accessManager.OPERATOR_ROLE())  returns (uint256 accruedAmount) {
+        uint256 expenseRatio = poolExpenseRatios[pool];
+        if (expenseRatio == 0 || poolTotalAssets == 0) {
+            return 0;
+        }
+        
+        uint256 lastAccrual = lastExpenseAccrual[pool];
+        if (lastAccrual == 0) {
+            lastExpenseAccrual[pool] = block.timestamp;
+            return 0;
+        }
+        
+        uint256 timeElapsed = block.timestamp - lastAccrual;
+        if (timeElapsed == 0) {
+            return 0;
+        }
+        
+        // Calculate daily accrued expense: (totalAssets * expenseRatio * timeElapsed) / (BASIS_POINTS * SECONDS_PER_YEAR)
+        accruedAmount = (poolTotalAssets * expenseRatio * timeElapsed) / (BASIS_POINTS * SECONDS_PER_YEAR);
+        
+        if (accruedAmount > 0) {
+            accruedExpenseFees[pool] += accruedAmount;
+            lastExpenseAccrual[pool] = block.timestamp;
+            
+            emit ExpenseRatioAccrued(pool, accruedAmount, block.timestamp);
+        }
+        
+        return accruedAmount;
+    }
+
+    /**
+     * @notice Collect accrued expense fees from a pool
+     * @param pool Pool address
+     * @param asset Pool's base asset
+     */
+    function collectAccruedExpenseFees(
+        address pool,
+        address asset
+    ) external onlyRole(accessManager.OPERATOR_ROLE()) onlyValidPool(pool) nonReentrant {
+        uint256 accruedAmount = accruedExpenseFees[pool];
+        require(accruedAmount > 0, "FeeManager/no accrued fees");
+        
+        accruedExpenseFees[pool] = 0;
+        
+        // Transfer from pool to treasury
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), accruedAmount);
+        treasuryBalances[asset] += accruedAmount;
+        
+        emit TransactionFeeCollected(pool, asset, accruedAmount, "expense_ratio");
+    }
+
+    /**
+     * @notice Get accrued expense fees for a pool
+     */
+    function getAccruedExpenseFees(address pool) external view returns (uint256) {
+        return accruedExpenseFees[pool];
+    }
+
+    /**
+     * @notice Reduce accrued fees by paid amount (for partial payments)
+     * @param pool Pool address
+     * @param paidAmount Amount that was paid and should be deducted from accrued fees
+     */
+    function reduceAccruedFees(address pool, uint256 paidAmount) external onlyRole(accessManager.OPERATOR_ROLE()) onlyValidPool(pool) {
+        require(paidAmount <= accruedExpenseFees[pool], "FeeManager/payment exceeds accrued");
+        
+        accruedExpenseFees[pool] -= paidAmount;
+        
+        emit ExpenseRatioPartiallyCollected(pool, paidAmount, accruedExpenseFees[pool]);
+    }
+
+    /**
+     * @notice Get pool expense ratio
+     */
+    function getPoolExpenseRatio(address pool) external view returns (uint256) {
+        return poolExpenseRatios[pool];
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// TRANSACTION FEE COLLECTION ///////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @notice Collect transaction fee (deposit/withdrawal fees)
+     * @param pool Pool address
+     * @param asset Asset being collected
+     * @param amount Fee amount
+     * @param feeType Type of transaction fee
+     */
+    function collectTransactionFee(
+        address pool,
+        address asset,
+        uint256 amount,
+        string memory feeType
+    ) external onlyRole(accessManager.OPERATOR_ROLE()) onlyValidPool(pool) nonReentrant {
+        require(asset != address(0), "FeeManager/invalid asset");
+        require(amount > 0, "FeeManager/invalid amount");
+        require(bytes(feeType).length > 0, "FeeManager/invalid fee type");
+        
+        // Transfer fee from caller to treasury
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        treasuryBalances[asset] += amount;
+        transactionFees[pool][asset] += amount;
+        
+        emit TransactionFeeCollected(pool, asset, amount, feeType);
+    }
+
+    /**
+     * @notice Collect performance fee
+     * @param pool Pool address
+     * @param asset Pool's base asset
+     * @param amount Performance fee amount
+     */
+    function collectPerformanceFee(
+        address pool,
+        address asset,
+        uint256 amount
+    ) external onlyRole(accessManager.OPERATOR_ROLE()) onlyValidPool(pool) nonReentrant {
+        require(asset != address(0), "FeeManager/invalid asset");
+        require(amount > 0, "FeeManager/invalid amount");
+        
+        // Transfer fee from caller to treasury
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        treasuryBalances[asset] += amount;
+        performanceFees[pool] += amount;
+        
+        emit PerformanceFeeCollected(pool, amount, performanceFees[pool]);
+    }
+
+    /**
+     * @notice Get transaction fees collected for a pool and asset
+     */
+    function getTransactionFees(address pool, address asset) external view returns (uint256) {
+        return transactionFees[pool][asset];
+    }
+
+    /**
+     * @notice Get performance fees collected for a pool
+     */
+    function getPerformanceFees(address pool) external view returns (uint256) {
+        return performanceFees[pool];
     }
     
     function calculateProtocolFee(address pool, uint256 amount) external view override returns (uint256) {
@@ -113,6 +388,14 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         
         FeeConfig memory config = getPoolFeeConfig(pool);
         return (amount * config.spvFee) / BASIS_POINTS;
+    }
+    
+    function calculateManagementFee(address pool, uint256 totalValue, uint256 timeElapsed) external view override returns (uint256) {
+        if (totalValue == 0 || timeElapsed == 0) return 0;
+        
+        FeeConfig memory config = getPoolFeeConfig(pool);
+        // Management fee = (totalValue * managementFee * timeElapsed) / (BASIS_POINTS * SECONDS_PER_YEAR)
+        return (totalValue * config.managementFee * timeElapsed) / (BASIS_POINTS * SECONDS_PER_YEAR);
     }
     
     function calculatePerformanceFee(address pool, uint256 profit) external view override returns (uint256) {
@@ -175,7 +458,7 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         // If pool doesn't have custom distribution, return default
         if (distribution.protocolTreasury == address(0)) {
             return FeeDistribution({
-                protocolTreasury: _protocolTreasury,
+                protocolTreasury: address(this), // FeeManager acts as treasury
                 spvAddress: address(0), // This should be set by the pool
                 protocolShare: 5000,    // 50%
                 spvShare: 5000         // 50%
@@ -240,12 +523,11 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
     }
     
     function setProtocolTreasury(address treasury) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
-        require(treasury != address(0), "FeeManager/invalid-treasury");
+        // FeeManager acts as treasury, this function is kept for interface compatibility
+        // but doesn't change anything since treasury is always address(this)
+        require(treasury == address(this), "FeeManager/treasury must be this contract");
         
-        address oldTreasury = _protocolTreasury;
-        _protocolTreasury = treasury;
-        
-        emit TreasuryUpdated(oldTreasury, treasury);
+        emit TreasuryUpdated(address(this), address(this));
     }
     
     function collectFee(
@@ -379,7 +661,7 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         uint256 lastDistribution,
         uint256 protocolFees,
         uint256 spvFees,
-        uint256 performanceFees,
+        uint256 poolPerformanceFees,
         uint256 withdrawalFees,
         uint256 refundFees
     ) {
@@ -392,5 +674,16 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
             accumulatedFees[pool]["earlyWithdrawal"],
             accumulatedFees[pool]["refundGas"]
         );
+    }
+
+    function withdrawFromTreasury(address asset, uint256 amount, address to) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(to != address(0), "FeeManager/invalid recipient");
+        require(amount > 0, "FeeManager/invalid amount");
+        require(treasuryBalances[asset] >= amount, "FeeManager/insufficient treasury balance");
+        
+        treasuryBalances[asset] -= amount;
+        IERC20(asset).safeTransfer(to, amount);
+        
+        emit TreasuryWithdrawal(asset, to, amount, treasuryBalances[asset]);
     }
 } 

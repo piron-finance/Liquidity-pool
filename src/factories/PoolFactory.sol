@@ -21,7 +21,6 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
     address public manager; 
     uint256 public totalPoolsCreated;
     
-    // Implementation contracts for proxies
     address public liquidityPoolImplementation;
     address public poolEscrowImplementation;
     

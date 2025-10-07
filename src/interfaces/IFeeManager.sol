@@ -3,8 +3,9 @@ pragma solidity ^0.8.22;
 
 interface IFeeManager {
     struct FeeConfig {
-        uint256 protocolFee;      // Protocol fee in basis points
+        uint256 protocolFee;      // Protocol fee in basis points (transaction fees)
         uint256 spvFee;           // SPV management fee in basis points
+        uint256 managementFee;    // Annual management fee in basis points
         uint256 performanceFee;   // Performance fee in basis points
         uint256 earlyWithdrawalFee; // Early withdrawal penalty in basis points
         uint256 refundGasFee;     // Gas fee for refunds in basis points
@@ -48,6 +49,7 @@ interface IFeeManager {
     
     function calculateProtocolFee(address pool, uint256 amount) external view returns (uint256);
     function calculateSpvFee(address pool, uint256 amount) external view returns (uint256);
+    function calculateManagementFee(address pool, uint256 totalValue, uint256 timeElapsed) external view returns (uint256);
     function calculatePerformanceFee(address pool, uint256 profit) external view returns (uint256);
     function calculateEarlyWithdrawalFee(address pool, uint256 amount) external view returns (uint256);
     function calculateRefundGasFee(address pool, uint256 refundAmount) external view returns (uint256);
@@ -60,6 +62,23 @@ interface IFeeManager {
     function collectFee(address pool, address payer, uint256 amount, string memory feeType) external;
     function distributeFees(address pool) external;
     function getAccumulatedFees(address pool) external view returns (uint256);
+    
+    // Treasury and expense ratio functions
+    function depositToTreasury(address asset, uint256 amount) external;
+    function withdrawFromTreasury(address asset, uint256 amount, address to) external;
+    function getTreasuryBalance(address asset) external view returns (uint256);
+    
+    function setPoolExpenseRatio(address pool, uint256 expenseRatioBps) external;
+    function setDefaultExpenseRatio(address pool) external;
+    function accrueExpenseRatio(address pool, uint256 poolTotalAssets) external returns (uint256);
+    function collectAccruedExpenseFees(address pool, address asset) external;
+    function reduceAccruedFees(address pool, uint256 paidAmount) external;
+    function getAccruedExpenseFees(address pool) external view returns (uint256);
+    function getPoolExpenseRatio(address pool) external view returns (uint256);
+    
+    function collectTransactionFee(address pool, address asset, uint256 amount, string memory feeType) external;
+    function collectPerformanceFee(address pool, address asset, uint256 profit) external;
+    function getPerformanceFees(address asset) external view returns (uint256);
     
     function pause() external;
     function unpause() external;
