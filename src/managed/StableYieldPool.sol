@@ -14,9 +14,17 @@ import "../escrows/StableYieldEscrow.sol";
 import "../AccessManager.sol";
 
 /**
- * @title StableYieldPool also known as piron flex pools
- * @dev ERC4626 vault for flexible managed pools - delegates all business logic to StableYieldManager
- * @notice Flexible stable yield pool with NAV-based pricing and immediate liquidity
+ * @title StableYieldPool - Piron Flexible Pools
+ * @dev ERC4626 vault for flexible managed pools with 30-day minimum holding period
+ * @notice Flexible stable yield pool supporting cross-border stablecoin investments
+ * 
+ * Key Features:
+ * - 30-day minimum holding period (as per Piron's flexible pool design)
+ * - NAV-based pricing with fee deduction
+ * - Withdrawal queue system for liquidity management
+ * - Support for multiple stablecoins (USDC, USDT, DAI, etc.)
+ * - Cross-border accessibility via stablecoin rails
+ * - ERC4626 compliant for DeFi integrations
  */
 contract StableYieldPool is 
     Initializable,
@@ -35,6 +43,10 @@ contract StableYieldPool is
     AccessManager public accessManager;
     
     uint256 public version;
+    
+
+    uint256 public constant MINIMUM_HOLDING_PERIOD = 30 days;
+    mapping(address => uint256) public lastDepositTime;
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// EVENTS //////////////////////////////////////
@@ -42,6 +54,7 @@ contract StableYieldPool is
 
     event PoolInitialized(address indexed asset, address indexed escrow, address indexed manager);
     event WithdrawalRequested(address indexed user, uint256 shares, uint256 estimatedValue);
+    event HoldingPeriodViolation(address indexed user, uint256 timeRemaining);
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// INITIALIZATION /////////////////////////////
@@ -117,6 +130,8 @@ contract StableYieldPool is
         shares = stableYieldManager.validateDeposit(address(this), assets, receiver);
 
         _mint(receiver, shares);
+   
+        lastDepositTime[receiver] = block.timestamp;
 
         emit Deposit(msg.sender, receiver, assets, shares);
     }
@@ -132,21 +147,31 @@ contract StableYieldPool is
         require(shares > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
         
-        // Calculate required assets for exact shares
         uint256 navPerShare = stableYieldManager.calculateNAVPerShare(address(this));
-        assets = (shares * navPerShare) / 1e18;
+        uint256 netAssetsNeeded = (shares * navPerShare) / 1e18;
+        
+        // Calculate gross assets by working backwards from fee formula
+        // If fee = grossAssets * feeRate / 10000, and netAssets = grossAssets - fee
+        // Then: netAssets = grossAssets * (1 - feeRate/10000)
+        // So: grossAssets = netAssets / (1 - feeRate/10000) = netAssets * 10000 / (10000 - feeRate)
+        
+        // Get fee config to calculate exact gross amount needed
+        IFeeManager.FeeConfig memory feeConfig = IFeeManager(stableYieldManager.feeManager()).getPoolFeeConfig(address(this));
+        uint256 protocolFeeRate = feeConfig.protocolFee; // in basis points
+        
+        assets = (netAssetsNeeded * 10000) / (10000 - protocolFeeRate);
         
         require(IERC20(asset()).allowance(msg.sender, address(escrow)) >= assets, "StableYieldPool/insufficient allowance - approve tokens first");
 
         IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), assets);
 
-        // Validate deposit and allocate fees
-        stableYieldManager.validateDeposit(address(this), assets, receiver);
+        uint256 actualShares = stableYieldManager.validateDeposit(address(this), assets, receiver);
 
-        // Mint exact shares requested (ERC4626 compliance)
-        _mint(receiver, shares);
+        _mint(receiver, actualShares);
+        
+        lastDepositTime[receiver] = block.timestamp;
 
-        emit Deposit(msg.sender, receiver, assets, shares);
+        emit Deposit(msg.sender, receiver, assets, actualShares);
         
         return assets;
     }
@@ -164,10 +189,23 @@ contract StableYieldPool is
         require(assets > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
         require(owner != address(0), "StableYieldPool/invalid owner");
+        
+        _enforceHoldingPeriod(owner);
 
-        // Calculate shares needed for exact asset amount
+        // Calculate shares needed to get exact asset amount after fees
+        // User wants 'assets' net amount, so we need to work backwards:
+        // If netWithdrawal = grossWithdrawal - fee, and fee = grossWithdrawal * feeRate
+        // Then: assets = grossWithdrawal * (1 - feeRate)
+        // So: grossWithdrawal = assets / (1 - feeRate) = assets * 10000 / (10000 - feeRate)
+        
+        IFeeManager.FeeConfig memory feeConfig = IFeeManager(stableYieldManager.feeManager()).getPoolFeeConfig(address(this));
+        uint256 protocolFeeRate = feeConfig.protocolFee; // in basis points
+        
+        uint256 grossWithdrawalNeeded = (assets * 10000) / (10000 - protocolFeeRate);
+        
+        // Convert gross withdrawal amount to shares
         uint256 navPerShare = stableYieldManager.calculateNAVPerShare(address(this));
-        shares = (assets * 1e18) / navPerShare;
+        shares = (grossWithdrawalNeeded * 1e18) / navPerShare;
 
         if (msg.sender != owner) {
             _spendAllowance(owner, msg.sender, shares);
@@ -183,7 +221,7 @@ contract StableYieldPool is
             emit WithdrawalRequested(owner, shares, withdrawalValue);
         }
 
-        return actualShares; // Return shares burned (ERC4626 compliance)
+        return actualShares; 
     }
 
     /**
@@ -197,6 +235,8 @@ contract StableYieldPool is
         require(shares > 0, "StableYieldPool/invalid shares");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
         require(owner != address(0), "StableYieldPool/invalid owner");
+        
+        _enforceHoldingPeriod(owner);
 
         if (msg.sender != owner) {
             _spendAllowance(owner, msg.sender, shares);
@@ -223,7 +263,7 @@ contract StableYieldPool is
     /**
      * @notice Get current NAV per share
      */
-    function getNAVPerShare() external returns (uint256) {
+    function getNAVPerShare() external view returns (uint256) {
         return stableYieldManager.calculateNAVPerShare(address(this));
     }
 
@@ -283,6 +323,43 @@ contract StableYieldPool is
     function getVersion() external view returns (uint256) {
         return version;
     }
+    
+    /**
+     * @notice Check if user can withdraw (holding period satisfied)
+     */
+    function canWithdraw(address user) external view returns (bool) {
+        return block.timestamp >= lastDepositTime[user] + MINIMUM_HOLDING_PERIOD;
+    }
+    
+    /**
+     * @notice Get remaining holding period for user
+     */
+    function getRemainingHoldingPeriod(address user) external view returns (uint256) {
+        uint256 unlockTime = lastDepositTime[user] + MINIMUM_HOLDING_PERIOD;
+        return block.timestamp >= unlockTime ? 0 : unlockTime - block.timestamp;
+    }
+    
+    /**
+     * @notice Get user's unlock timestamp
+     */
+    function getUnlockTime(address user) external view returns (uint256) {
+        return lastDepositTime[user] + MINIMUM_HOLDING_PERIOD;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// INTERNAL FUNCTIONS ///////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+    
+    /**
+     * @notice Enforce minimum holding period for flexible pools
+     * @param user User attempting to withdraw
+     */
+    function _enforceHoldingPeriod(address user) internal view {
+        uint256 unlockTime = lastDepositTime[user] + MINIMUM_HOLDING_PERIOD;
+        if (block.timestamp < unlockTime) {
+            revert("StableYieldPool/minimum holding period not met");
+        }
+    }
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// ADMIN FUNCTIONS ////////////////////////////
@@ -302,6 +379,34 @@ contract StableYieldPool is
     function unpause() external {
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
         _unpause();
+    }
+    
+    /**
+     * @notice Emergency withdrawal bypass (operators only)
+     * @dev Allows operators to process withdrawals without holding period in emergencies
+     * @param shares Number of shares to redeem
+     * @param receiver Address to receive assets
+     * @param owner Address that owns the shares
+     * @return assets Amount of assets received
+     */
+    function emergencyRedeem(uint256 shares, address receiver, address owner) external returns (uint256 assets) {
+        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
+        require(shares > 0, "StableYieldPool/invalid shares");
+        require(receiver != address(0), "StableYieldPool/invalid receiver");
+        require(owner != address(0), "StableYieldPool/invalid owner");
+
+        // Skip holding period check in emergency
+        (uint256 actualShares, uint256 withdrawalValue) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
+        
+        if (actualShares > 0) {
+            _burn(owner, actualShares);
+            escrow.withdraw(receiver, withdrawalValue);
+            emit Withdraw(msg.sender, receiver, owner, withdrawalValue, actualShares);
+        } else {
+            emit WithdrawalRequested(owner, shares, withdrawalValue);
+        }
+
+        return withdrawalValue;
     }
 
 

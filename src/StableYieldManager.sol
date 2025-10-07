@@ -700,7 +700,7 @@ contract StableYieldManager is
         uint256 faceValue,
         uint256 maturityDate,
         uint256 annualCouponRate,
-        uint8 couponFrequency
+        uint8 couponFrequency // 0=T-bill, 2=semi-annual, 4=quarterly, 12=monthly
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
         require(purchasePrice > 0, "StableYieldManager/invalid purchase price");
         require(faceValue > 0, "StableYieldManager/invalid face value");
@@ -888,6 +888,50 @@ contract StableYieldManager is
         poolInstrumentCount[poolAddress]--;
         
         emit InstrumentRemoved(poolAddress, instrumentId, finalValue, reason);
+    }
+
+    /**
+     * @notice Allocate funds to SPV for instrument purchases (Operator only)
+     * @param poolAddress Pool address
+     * @param spvAddress SPV address
+     * @param amount Amount to allocate
+     */
+    function allocateToSPV(
+        address poolAddress,
+        address spvAddress,
+        uint256 amount
+    ) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) nonReentrant {
+        require(spvAddress != address(0), "StableYieldManager/invalid SPV");
+        require(amount > 0, "StableYieldManager/invalid amount");
+        
+        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
+        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
+        
+        require(escrow.getCashBuffer() >= amount, "StableYieldManager/insufficient cash buffer");
+        
+        escrow.allocateToSPV(spvAddress, amount);
+        
+        _triggerNAVUpdate(poolAddress, "spv_allocation");
+    }
+
+    /**
+     * @notice Receive matured instrument proceeds from SPV
+     * @param poolAddress Pool address
+     * @param amount Amount received from matured instruments
+     */
+    function receiveSPVMaturity(
+        address poolAddress,
+        uint256 amount
+    ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
+        require(amount > 0, "StableYieldManager/invalid amount");
+        
+        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
+        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
+        
+        // SPV transfers funds back to escrow
+        escrow.receiveSPVLiquidity(amount);
+        
+        _triggerNAVUpdate(poolAddress, "spv_maturity_received");
     }
 
 
