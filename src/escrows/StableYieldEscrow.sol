@@ -285,24 +285,7 @@ contract StableYieldEscrow is
         emit SPVAllocation(spvAddress, amount, cashBuffer);
     }
     
-    /**
-     * @notice Request liquidity from SPV by liquidating instruments
-     * @param spvAddress SPV address
-     * @param amount Amount of liquidity needed
-     */
-    function requestSPVLiquidity(address spvAddress, uint256 amount) external onlyOperator {
-        require(spvAddress != address(0), "StableYieldEscrow/invalid SPV");
-        require(amount > 0, "StableYieldEscrow/invalid amount");
-        require(poolReserves >= amount, "StableYieldEscrow/insufficient pool reserves");
-        
-        poolReserves -= amount;
-        cashBuffer -= amount;
-        spvAllocations[spvAddress] += amount;
-        
-        asset.safeTransfer(spvAddress, amount);
-        
-        emit SPVLiquidityRequested(spvAddress, amount, block.timestamp);
-    }
+
     
     /**
      * @notice Receive liquidity back from SPV
