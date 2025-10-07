@@ -142,7 +142,7 @@ contract StableYieldManager is
         _;
     }
 
-     modifier ActivePool (address poolAddress) { // replace pool exist with this maybe
+     modifier ActivePool (address poolAddress) {
         require(pools[poolAddress].isActive, "PoolManager/pool not active");
         _;
     }
@@ -361,18 +361,19 @@ contract StableYieldManager is
         address poolAddress,
         uint256 amount,
         address receiver
-    ) external onlyRegisteredPool poolExists(poolAddress) nonReentrant returns (uint256 shares) { // add a modifier for active pools
-        require(msg.sender == poolAddress, "StableYieldManager/invalid caller"); // fix after updating the registry
+    ) external onlyRegisteredPool poolExists(poolAddress) ActivePool(poolAddress) nonReentrant returns (uint256 shares) { 
+        require(msg.sender == poolAddress, "StableYieldManager/invalid caller");
+        require(registry.isManagedPool(poolAddress), "StableYieldManager/invalid pool"); 
         
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         require(amount >= poolData.minInvestment, "StableYieldManager/below minimum");
         require(receiver != address(0), "StableYieldManager/invalid receiver");
         
-        uint256 navPerShare = calculateNAVPerShare(poolAddress);
-        shares = (amount * 1e18) / navPerShare;
-        
         uint256 transactionFee = IFeeManager(feeManager).calculateProtocolFee(poolAddress, amount);
         uint256 netDepositAmount = amount - transactionFee;
+        
+        uint256 navPerShare = calculateNAVPerShare(poolAddress);
+        shares = (netDepositAmount * 1e18) / navPerShare;
         
  
         StableYieldEscrow(poolData.escrowAddress).allocateDeposit(amount, netDepositAmount, transactionFee);
@@ -404,27 +405,28 @@ contract StableYieldManager is
         uint256 shares,
         address receiver,
         address owner
-    ) external onlyRegisteredPool poolExists(poolAddress) nonReentrant returns (uint256 actualShares, uint256 withdrawalValue) {
+    ) external  poolExists(poolAddress) ActivePool(poolAddress) nonReentrant returns (uint256 actualShares, uint256 withdrawalValue) {
         require(msg.sender == poolAddress, "StableYieldManager/invalid caller");
+         require(registry.isManagedPool(poolAddress), "StableYieldManager/invalid pool"); // check if duplicate with modifier
         require(shares > 0, "StableYieldManager/invalid shares");
         require(receiver != address(0), "StableYieldManager/invalid receiver");
         require(owner != address(0), "StableYieldManager/invalid owner");
         
-         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
+        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         require(poolData.isActive, "StableYieldManager/pool not active");
         
         uint256 navPerShare = calculateNAVPerShare(poolAddress);
-         withdrawalValue = (shares * navPerShare) / 1e18;
+        uint256 grossWithdrawalValue = (shares * navPerShare) / 1e18;
         
-        uint256 transactionFee = IFeeManager(feeManager).calculateProtocolFee(poolAddress, withdrawalValue);
-        uint256 totalRequired = withdrawalValue + transactionFee;
+        uint256 transactionFee = IFeeManager(feeManager).calculateProtocolFee(poolAddress, grossWithdrawalValue);
+        withdrawalValue = grossWithdrawalValue - transactionFee;
         
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
         
-        if (escrow.getPoolReserves() >= totalRequired) {
+        if (escrow.getPoolReserves() >= grossWithdrawalValue) {
             if (transactionFee > 0) {
                 escrow.allocateWithdrawalFee(transactionFee);
-                emit TransactionFeeCollected(poolAddress, "withdrawal", withdrawalValue, transactionFee);
+                emit TransactionFeeCollected(poolAddress, "withdrawal", grossWithdrawalValue, transactionFee);
             }
             
             emit WithdrawalValidated(poolAddress, owner, shares, withdrawalValue, true);
@@ -442,6 +444,35 @@ contract StableYieldManager is
     /////////////////////////////// QUEUE MANAGEMENT //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
+
+     /**
+     * @notice Queue a withdrawal request
+     */
+
+    function _queueWithdrawal(
+        address poolAddress,
+        address user,
+        uint256 shares,
+        uint256 estimatedValue
+    ) internal {
+        IStableYieldTypes.WithdrawalQueue storage queue = poolQueues[poolAddress];
+        
+        uint256 requestId = queue.tail++;
+        withdrawalRequests[poolAddress][requestId] = IStableYieldTypes.WithdrawalRequest({
+            user: user,
+            shares: shares,
+            requestTime: block.timestamp,
+            estimatedValue: estimatedValue,
+            processed: false,
+            processedTime: 0
+        });
+        
+        userWithdrawalRequests[poolAddress][user].push(requestId);
+        queue.totalPendingValue += estimatedValue;
+        
+        emit WithdrawalQueued(poolAddress, user, requestId, shares, estimatedValue);
+    }
+
     /**
      * @notice Process queued withdrawals for a pool
      * @param poolAddress Pool to process withdrawals for
@@ -451,7 +482,7 @@ contract StableYieldManager is
     function processWithdrawalQueue(address poolAddress, uint256 maxRequests) 
         external 
         onlyRole(accessManager.OPERATOR_ROLE()) 
-        poolExists(poolAddress) 
+        ActivePool(poolAddress) 
         nonReentrant 
         returns (uint256 processed) 
     {
@@ -481,6 +512,30 @@ contract StableYieldManager is
         queue.head = currentHead;
         
         return requestsProcessed;
+    }
+
+        /**
+     * @notice Process a queued withdrawal
+     */
+    function _processQueuedWithdrawal(address poolAddress, uint256 requestId) internal {
+        IStableYieldTypes.WithdrawalRequest storage request = withdrawalRequests[poolAddress][requestId];
+        
+        uint256 netValue = request.estimatedValue;
+        
+        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
+        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
+      
+        
+        request.processed = true;
+        request.processedTime = block.timestamp;
+
+        poolQueues[poolAddress].totalPendingValue -= request.estimatedValue;
+
+        escrow.withdraw(request.user, netValue);
+        
+       
+        
+        emit WithdrawalProcessed(poolAddress, request.user, requestId, netValue, 0);
     }
 
 
@@ -514,7 +569,7 @@ contract StableYieldManager is
      * @param poolAddress Pool address
      * @return navPerShare NAV per share (normalized to 18 decimals)
      */
-    function calculateNAVPerShare(address poolAddress) public view poolExists(poolAddress) returns (uint256 navPerShare) {
+    function calculateNAVPerShare(address poolAddress) public view ActivePool(poolAddress) returns (uint256 navPerShare) {
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         uint256 totalNAV = calculatePoolNAV(poolAddress);
         
@@ -533,21 +588,11 @@ contract StableYieldManager is
         return normalizedNAV / totalShares;
     }
 
-    /**
-     * @notice Update and emit NAV calculation
-     * @param poolAddress Pool address
-     */
-    function updateNAVCalculation(address poolAddress) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) {
-        uint256 totalNAV = calculatePoolNAV(poolAddress);
-        uint256 totalShares = IERC20(pools[poolAddress].poolAddress).totalSupply();
-        uint256 navPerShare = calculateNAVPerShare(poolAddress);
-        
-        emit NAVCalculated(poolAddress, totalNAV, navPerShare, totalShares, block.timestamp);
-    }
+                                                                                                                                                                                            
     
     /**
      * @notice  gross asset value calculation
-     * @param poolAddress Pool address
+     * @param poolAddress Pool address                                                                                                                 
      * @return grossValue Total value of all instruments
      */
     function _calculateGrossAssetValue(address poolAddress) internal view returns (uint256 grossValue) {
@@ -588,6 +633,7 @@ contract StableYieldManager is
         
         uint256 timeElapsed = block.timestamp - lastAccrual;
         if (timeElapsed == 0) return deferredFees[poolAddress];
+
         uint256 annualFee = (totalGrossValue * expenseRatioBps) / 10000;
         uint256 currentAccrued = (annualFee * timeElapsed) / SECONDS_PER_YEAR;
         
@@ -672,7 +718,7 @@ contract StableYieldManager is
         uint256 nextCouponDate = 0;
         if (instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING) {
             uint256 couponPeriodSeconds = (365 days) / couponFrequency;
-            nextCouponDate = block.timestamp + couponPeriodSeconds;
+            nextCouponDate = block.timestamp + couponPeriodSeconds; // are we insinuating coupon frequency is in seconds?
         }
         
         poolInstruments[poolAddress].push(IStableYieldTypes.InstrumentHolding({
@@ -694,7 +740,6 @@ contract StableYieldManager is
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
         require(escrow.getPoolReserves() >= purchasePrice, "StableYieldManager/insufficient cash");
-        // Note: SPV will request liquidity via requestSPVLiquidity()
         
         emit InstrumentPurchased(poolAddress, instrumentId, instrumentType, purchasePrice, faceValue, maturityDate);
         
@@ -720,8 +765,6 @@ contract StableYieldManager is
         uint256 realizedYield = instrument.faceValue - instrument.purchasePrice;
         uint256 finalValue = instrument.faceValue;
         
-        // Note: Matured funds flow back via receiveSPVLiquidity()
-        
         _removeInstrument(poolAddress, instrumentId, "matured");
         
         emit InstrumentMatured(poolAddress, instrumentId, finalValue, realizedYield);
@@ -746,8 +789,7 @@ contract StableYieldManager is
         require(instrument.isActive, "StableYieldManager/instrument not active");
         require(instrument.instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING, "StableYieldManager/not interest bearing");
         require(block.timestamp >= instrument.nextCouponDueDate, "StableYieldManager/coupon not due");
-        
-        // Note: Coupon funds flow back via receiveSPVLiquidity()
+
         
         instrument.couponsPaid++;
         
@@ -820,64 +862,8 @@ contract StableYieldManager is
 
             _removeInstrument(poolAddress, instrumentId, "batch_matured");
         }
-
-        // Note: Matured funds flow back via receiveSPVLiquidity()
         
         _triggerNAVUpdate(poolAddress, "batch_instrument_matured");
-    }
-
-
-
- ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INTERNAL FUNCTIONS ///////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-
-    /**
-     * @notice Queue a withdrawal request
-     */
-    function _queueWithdrawal(
-        address poolAddress,
-        address user,
-        uint256 shares,
-        uint256 estimatedValue
-    ) internal {
-        IStableYieldTypes.WithdrawalQueue storage queue = poolQueues[poolAddress];
-        
-        uint256 requestId = queue.tail++;
-        withdrawalRequests[poolAddress][requestId] = IStableYieldTypes.WithdrawalRequest({
-            user: user,
-            shares: shares,
-            requestTime: block.timestamp,
-            estimatedValue: estimatedValue,
-            processed: false,
-            processedTime: 0
-        });
-        
-        userWithdrawalRequests[poolAddress][user].push(requestId);
-        queue.totalPendingValue += estimatedValue;
-        
-        emit WithdrawalQueued(poolAddress, user, requestId, shares, estimatedValue);
-    }
-
-    /**
-     * @notice Process a queued withdrawal
-     */
-    function _processQueuedWithdrawal(address poolAddress, uint256 requestId) internal {
-        IStableYieldTypes.WithdrawalRequest storage request = withdrawalRequests[poolAddress][requestId];
-        
-        uint256 netValue = request.estimatedValue;
-        
-        // Note: Withdrawal handled by escrow.withdraw()
-        
-        
-        request.processed = true;
-        request.processedTime = block.timestamp;
-        
-   
-        poolQueues[poolAddress].totalPendingValue -= request.estimatedValue;
-        
-        emit WithdrawalProcessed(poolAddress, request.user, requestId, netValue, 0);
     }
 
 
@@ -944,14 +930,11 @@ contract StableYieldManager is
             require(currentReserve < targetReserve, "StableYieldManager/reserves already sufficient");
             require(amount <= (targetReserve - currentReserve), "StableYieldManager/excessive liquidation");
             
-            // Note: Liquidated funds flow back via receiveSPVLiquidity()
             
         } else {
             require(currentReserve > targetReserve, "StableYieldManager/no excess reserves");
             require(amount <= (currentReserve - targetReserve), "StableYieldManager/excessive investment");
             require(escrow.getPoolReserves() >= amount, "StableYieldManager/insufficient cash");
-
-            // Note: Investment funds sent via requestSPVLiquidity()
         }
         
         emit ReservesRebalanced(poolAddress, escrow.getPoolReserves(), totalNAV);
