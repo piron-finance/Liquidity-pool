@@ -109,7 +109,13 @@ contract PironPoolsDeployment is Script {
             console.log("Using existing token at: %s", contracts.baseToken);
         }
         
-        contracts.accessManager = address(new AccessManager(config.admin));
+        contracts.accessManager = address(new AccessManager(
+            config.admin,
+            config.spv,
+            config.operator,
+            config.emergency,
+            config.admin  // Using admin as multisigAdmin for now
+        ));
         console.log("AccessManager deployed at: %s", contracts.accessManager);
         emit ContractDeployed("AccessManager", contracts.accessManager);
         
@@ -162,6 +168,7 @@ contract PironPoolsDeployment is Script {
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
             protocolFee: 50,         // 0.5% protocol fee
             spvFee: 100,            // 1.0% SPV fee
+            managementFee: 150,     // 1.5% annual management fee
             performanceFee: 200,    // 2.0% performance fee
             earlyWithdrawalFee: 100, // 1.0% early withdrawal fee
             refundGasFee: 10,       // 0.1% refund gas fee
