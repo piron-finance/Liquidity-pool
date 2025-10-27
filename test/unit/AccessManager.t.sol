@@ -483,29 +483,17 @@ contract AccessManagerTest is BaseTest {
         vm.assume(randomUser != address(0));
         vm.assume(roleIndex < 10); // Limit to defined roles
         
-        bytes32 spvRole = accessManager.SPV_ROLE();
-        bytes32 operatorRole = accessManager.OPERATOR_ROLE();
-        bytes32 emergencyRole = accessManager.EMERGENCY_ROLE();
-        bytes32 oracleRole = accessManager.ORACLE_ROLE();
-        bytes32 verifierRole = accessManager.VERIFIER_ROLE();
-        bytes32 factoryRole = accessManager.FACTORY_ROLE();
-        bytes32 poolCreatorRole = accessManager.POOL_CREATOR_ROLE();
-        bytes32 multisigAdminRole = accessManager.MULTISIG_ADMIN_ROLE();
-        bytes32 executorRole = accessManager.EXECUTOR_ROLE();
-        bytes32 assetManagerRole = accessManager.ASSET_MANAGER_ROLE();
-        uint256 roleDelay = accessManager.ROLE_DELAY();
-        
         bytes32[] memory roles = new bytes32[](10);
-        roles[0] = spvRole;
-        roles[1] = operatorRole;
-        roles[2] = emergencyRole;
-        roles[3] = oracleRole;
-        roles[4] = verifierRole;
-        roles[5] = factoryRole;
-        roles[6] = poolCreatorRole;
-        roles[7] = multisigAdminRole;
-        roles[8] = executorRole;
-        roles[9] = assetManagerRole;
+        roles[0] = accessManager.SPV_ROLE();
+        roles[1] = accessManager.OPERATOR_ROLE();
+        roles[2] = accessManager.EMERGENCY_ROLE();
+        roles[3] = accessManager.ORACLE_ROLE();
+        roles[4] = accessManager.VERIFIER_ROLE();
+        roles[5] = accessManager.FACTORY_ROLE();
+        roles[6] = accessManager.POOL_CREATOR_ROLE();
+        roles[7] = accessManager.MULTISIG_ADMIN_ROLE();
+        roles[8] = accessManager.EXECUTOR_ROLE();
+        roles[9] = accessManager.ASSET_MANAGER_ROLE();
         
         bytes32 role = roles[roleIndex];
         
@@ -519,7 +507,7 @@ contract AccessManagerTest is BaseTest {
         bytes32 proposalId = accessManager.proposeRoleGrant(role, randomUser);
         
         // Fast forward past delay
-        skip(roleDelay + 1);
+        skip(accessManager.ROLE_DELAY() + 1);
         
         // Execute proposal - admin has both DEFAULT_ADMIN_ROLE and MULTISIG_ADMIN_ROLE
         vm.prank(admin);

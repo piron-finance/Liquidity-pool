@@ -241,12 +241,12 @@ contract DeployUpgradeable is Script {
         registry.setFactory(contracts.poolFactoryProxy);
         console.log("Factory set in registry");
         
-        // Grant roles
-        accessManager.grantRole(accessManager.SPV_ROLE(), config.spv);
-        accessManager.grantRole(accessManager.OPERATOR_ROLE(), config.operator);
-        accessManager.grantRole(accessManager.EMERGENCY_ROLE(), config.emergency);
-        accessManager.grantRole(keccak256("POOL_CREATOR_ROLE"), config.admin);
-        console.log("Roles granted successfully");
+        // Note: SPV_ROLE, OPERATOR_ROLE, EMERGENCY_ROLE are already granted in AccessManager constructor
+        // Only POOL_CREATOR_ROLE needs to be granted, and must use proposeRoleGrant (not grantRole)
+        bytes32 poolCreatorProposal = accessManager.proposeRoleGrant(accessManager.POOL_CREATOR_ROLE(), config.admin);
+        console.log("POOL_CREATOR_ROLE proposed for admin");
+        console.log("Proposal ID: %s", vm.toString(poolCreatorProposal));
+        console.log("Wait for role delay period, then execute with executeRoleGrant()");
         
         // Approve base token
         registry.approveAsset(
@@ -287,10 +287,13 @@ contract DeployUpgradeable is Script {
         // Verify manager proxy
         require(Manager(contracts.managerProxy).timelockController() == contracts.timelockController, "Manager timelock mismatch");
         
-        // Verify access control
+        // Verify access control (roles granted in AccessManager constructor)
         AccessManager accessManager = AccessManager(contracts.accessManager);
         require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), config.admin), "Admin role not granted");
         require(accessManager.hasRole(accessManager.SPV_ROLE(), config.spv), "SPV role not granted");
+        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), config.operator), "Operator role not granted");
+        require(accessManager.hasRole(accessManager.EMERGENCY_ROLE(), config.emergency), "Emergency role not granted");
+        console.log("AccessManager roles verified (from constructor)");
         
         // Verify timelock configuration
         PironTimelock.PironTimelockController timelock = PironTimelock.PironTimelockController(contracts.timelockController);
@@ -328,6 +331,11 @@ contract DeployUpgradeable is Script {
         console.log("=== SUPPORTING CONTRACTS ===");
         console.log("FeeManager: %s", contracts.feeManager);
         console.log("Base Token: %s", contracts.baseToken);
+        console.log("");
+        console.log("=== NEXT STEPS ===");
+        console.log("1. Wait for AccessManager ROLE_DELAY period (default: 24 hours)");
+        console.log("2. Execute POOL_CREATOR_ROLE grant:");
+        console.log("   accessManager.executeRoleGrant(proposalId)");
         console.log("");
         console.log("ENTERPRISE DEPLOYMENT COMPLETE!");
         console.log("Upgrade Delay: 72 hours");

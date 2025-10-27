@@ -148,11 +148,10 @@ contract PironPoolsDeployment is Script {
         registry.setFactory(contracts.poolFactory);
         console.log("Factory set in registry");
         
-        accessManager.grantRole(accessManager.SPV_ROLE(), config.spv);
-        accessManager.grantRole(accessManager.OPERATOR_ROLE(), config.operator);
-        accessManager.grantRole(accessManager.EMERGENCY_ROLE(), config.emergency);
-        accessManager.grantRole(keccak256("POOL_CREATOR_ROLE"), config.admin);
-        console.log("Roles granted successfully");
+        bytes32 poolCreatorProposal = accessManager.proposeRoleGrant(accessManager.POOL_CREATOR_ROLE(), config.admin);
+        console.log("POOL_CREATOR_ROLE proposed for admin");
+        console.log("Proposal ID: %s", vm.toString(poolCreatorProposal));
+        console.log("Wait for role delay period, then execute with executeRoleGrant()");
         
         registry.approveAsset(
             contracts.baseToken,
@@ -190,7 +189,7 @@ contract PironPoolsDeployment is Script {
         require(accessManager.hasRole(accessManager.SPV_ROLE(), config.spv), "SPV role not set");
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), config.operator), "Operator role not set");
         require(accessManager.hasRole(accessManager.EMERGENCY_ROLE(), config.emergency), "Emergency role not set");
-        console.log("AccessManager roles verified");
+        console.log("AccessManager roles verified (from constructor)");
 
         PoolRegistry registry = PoolRegistry(contracts.poolRegistry);
         require(registry.factory() == contracts.poolFactory, "Factory not set in registry");
@@ -235,6 +234,11 @@ contract PironPoolsDeployment is Script {
         console.log("Operator:      %s", config.operator);
         console.log("Emergency:     %s", config.emergency);
         console.log("Treasury:      %s", config.treasury);
+        console.log("");
+        console.log("=== NEXT STEPS ===");
+        console.log("1. Wait for AccessManager ROLE_DELAY period (default: 24 hours)");
+        console.log("2. Execute POOL_CREATOR_ROLE grant:");
+        console.log("   accessManager.executeRoleGrant(proposalId)");
         console.log("");
         console.log("=== DEPLOYMENT COMPLETE ===");
     }

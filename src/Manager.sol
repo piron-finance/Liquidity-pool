@@ -892,12 +892,20 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     }
 
  
+    function poolStatus(address pool) external view returns (IPoolTypes.PoolStatus) {
+        return pools[pool].status;
+    }
+    
     function poolTotalRaised(address pool) external view returns (uint256) {
         return pools[pool].totalRaised;
     }
     
     function poolActualInvested(address pool) external view returns (uint256) {
         return pools[pool].actualInvested;
+    }
+    
+    function poolTotalDiscountEarned(address pool) external view returns (uint256) {
+        return pools[pool].totalDiscountEarned;
     }
     
     function poolUserDepositTime(address pool, address user) external view returns (uint256) {

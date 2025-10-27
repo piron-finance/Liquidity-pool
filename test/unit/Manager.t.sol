@@ -47,7 +47,9 @@ contract TestPoolRegistry is PoolRegistry {
     function initialize(
         address _accessManager,
         address _timelockController,
-        address _initialAdmin
+        address _initialAdmin,
+        address _operator,
+        address _emergency
     ) public initializer {
         require(_accessManager != address(0), "PoolRegistry/invalid-access-manager");
         require(_timelockController != address(0), "Invalid timelock controller");
@@ -64,9 +66,10 @@ contract TestPoolRegistry is PoolRegistry {
         _grantRole(DEFAULT_ADMIN_ROLE, _initialAdmin);
         _grantRole(accessManager.ASSET_MANAGER_ROLE(), _initialAdmin);
         _grantRole(accessManager.POOL_CREATOR_ROLE(), _initialAdmin);
-        _grantRole(accessManager.OPERATOR_ROLE(), _initialAdmin);
-        _grantRole(accessManager.EMERGENCY_ROLE(), _initialAdmin);
+        _grantRole(accessManager.OPERATOR_ROLE(), _operator);
+        _grantRole(accessManager.EMERGENCY_ROLE(), _emergency);
         _grantRole(accessManager.MULTISIG_ADMIN_ROLE(), _initialAdmin);
+        _grantRole(accessManager.OPERATOR_ROLE(), _emergency);
     }
 }
 
@@ -116,10 +119,12 @@ contract ManagerTest is BaseTest {
         // Deploy and initialize Registry
         registryImpl = new TestPoolRegistry();
         bytes memory registryInitData = abi.encodeWithSignature(
-            "initialize(address,address,address)",
+            "initialize(address,address,address,address,address)",
             address(accessManager),
             timelock,
-            admin
+            admin,
+            operator,
+            emergency
         );
         ERC1967Proxy registryProxy = new ERC1967Proxy(address(registryImpl), registryInitData);
         registry = TestPoolRegistry(address(registryProxy));
@@ -138,10 +143,11 @@ contract ManagerTest is BaseTest {
         // Deploy and initialize escrow
         escrowImpl = new PoolEscrow();
         bytes memory escrowInitData = abi.encodeWithSignature(
-            "initialize(address,address,address)",
+            "initialize(address,address,address,address)",
             address(token),
             address(manager),
-            spv
+            spv,
+            timelock
         );
         ERC1967Proxy escrowProxy = new ERC1967Proxy(address(escrowImpl), escrowInitData);
         escrow = PoolEscrow(payable(address(escrowProxy)));

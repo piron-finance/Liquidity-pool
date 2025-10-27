@@ -231,12 +231,13 @@ contract LiquidityPoolTest is BaseTest {
         
         // Deploy proxy
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,string,string,address,address)",
+            "initialize(address,string,string,address,address,address)",
             address(token),
             "Piron Pool",
             "pPool",
             address(mockManager),
-            address(mockEscrow)
+            address(mockEscrow),
+            address(0) // timelock
         );
         
         ERC1967Proxy proxy = new ERC1967Proxy(
@@ -275,12 +276,13 @@ contract LiquidityPoolTest is BaseTest {
         LiquidityPool newPoolImpl = new LiquidityPool();
         
         bytes memory badInitData = abi.encodeWithSignature(
-            "initialize(address,string,string,address,address)",
+            "initialize(address,string,string,address,address,address)",
             address(token),
             "Test Pool",
             "tPool",
             address(0), // Invalid manager
-            address(mockEscrow)
+            address(mockEscrow),
+            address(0)
         );
         
         vm.expectRevert("LiquidityPool/invalid-manager");
@@ -291,12 +293,13 @@ contract LiquidityPoolTest is BaseTest {
         LiquidityPool newPoolImpl = new LiquidityPool();
         
         bytes memory badInitData = abi.encodeWithSignature(
-            "initialize(address,string,string,address,address)",
+            "initialize(address,string,string,address,address,address)",
             address(token),
             "Test Pool",
             "tPool",
             address(mockManager),
-            address(0) // Invalid escrow
+            address(0), // Invalid escrow
+            address(0)
         );
         
         vm.expectRevert("LiquidityPool/invalid-escrow");
@@ -310,7 +313,8 @@ contract LiquidityPoolTest is BaseTest {
             "New Name",
             "NEW",
             address(mockManager),
-            address(mockEscrow)
+            address(mockEscrow),
+            address(0)
         );
     }
     
