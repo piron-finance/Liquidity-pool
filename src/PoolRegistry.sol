@@ -381,8 +381,8 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         address asset,
         string memory name,
         string memory symbol,
-        string memory country,
-        string memory region,
+        string memory country, // we dont really use this anymore . prob has no relevance again
+        string memory region, //same as above
         bool isStablecoin
     ) external onlyRole(accessManager.ASSET_MANAGER_ROLE()) {
         require(asset != address(0), "PoolRegistry/invalid asset");
