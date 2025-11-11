@@ -280,26 +280,38 @@ contract StableYieldManager is
     function collectMonthlyFees(address poolAddress) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) {
         require(feeManager != address(0), "StableYieldManager/fee manager not set");
         
-        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
+        StableYieldEscrow escrow = StableYieldEscrow(pools[poolAddress].escrowAddress);
         
-        uint256 grossAssetValue = _calculateGrossAssetValue(poolAddress);
-        uint256 poolReserves = escrow.getPoolReserves();
-        uint256 cashBuffer = escrow.getCashBuffer();
-        uint256 totalGrossValue = grossAssetValue + poolReserves;
-        
-        uint256 currentAccrued = _calculateCurrentAccruedFees(poolAddress, totalGrossValue) - deferredFees[poolAddress];
-        uint256 totalOwed = deferredFees[poolAddress] + currentAccrued;
+        uint256 totalGrossValue = _calculateGrossAssetValue(poolAddress) + escrow.getPoolReserves();
+        uint256 totalOwed = deferredFees[poolAddress] + (_calculateCurrentAccruedFees(poolAddress, totalGrossValue) - deferredFees[poolAddress]);
         
         if (totalOwed == 0) return;
         
-        uint256 liquidityFloor = (totalGrossValue * 500) / 10000; // 5% 
-        
-        uint256 collectionAmount = _determineCollectionAmount(cashBuffer, poolReserves, liquidityFloor, totalOwed);
+        _processFeeSweep(poolAddress, escrow, totalGrossValue, totalOwed);
+    }
+
+    /**
+     * @notice Internal function to process fee sweep
+     * @param poolAddress Pool address
+     * @param escrow Escrow contract
+     * @param totalGrossValue Total gross value
+     * @param totalOwed Total owed fees
+     */
+    function _processFeeSweep(
+        address poolAddress,
+        StableYieldEscrow escrow,
+        uint256 totalGrossValue,
+        uint256 totalOwed
+    ) internal {
+        uint256 collectionAmount = _determineCollectionAmount(
+            escrow.getCashBuffer(),
+            escrow.getPoolReserves(),
+            (totalGrossValue * 500) / 10000, // 5% liquidity floor
+            totalOwed
+        );
         
         if (collectionAmount > 0) {
             escrow.collectExpenseRatioFees(collectionAmount);
-            
             deferredFees[poolAddress] = totalOwed - collectionAmount;
             lastFeeAccrual[poolAddress] = block.timestamp;
             

@@ -71,7 +71,8 @@ library ValidationLibrary {
         require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
         
         // Pool status validation - Allow withdrawals in specific states
-        bool canWithdraw = poolData.status == IPoolTypes.PoolStatus.MATURED || 
+        bool canWithdraw = poolData.status == IPoolTypes.PoolStatus.FUNDING ||
+                          poolData.status == IPoolTypes.PoolStatus.MATURED || 
                           poolData.status == IPoolTypes.PoolStatus.EMERGENCY ||
                           (poolData.status == IPoolTypes.PoolStatus.INVESTED && 
                            block.timestamp >= poolData.config.maturityDate);
