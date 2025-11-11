@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import "./IManager.sol";
+import "./IManager.sol"; 
 import "../types/IPoolTypes.sol";
 
 interface IPoolFactory {
