@@ -69,7 +69,7 @@ contract MockPoolManager is IPoolManager {
         address,
         uint256 assets,
         address,
-        address owner,
+        address /* owner */,
         address
     ) external returns (uint256 shares) {
         return assets; // 1:1 for testing
@@ -231,13 +231,12 @@ contract LiquidityPoolTest is BaseTest {
         
         // Deploy proxy
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,string,string,address,address,address)",
+            "initialize(address,string,string,address,address)",
             address(token),
             "Piron Pool",
             "pPool",
             address(mockManager),
-            address(mockEscrow),
-            address(0) // timelock
+            address(mockEscrow)
         );
         
         ERC1967Proxy proxy = new ERC1967Proxy(
@@ -276,13 +275,12 @@ contract LiquidityPoolTest is BaseTest {
         LiquidityPool newPoolImpl = new LiquidityPool();
         
         bytes memory badInitData = abi.encodeWithSignature(
-            "initialize(address,string,string,address,address,address)",
+            "initialize(address,string,string,address,address)",
             address(token),
             "Test Pool",
             "tPool",
             address(0), // Invalid manager
-            address(mockEscrow),
-            address(0)
+            address(mockEscrow)
         );
         
         vm.expectRevert("LiquidityPool/invalid-manager");
@@ -293,13 +291,12 @@ contract LiquidityPoolTest is BaseTest {
         LiquidityPool newPoolImpl = new LiquidityPool();
         
         bytes memory badInitData = abi.encodeWithSignature(
-            "initialize(address,string,string,address,address,address)",
+            "initialize(address,string,string,address,address)",
             address(token),
             "Test Pool",
             "tPool",
             address(mockManager),
-            address(0), // Invalid escrow
-            address(0)
+            address(0) // Invalid escrow
         );
         
         vm.expectRevert("LiquidityPool/invalid-escrow");
@@ -313,8 +310,7 @@ contract LiquidityPoolTest is BaseTest {
             "New Name",
             "NEW",
             address(mockManager),
-            address(mockEscrow),
-            address(0)
+            address(mockEscrow)
         );
     }
     
@@ -342,7 +338,7 @@ contract LiquidityPoolTest is BaseTest {
         vm.startPrank(user1);
         token.approve(address(pool), depositAmount);
         
-        uint256 sharesMinted = pool.deposit(depositAmount, user2);
+        pool.deposit(depositAmount, user2);
         vm.stopPrank();
         
         assertEq(pool.balanceOf(user2), depositAmount);

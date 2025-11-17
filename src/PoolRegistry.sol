@@ -110,6 +110,11 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         timelockController = _timelockController;
         factory = address(0);
         version = 1;
+        
+        // Grant roles to deployer for initial configuration
+        _grantRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender);
+        _grantRole(accessManager.ASSET_MANAGER_ROLE(), msg.sender);
+        _grantRole(accessManager.OPERATOR_ROLE(), msg.sender);
     }
 
     

@@ -85,8 +85,7 @@ contract PoolEscrow is Initializable, UUPSUpgradeable, IPoolEscrow, ReentrancyGu
     function initialize(
         address _asset,
         address _manager,
-        address _spvAddress,
-        address /* _timelock */
+        address _spvAddress
     ) public initializer {
         require(_asset != address(0), "PoolEscrow/invalid-asset");
         require(_manager != address(0), "PoolEscrow/invalid-manager");

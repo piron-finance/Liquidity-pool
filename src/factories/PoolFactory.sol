@@ -110,11 +110,10 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         
         // Deploy PoolEscrow proxy
         bytes memory escrowInitData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             config.asset,
             manager,
-            config.spvAddress,
-            timelockController
+            config.spvAddress
         );
         
         escrow = address(new ERC1967Proxy(
@@ -124,13 +123,12 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         
         // Deploy LiquidityPool proxy
         bytes memory poolInitData = abi.encodeWithSignature(
-            "initialize(address,string,string,address,address,address)",
+            "initialize(address,string,string,address,address)",
             config.asset,
             string(abi.encodePacked("Piron Pool ", config.instrumentName)),
             string(abi.encodePacked("PIRON", totalPoolsCreated)),
             manager,
-            escrow,
-            timelockController
+            escrow
         );
         
         pool = address(new ERC1967Proxy(

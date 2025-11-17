@@ -41,8 +41,9 @@ contract TestAccessManager is AccessManager {
  * @notice Helper contract that grants factory role during initialization
  */
 contract TestStableYieldManager is StableYieldManager {
-    function grantFactoryRole(address factory) external {
-        _grantRole(accessManager.POOL_CREATOR_ROLE(), factory);
+    // Helper function to grant admin role for tests
+    function grantAdminRole(address account) external {
+        _grantRole(accessManager.DEFAULT_ADMIN_ROLE(), account);
     }
 }
 
@@ -211,23 +212,12 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         bytes32 factoryRole = keccak256("FACTORY_ROLE");
         TestAccessManager(address(accessManager)).grantRoleImmediate(factoryRole, address(managedFactory));
         
-        // Grant POOL_CREATOR_ROLE to ManagedPoolFactory so it can register pools
-        bytes32 poolCreatorRole = keccak256("POOL_CREATOR_ROLE");
-        TestAccessManager(address(accessManager)).grantRoleImmediate(poolCreatorRole, address(managedFactory));
+        // Grant DEFAULT_ADMIN_ROLE to admin on StableYieldManager for setManagedPoolFactory call
+        TestStableYieldManager(address(stableYieldManager)).grantAdminRole(admin);
         
-        // Verify role was granted to factory on AccessManager
-        bool hasRole = accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), address(managedFactory));
-        require(hasRole, "Factory doesn't have POOL_CREATOR_ROLE on AccessManager");
-        
-        // Grant POOL_CREATOR_ROLE to factory on StableYieldManager (for registerPool)
-        TestStableYieldManager(address(stableYieldManager)).grantFactoryRole(address(managedFactory));
-        
-        // Verify role was granted on StableYieldManager
-        bool hasRoleOnManager = StableYieldManager(address(stableYieldManager)).hasRole(
-            accessManager.POOL_CREATOR_ROLE(),
-            address(managedFactory)
-        );
-        require(hasRoleOnManager, "Factory doesn't have POOL_CREATOR_ROLE on StableYieldManager");
+        // Set ManagedPoolFactory in StableYieldManager (no POOL_CREATOR_ROLE needed, factory is whitelisted)
+        vm.prank(admin);
+        stableYieldManager.setManagedPoolFactory(address(managedFactory));
         
         // Grant POOL_CREATOR_ROLE to StableYieldManager on Registry (for registerStableYieldPool)
         TestPoolRegistry(address(registry)).grantPoolCreatorToManager(address(stableYieldManager));

@@ -114,7 +114,7 @@ contract PironPoolsDeployment is Script {
             config.spv,
             config.operator,
             config.emergency,
-            config.admin  // Using admin as multisigAdmin for now
+            config.admin  // TODO: Replace with multi-sig wallet address for production deployment
         ));
         console.log("AccessManager deployed at: %s", contracts.accessManager);
         emit ContractDeployed("AccessManager", contracts.accessManager);
@@ -142,33 +142,45 @@ contract PironPoolsDeployment is Script {
     function _configureSystem(DeployedContracts memory contracts, DeploymentConfig memory config) internal {
         console.log("=== CONFIGURING SYSTEM ===");
         
-        AccessManager accessManager = AccessManager(contracts.accessManager);
         PoolRegistry registry = PoolRegistry(contracts.poolRegistry);
         
         registry.setFactory(contracts.poolFactory);
         console.log("Factory set in registry");
         
-        bytes32 poolCreatorProposal = accessManager.proposeRoleGrant(accessManager.POOL_CREATOR_ROLE(), config.admin);
-        console.log("POOL_CREATOR_ROLE proposed for admin");
-        console.log("Proposal ID: %s", vm.toString(poolCreatorProposal));
-        console.log("Wait for role delay period, then execute with executeRoleGrant()");
+        // Note: POOL_CREATOR_ROLE and ASSET_MANAGER_ROLE are granted to admin in AccessManager constructor
+        console.log("Admin roles (POOL_CREATOR, ASSET_MANAGER) granted at deployment");
         
+        // Approve stablecoin assets
         registry.approveAsset(
             contracts.baseToken,
             "Mock USDC",
             "USDC",
-            "",
-            "",
+            "US",
+            "Americas",
             true
         );
-        console.log("Base token approved as valid asset");
+        console.log("USDC approved as valid asset");
+        
+        // Approve cNGN (Nigerian Naira stablecoin) - Base testnet address
+        registry.approveAsset(
+            0x929A08903C22440182646Bb450a67178Be402f7f,
+            "Canza Nigerian Naira",
+            "cNGN",
+            "NG",
+            "Africa",
+            true
+        );
+        console.log("cNGN approved as valid asset");
+        
+        // TODO: Add USDT address when available for this network
+        console.log("NOTE: Add USDT approval before mainnet deployment");
         
         FeeManager feeManager = FeeManager(contracts.feeManager);
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
-            protocolFee: 50,         // 0.5% protocol fee
+            protocolFee: 0,          // 0% protocol fee (reserved for future use)
             spvFee: 100,            // 1.0% SPV fee
-            managementFee: 150,     // 1.5% annual management fee
-            performanceFee: 200,    // 2.0% performance fee
+            managementFee: 200,     // 2.0% annual management fee
+            performanceFee: 0,      // 0% performance fee (reserved for future use)
             earlyWithdrawalFee: 100, // 1.0% early withdrawal fee
             refundGasFee: 10,       // 0.1% refund gas fee
             isActive: true
@@ -189,6 +201,8 @@ contract PironPoolsDeployment is Script {
         require(accessManager.hasRole(accessManager.SPV_ROLE(), config.spv), "SPV role not set");
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), config.operator), "Operator role not set");
         require(accessManager.hasRole(accessManager.EMERGENCY_ROLE(), config.emergency), "Emergency role not set");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), config.admin), "Pool creator role not set");
+        require(accessManager.hasRole(accessManager.ASSET_MANAGER_ROLE(), config.admin), "Asset manager role not set");
         console.log("AccessManager roles verified (from constructor)");
 
         PoolRegistry registry = PoolRegistry(contracts.poolRegistry);
@@ -235,12 +249,10 @@ contract PironPoolsDeployment is Script {
         console.log("Emergency:     %s", config.emergency);
         console.log("Treasury:      %s", config.treasury);
         console.log("");
-        console.log("=== NEXT STEPS ===");
-        console.log("1. Wait for AccessManager ROLE_DELAY period (default: 24 hours)");
-        console.log("2. Execute POOL_CREATOR_ROLE grant:");
-        console.log("   accessManager.executeRoleGrant(proposalId)");
-        console.log("");
         console.log("=== DEPLOYMENT COMPLETE ===");
+        console.log("System is ready for immediate use!");
+        console.log("Admin has all necessary roles to create pools.");
+        console.log("");
     }
     
     function _getNetworkName() internal view returns (string memory) {

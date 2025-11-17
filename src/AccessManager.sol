@@ -46,6 +46,8 @@ contract AccessManager is AccessControl, Pausable {
         _;
     }
     
+    bool public deploymentComplete;
+    
     constructor(
         address admin,
         address spv,
@@ -65,6 +67,10 @@ contract AccessManager is AccessControl, Pausable {
         _grantRole(EMERGENCY_ROLE, emergency);
         _grantRole(MULTISIG_ADMIN_ROLE, multisigAdmin);
         
+        // Grant deployment-critical roles to admin with no delay
+        _grantRole(POOL_CREATOR_ROLE, admin);
+        _grantRole(ASSET_MANAGER_ROLE, admin);
+        
         roleGrantTime[admin] = 0;
         roleGrantTime[spv] = 0;
         roleGrantTime[operator] = 0;
@@ -72,6 +78,28 @@ contract AccessManager is AccessControl, Pausable {
         roleGrantTime[multisigAdmin] = 0;
         
         emergencyPausers[emergency] = true;
+        deploymentComplete = false;
+    }
+    
+    /**
+     * @notice Grant FACTORY_ROLE to factory contracts during initial deployment
+     * @dev Can only be called once by admin, immediately after deployment
+     * @param factory Address of the factory contract
+     */
+    function grantFactoryRoleDuringDeployment(address factory) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(!deploymentComplete, "AccessManager: deployment already complete");
+        require(factory != address(0), "AccessManager: invalid factory");
+        _grantRole(FACTORY_ROLE, factory);
+        roleGrantTime[factory] = 0;
+    }
+    
+    /**
+     * @notice Mark deployment as complete, preventing further immediate role grants
+     * @dev Can only be called once by admin
+     */
+    function finalizeDeployment() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(!deploymentComplete, "AccessManager: already finalized");
+        deploymentComplete = true;
     }
     
     function grantRole(bytes32, address) public virtual override {

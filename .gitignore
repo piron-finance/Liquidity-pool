@@ -22,6 +22,11 @@ como.txt
 como1.txt
 como2.txt
 
+# Frontend ABIs and deployment info
+frontend-abis/
+deployed-addresses.txt
+
 # Except essential project files
 !README.md
 !CHANGELOG.md
+!DEPLOYMENT_GUIDE.md
