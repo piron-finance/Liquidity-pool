@@ -186,6 +186,9 @@ contract StableYieldManager is
         timelockController = timelockController_;
         feeManager = feeManager_;
         version = 1;
+        
+        // Grant DEFAULT_ADMIN_ROLE to msg.sender (deployer) for initial setup
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
     /**
