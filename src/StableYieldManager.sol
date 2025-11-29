@@ -14,6 +14,8 @@ import "./interfaces/IPoolRegistry.sol";
 import "./interfaces/IFeeManager.sol";
 import "./escrows/StableYieldEscrow.sol";
 import "./types/IStableYieldTypes.sol";
+import "./libraries/StableYieldNAVLibrary.sol";
+import "./libraries/StableYieldInstrumentLibrary.sol";
 
 /**
  * @title StableYieldManager
@@ -36,6 +38,7 @@ contract StableYieldManager is
     IPoolRegistry public registry;
     address public timelockController;
     address public feeManager;
+    address public managedPoolFactory;
     
     uint256 public version;
     
@@ -168,7 +171,7 @@ contract StableYieldManager is
         address registry_,
         address timelockController_,
         address feeManager_
-    ) public initializer {
+    ) public virtual initializer {
         __UUPSUpgradeable_init();
         __AccessControl_init();
         __ReentrancyGuard_init();
@@ -183,6 +186,9 @@ contract StableYieldManager is
         timelockController = timelockController_;
         feeManager = feeManager_;
         version = 1;
+        
+        // Grant DEFAULT_ADMIN_ROLE to msg.sender (deployer) for initial setup
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
     /**
@@ -211,7 +217,8 @@ contract StableYieldManager is
         address asset,
         string memory name,
         uint256 minInvestment
-    ) external onlyRole(accessManager.POOL_CREATOR_ROLE()) nonReentrant {
+    ) external nonReentrant {
+        require(msg.sender == managedPoolFactory, "StableYieldManager/only factory");
         require(poolAddress != address(0), "PoolManager/invalid pool");
         require(escrowAddress != address(0), "PoolManager/invalid escrow");
         require(asset != address(0), "PoolManager/invalid asset");
@@ -563,17 +570,13 @@ contract StableYieldManager is
      */
     function calculatePoolNAV(address poolAddress) public view poolExists(poolAddress) returns (uint256 totalNAV) {
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-        
-        uint256 grossAssetValue = _calculateGrossAssetValue(poolAddress);
-        uint256 poolReserves = escrow.getPoolReserves();
-        uint256 totalGrossValue = grossAssetValue + poolReserves;
-        
-        uint256 accruedFees = _calculateCurrentAccruedFees(poolAddress, totalGrossValue);
-        
-        totalNAV = totalGrossValue > accruedFees ? totalGrossValue - accruedFees : 0;
-        
-        return totalNAV;
+        return StableYieldNAVLibrary.calculatePoolNAV(
+            poolData,
+            poolInstruments[poolAddress],
+            deferredFees[poolAddress],
+            lastFeeAccrual[poolAddress],
+            feeManager
+        );
     }
 
     /**
@@ -583,21 +586,14 @@ contract StableYieldManager is
      */
     function calculateNAVPerShare(address poolAddress) public view ActivePool(poolAddress) returns (uint256 navPerShare) {
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        uint256 totalNAV = calculatePoolNAV(poolAddress);
-        
-        uint256 totalShares = IERC20(poolData.poolAddress).totalSupply();
-        
-        uint8 assetDecimals = IERC20Metadata(poolData.asset).decimals();
-        require(assetDecimals == 6 || assetDecimals == 18, "StableYieldManager/only 6 or 18 decimal stablecoins supported");
-        
-        if (totalShares == 0) {
-            return 1e18; 
-        }      
-        // Normalize totalNAV from stablecoin decimals to 18 decimals
-        // CNGN/USDT (6 decimals) -> multiply by 10^12, DAI (18 decimals) -> multiply by 1
-        uint256 normalizedNAV = totalNAV * (10**(18 - assetDecimals));
-        
-        return normalizedNAV / totalShares;
+        return StableYieldNAVLibrary.calculateNAVPerShare(
+            poolAddress,
+            poolData,
+            poolInstruments[poolAddress],
+            deferredFees[poolAddress],
+            lastFeeAccrual[poolAddress],
+            feeManager
+        );
     }
 
                                                                                                                                                                                             
@@ -608,24 +604,7 @@ contract StableYieldManager is
      * @return grossValue Total value of all instruments
      */
     function _calculateGrossAssetValue(address poolAddress) internal view returns (uint256 grossValue) {
-        IStableYieldTypes.InstrumentHolding[] storage instruments = poolInstruments[poolAddress];
-        uint256 length = instruments.length;
-        
-        uint256 currentTime = block.timestamp;
-        
-        for (uint256 i; i < length;) {
-            IStableYieldTypes.InstrumentHolding storage instrument = instruments[i];
-            
-            if (instrument.instrumentType == IStableYieldTypes.InstrumentType.DISCOUNTED) {
-                grossValue += _calculateDiscountedValue(instrument, currentTime);
-            } else {
-                grossValue += _calculateInterestBearingValue(instrument, currentTime);
-            }
-            
-            unchecked { ++i; }
-        }
-
-        return grossValue;
+        return StableYieldNAVLibrary.calculateGrossAssetValue(poolInstruments[poolAddress]);
     }
     
     /**
@@ -635,21 +614,13 @@ contract StableYieldManager is
      * @return accruedFees Current accrued fees (including deferred)
      */
     function _calculateCurrentAccruedFees(address poolAddress, uint256 totalGrossValue) internal view returns (uint256 accruedFees) {
-        if (feeManager == address(0)) return deferredFees[poolAddress];
-        
-        uint256 expenseRatioBps = IFeeManager(feeManager).getPoolExpenseRatio(poolAddress);
-        if (expenseRatioBps == 0) return deferredFees[poolAddress];
-        
-        uint256 lastAccrual = lastFeeAccrual[poolAddress];
-        if (lastAccrual == 0) lastAccrual = pools[poolAddress].createdAt;
-        
-        uint256 timeElapsed = block.timestamp - lastAccrual;
-        if (timeElapsed == 0) return deferredFees[poolAddress];
-
-        uint256 annualFee = (totalGrossValue * expenseRatioBps) / 10000;
-        uint256 currentAccrued = (annualFee * timeElapsed) / SECONDS_PER_YEAR;
-        
-        return deferredFees[poolAddress] + currentAccrued;
+        return StableYieldNAVLibrary.calculateCurrentAccruedFees(
+            pools[poolAddress],
+            deferredFees[poolAddress],
+            lastFeeAccrual[poolAddress],
+            feeManager,
+            totalGrossValue
+        );
     }
 
     /**
@@ -659,14 +630,7 @@ contract StableYieldManager is
      * @return value Current value of discounted instrument
      */
     function _calculateDiscountedValue(IStableYieldTypes.InstrumentHolding storage instrument, uint256 currentTime) internal view returns (uint256 value) {
-        uint256 timeElapsed = currentTime - instrument.purchaseDate;
-        uint256 totalTime = instrument.maturityDate - instrument.purchaseDate;
-        
-        if (timeElapsed >= totalTime) {
-            return instrument.faceValue;
-        }
-        
-        return instrument.purchasePrice + ((instrument.faceValue - instrument.purchasePrice) * timeElapsed) / totalTime;
+        return StableYieldNAVLibrary.calculateDiscountedValue(instrument, currentTime);
     }
     
     /**
@@ -676,18 +640,7 @@ contract StableYieldManager is
      * @return value Current value including accrued interest
      */
     function _calculateInterestBearingValue(IStableYieldTypes.InstrumentHolding storage instrument, uint256 currentTime) internal view returns (uint256 value) {
-        uint256 couponPeriodSeconds = SECONDS_PER_YEAR / instrument.couponFrequency;
-        uint256 lastCouponDate = instrument.couponsPaid == 0 ? 
-            instrument.purchaseDate : 
-            instrument.nextCouponDueDate - couponPeriodSeconds;
-        
-        uint256 timeSinceLastCoupon = currentTime - lastCouponDate;
-        uint256 couponAmount = (instrument.faceValue * instrument.annualCouponRate) / (10000 * instrument.couponFrequency);
-        
-        // Accrued interest = (couponAmount * timeSinceLastCoupon) / couponPeriodSeconds
-        uint256 accruedInterest = (couponAmount * timeSinceLastCoupon) / couponPeriodSeconds;
-        
-        return instrument.faceValue + accruedInterest;
+        return StableYieldNAVLibrary.calculateInterestBearingValue(instrument, currentTime);
     }
 
 
@@ -714,47 +667,19 @@ contract StableYieldManager is
         uint256 annualCouponRate,
         uint8 couponFrequency // 0=T-bill, 2=semi-annual, 4=quarterly, 12=monthly
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
-        require(purchasePrice > 0, "StableYieldManager/invalid purchase price");
-        require(faceValue > 0, "StableYieldManager/invalid face value");
-        require(maturityDate > block.timestamp, "StableYieldManager/invalid maturity date");
+        uint256 instrumentId = StableYieldInstrumentLibrary.addInstrument(
+            pools[poolAddress],
+            poolInstruments[poolAddress],
+            poolInstrumentCount[poolAddress],
+            instrumentType,
+            purchasePrice,
+            faceValue,
+            maturityDate,
+            annualCouponRate,
+            couponFrequency
+        );
         
-        if (instrumentType == IStableYieldTypes.InstrumentType.DISCOUNTED) {
-            require(purchasePrice < faceValue, "StableYieldManager/discounted must be below face");
-            require(annualCouponRate == 0, "StableYieldManager/discounted has no coupons");
-            require(couponFrequency == 0, "StableYieldManager/discounted has no coupons");
-        } else {
-            require(annualCouponRate > 0, "StableYieldManager/interest bearing needs coupon rate");
-            require(couponFrequency > 0, "StableYieldManager/interest bearing needs frequency");
-        }
-
-        uint256 nextCouponDate = 0;
-        if (instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING) {
-            uint256 couponPeriodSeconds = (365 days) / couponFrequency;
-            nextCouponDate = block.timestamp + couponPeriodSeconds; // are we insinuating coupon frequency is in seconds?
-        }
-        
-        poolInstruments[poolAddress].push(IStableYieldTypes.InstrumentHolding({
-            instrumentType: instrumentType,
-            purchasePrice: purchasePrice,
-            faceValue: faceValue,
-            purchaseDate: block.timestamp,
-            maturityDate: maturityDate,
-            annualCouponRate: annualCouponRate,
-            couponFrequency: couponFrequency,
-            nextCouponDueDate: nextCouponDate,
-            couponsPaid: 0,
-            isActive: true
-        }));
-        
-        uint256 instrumentId = poolInstruments[poolAddress].length - 1;
         poolInstrumentCount[poolAddress]++;
-        
-        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-        require(escrow.getPoolReserves() >= purchasePrice, "StableYieldManager/insufficient cash");
-        
-        emit InstrumentPurchased(poolAddress, instrumentId, instrumentType, purchasePrice, faceValue, maturityDate);
-        
         _triggerNAVUpdate(poolAddress, "instrument_added");
     }
 
@@ -767,20 +692,12 @@ contract StableYieldManager is
         address poolAddress,
         uint256 instrumentId
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
-        IStableYieldTypes.InstrumentHolding[] storage instruments = poolInstruments[poolAddress];
-        require(instrumentId < instruments.length, "StableYieldManager/invalid instrument");
+        StableYieldInstrumentLibrary.matureInstrument(
+            pools[poolAddress],
+            poolInstruments[poolAddress],
+            instrumentId
+        );
         
-        IStableYieldTypes.InstrumentHolding storage instrument = instruments[instrumentId];
-        require(instrument.isActive, "StableYieldManager/instrument not active");
-        require(block.timestamp >= instrument.maturityDate, "StableYieldManager/not matured");
-        
-        uint256 realizedYield = instrument.faceValue - instrument.purchasePrice;
-        uint256 finalValue = instrument.faceValue;
-        
-        _removeInstrument(poolAddress, instrumentId, "matured");
-        
-        emit InstrumentMatured(poolAddress, instrumentId, finalValue, realizedYield);
-
         _triggerNAVUpdate(poolAddress, "instrument_matured");
     }
 
@@ -795,22 +712,12 @@ contract StableYieldManager is
         uint256 instrumentId,
         uint256 couponAmount
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
-        require(instrumentId < poolInstruments[poolAddress].length, "StableYieldManager/invalid instrument");
-        
-        IStableYieldTypes.InstrumentHolding storage instrument = poolInstruments[poolAddress][instrumentId];
-        require(instrument.isActive, "StableYieldManager/instrument not active");
-        require(instrument.instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING, "StableYieldManager/not interest bearing");
-        require(block.timestamp >= instrument.nextCouponDueDate, "StableYieldManager/coupon not due");
-
-        
-        instrument.couponsPaid++;
-        
-        if (block.timestamp < instrument.maturityDate) {
-            uint256 couponPeriodSeconds = (365 days) / instrument.couponFrequency;
-            instrument.nextCouponDueDate += couponPeriodSeconds;
-        }
-        
-        emit CouponPaymentReceived(poolAddress, instrumentId, couponAmount, instrument.couponsPaid);
+        StableYieldInstrumentLibrary.recordCouponPayment(
+            pools[poolAddress],
+            poolInstruments[poolAddress],
+            instrumentId,
+            couponAmount
+        );
         
         _triggerNAVUpdate(poolAddress, "coupon_received");
     }
@@ -834,12 +741,15 @@ contract StableYieldManager is
      * @param reason Reason for update
      */
     function _triggerNAVUpdate(address poolAddress, string memory reason) internal {
-        uint256 totalNAV = calculatePoolNAV(poolAddress);
-        uint256 totalShares = IERC20(pools[poolAddress].poolAddress).totalSupply();
-        uint256 navPerShare = calculateNAVPerShare(poolAddress);
-        
-        emit NAVUpdated(poolAddress, totalNAV, navPerShare, reason, block.timestamp);
-        emit NAVCalculated(poolAddress, totalNAV, navPerShare, totalShares, block.timestamp);
+        StableYieldNAVLibrary.triggerNAVUpdate(
+            poolAddress,
+            pools[poolAddress],
+            poolInstruments[poolAddress],
+            deferredFees[poolAddress],
+            lastFeeAccrual[poolAddress],
+            feeManager,
+            reason
+        );
     }
 
      /**
@@ -958,6 +868,16 @@ contract StableYieldManager is
     function deactivatePool(address poolAddress) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) {
         pools[poolAddress].isActive = false;
         emit PoolDeactivated(poolAddress, block.timestamp);
+    }
+
+    /**
+     * @notice Set the ManagedPoolFactory address
+     * @dev Only callable by admin during initial setup
+     */
+    function setManagedPoolFactory(address _factory) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(_factory != address(0), "StableYieldManager/invalid factory");
+        require(managedPoolFactory == address(0), "StableYieldManager/factory already set");
+        managedPoolFactory = _factory;
     }
 
     /**

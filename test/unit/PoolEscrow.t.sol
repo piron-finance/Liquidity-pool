@@ -40,11 +40,10 @@ contract PoolEscrowTest is BaseTest {
         // Deploy and initialize escrow
         escrowImpl = new PoolEscrow();
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             manager,
-            spv,
-            address(0) // timelock
+            spv
         );
         ERC1967Proxy escrowProxy = new ERC1967Proxy(address(escrowImpl), initData);
         escrow = PoolEscrow(payable(address(escrowProxy)));
@@ -72,27 +71,25 @@ contract PoolEscrowTest is BaseTest {
     function test_Initialize_RevertsIfAlreadyInitialized() public {
         PoolEscrow newEscrowImpl = new PoolEscrow();
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             manager,
-            spv,
-            address(0)
+            spv
         );
         ERC1967Proxy newEscrowProxy = new ERC1967Proxy(address(newEscrowImpl), initData);
         PoolEscrow newEscrow = PoolEscrow(payable(address(newEscrowProxy)));
         
         vm.expectRevert();
-        newEscrow.initialize(address(token), manager, spv, address(0));
+        newEscrow.initialize(address(token), manager, spv);
     }
     
     function test_Initialize_RevertsIfInvalidAsset() public {
         PoolEscrow newEscrowImpl = new PoolEscrow();
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(0),
             manager,
-            spv,
-            address(0)
+            spv
         );
         
         vm.expectRevert("PoolEscrow/invalid-asset");
@@ -102,11 +99,10 @@ contract PoolEscrowTest is BaseTest {
     function test_Initialize_RevertsIfInvalidManager() public {
         PoolEscrow newEscrowImpl = new PoolEscrow();
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             address(0),
-            spv,
-            address(0)
+            spv
         );
         
         vm.expectRevert("PoolEscrow/invalid-manager");
@@ -116,7 +112,7 @@ contract PoolEscrowTest is BaseTest {
     function test_Initialize_RevertsIfInvalidSPV() public {
         PoolEscrow newEscrowImpl = new PoolEscrow();
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             manager,
             address(0),
@@ -131,11 +127,10 @@ contract PoolEscrowTest is BaseTest {
         // Create new escrow without pool set
         PoolEscrow newEscrowImpl = new PoolEscrow();
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             manager,
-            spv,
-            address(0)
+            spv
         );
         ERC1967Proxy newEscrowProxy = new ERC1967Proxy(address(newEscrowImpl), initData);
         PoolEscrow newEscrow = PoolEscrow(payable(address(newEscrowProxy)));
@@ -151,11 +146,10 @@ contract PoolEscrowTest is BaseTest {
     function test_SetPool_RevertsIfNotAdmin() public {
         PoolEscrow newEscrowImpl = new PoolEscrow();
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             manager,
-            spv,
-            address(0)
+            spv
         );
         ERC1967Proxy newEscrowProxy = new ERC1967Proxy(address(newEscrowImpl), initData);
         PoolEscrow newEscrow = PoolEscrow(payable(address(newEscrowProxy)));
@@ -168,11 +162,10 @@ contract PoolEscrowTest is BaseTest {
     function test_SetPool_RevertsIfInvalidPool() public {
         PoolEscrow newEscrowImpl = new PoolEscrow();
         bytes memory initData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             manager,
-            spv,
-            address(0)
+            spv
         );
         ERC1967Proxy newEscrowProxy = new ERC1967Proxy(address(newEscrowImpl), initData);
         PoolEscrow newEscrow = PoolEscrow(payable(address(newEscrowProxy)));

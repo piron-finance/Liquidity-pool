@@ -133,11 +133,10 @@ contract PoolFactoryIntegration is BaseTest {
 
         // Quick sanity-check: try initializing an escrow proxy manually to capture any init revert reason
         bytes memory escrowInitDataCheck = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             address(manager),
-            address(spv),
-            admin
+            address(spv)
         );
         ERC1967Proxy testEscrowProxy = new ERC1967Proxy(address(poolEscrowImpl), "");
         address testEscrowAddr = address(testEscrowProxy);

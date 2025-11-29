@@ -52,8 +52,7 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         string memory name_, 
         string memory symbol_, 
         address _manager, 
-        address _escrow,
-        address /* _timelock */
+        address _escrow
     ) public initializer {
         require(_manager != address(0), "LiquidityPool/invalid-manager");
         require(_escrow != address(0), "LiquidityPool/invalid-escrow");

@@ -72,7 +72,7 @@ contract MockPoolEscrow {
     
     mapping(address => uint256) public balances;
     
-    function initialize(address _asset, address _manager, address _spvAddress) external {
+    function initialize(address _asset, address _manager, address /* _spvAddress */) external {
         asset = IERC20(_asset);
         manager = _manager;
     }

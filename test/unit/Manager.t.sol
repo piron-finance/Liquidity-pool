@@ -99,19 +99,7 @@ contract ManagerTest is BaseTest {
     function setUp() public override {
         super.setUp();
         
-        // Deploy AccessManager
         accessManager = new AccessManager(admin, spv, operator, emergency, admin);
-        
-        // Grant POOL_CREATOR_ROLE to admin for managed pool tests
-        bytes32 poolCreatorRole = accessManager.POOL_CREATOR_ROLE();
-        vm.prank(admin);
-        bytes32 poolCreatorProposal = accessManager.proposeRoleGrant(poolCreatorRole, admin);
-        skip(accessManager.ROLE_DELAY() + 1);
-        vm.prank(admin);
-        accessManager.executeRoleGrant(poolCreatorProposal);
-        
-        // Reset time for tests
-        vm.warp(1);
         
         // Deploy token
         token = new MockToken("Mock USDC", "USDC");
@@ -143,11 +131,10 @@ contract ManagerTest is BaseTest {
         // Deploy and initialize escrow
         escrowImpl = new PoolEscrow();
         bytes memory escrowInitData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address)",
             address(token),
             address(manager),
-            spv,
-            timelock
+            spv
         );
         ERC1967Proxy escrowProxy = new ERC1967Proxy(address(escrowImpl), escrowInitData);
         escrow = PoolEscrow(payable(address(escrowProxy)));
@@ -802,7 +789,7 @@ contract ManagerTest is BaseTest {
         manager.initializePool(address(pool), poolConfig);
         
         vm.prank(operator);
-        vm.expectRevert("Manager/epoch not ended");
+        vm.expectRevert("PoolLifecycle/epoch not ended");
         manager.closeEpoch(address(pool));
     }
     

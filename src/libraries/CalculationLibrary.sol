@@ -3,6 +3,7 @@ pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../types/IPoolTypes.sol";
+import "../interfaces/IPoolRegistry.sol";
 
 /**
  * @title CalculationLibrary
@@ -161,5 +162,176 @@ library CalculationLibrary {
         }
 
         return totalExpectedCoupons;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// COUPON MANAGEMENT ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @dev Process coupon payment from SPV
+     * @param poolData Storage reference to pool data
+     * @param poolUsers Storage mapping of user pool data
+     * @param poolRegistry Pool registry contract
+     * @param liquidityPool Pool address
+     * @param amount Coupon amount received
+     */
+    function processCouponPayment(
+        IPoolTypes.PoolData storage poolData,
+        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
+        IPoolRegistry poolRegistry,
+        address liquidityPool,
+        uint256 amount
+    ) external {
+        require(poolRegistry.isRegisteredPool(liquidityPool), "CalculationLib/invalid pool");
+        require(poolData.status == IPoolTypes.PoolStatus.INVESTED, "CalculationLib/not invested");
+        require(poolData.config.instrumentType == IPoolTypes.InstrumentType.INTEREST_BEARING, "CalculationLib/not interest bearing");
+        require(amount != 0, "CalculationLib/invalid amount");
+        
+        poolData.totalCouponsReceived += amount;
+    }
+
+    /**
+     * @dev Distribute coupon payment to make available for claims
+     * @param poolData Storage reference to pool data
+     * @param liquidityPool Pool address (for total shares check)
+     * @return undistributedAmount Amount that was distributed
+     */
+    function distributeCouponPayment(
+        IPoolTypes.PoolData storage poolData,
+        address liquidityPool
+    ) external returns (uint256 undistributedAmount) {
+        require(poolData.status == IPoolTypes.PoolStatus.INVESTED, "CalculationLib/not invested");
+        require(poolData.config.instrumentType == IPoolTypes.InstrumentType.INTEREST_BEARING, "CalculationLib/not interest bearing");
+        
+        undistributedAmount = poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
+        require(undistributedAmount != 0, "CalculationLib/no coupons to distribute");
+        
+        uint256 totalShares = IERC20(liquidityPool).totalSupply();
+        require(totalShares != 0, "CalculationLib/no shares outstanding");
+        
+        poolData.totalCouponsDistributed = poolData.totalCouponsReceived;
+        
+        return undistributedAmount;
+    }
+
+    /**
+     * @dev Calculate and process user coupon claim
+     * @param poolData Storage reference to pool data
+     * @param poolUsers Storage mapping of user pool data
+     * @param liquidityPool Pool address
+     * @param user User address
+     * @return claimableAmount Amount user can claim
+     */
+    function claimUserCoupon(
+        IPoolTypes.PoolData storage poolData,
+        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
+        address liquidityPool,
+        address user
+    ) external returns (uint256 claimableAmount) {
+        require(user != address(0), "CalculationLib/invalid user");
+        require(poolData.config.instrumentType == IPoolTypes.InstrumentType.INTEREST_BEARING, "CalculationLib/not interest bearing");
+        require(poolData.status == IPoolTypes.PoolStatus.INVESTED, "CalculationLib/not invested");
+        
+        uint256 userShares = IERC20(liquidityPool).balanceOf(user);
+        require(userShares != 0, "CalculationLib/no shares");
+        
+        uint256 totalShares = IERC20(liquidityPool).totalSupply();
+        uint256 totalDistributedCoupons = poolData.totalCouponsDistributed;
+        require(totalDistributedCoupons != 0, "CalculationLib/no coupons distributed");
+        
+        uint256 userTotalEntitlement = (userShares * totalDistributedCoupons) / totalShares;
+        uint256 userAlreadyClaimed = poolUsers[liquidityPool][user].couponsClaimed;
+        
+        require(userTotalEntitlement > userAlreadyClaimed, "CalculationLib/no new coupons");
+        claimableAmount = userTotalEntitlement - userAlreadyClaimed;
+        
+        poolUsers[liquidityPool][user].couponsClaimed = userTotalEntitlement;
+        poolData.totalCouponsClaimed += claimableAmount;
+        
+        return claimableAmount;
+    }
+
+    /**
+     * @dev Get user's available coupon amount
+     * @param poolData Storage reference to pool data
+     * @param poolUsers Storage mapping of user pool data
+     * @param liquidityPool Pool address
+     * @param user User address
+     * @return Available coupon amount
+     */
+    function getUserAvailableCoupon(
+        IPoolTypes.PoolData storage poolData,
+        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
+        address liquidityPool,
+        address user
+    ) external view returns (uint256) {
+        if (user == address(0)) return 0;
+        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.INTEREST_BEARING) return 0;
+        if (poolData.status != IPoolTypes.PoolStatus.INVESTED) return 0;
+        
+        uint256 userShares = IERC20(liquidityPool).balanceOf(user);
+        if (userShares == 0) return 0;
+        
+        uint256 totalShares = IERC20(liquidityPool).totalSupply();
+        if (totalShares == 0) return 0;
+        
+        uint256 totalDistributedCoupons = poolData.totalCouponsDistributed;
+        if (totalDistributedCoupons == 0) return 0;
+        
+        uint256 userTotalEntitlement = (userShares * totalDistributedCoupons) / totalShares;
+        uint256 userAlreadyClaimed = poolUsers[liquidityPool][user].couponsClaimed;
+        
+        return userTotalEntitlement > userAlreadyClaimed ? userTotalEntitlement - userAlreadyClaimed : 0;
+    }
+
+    /**
+     * @dev Get total unclaimed coupons for a pool
+     * @param poolData Storage reference to pool data
+     * @return Total unclaimed coupon amount
+     */
+    function getUnclaimedCoupons(
+        IPoolTypes.PoolData storage poolData
+    ) external view returns (uint256) {
+        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.INTEREST_BEARING) return 0;
+        if (poolData.totalCouponsDistributed == 0) return 0;
+        
+        return poolData.totalCouponsDistributed - poolData.totalCouponsClaimed;
+    }
+
+    /**
+     * @dev Get total undistributed coupons for a pool
+     * @param poolData Storage reference to pool data
+     * @return Total undistributed coupon amount
+     */
+    function getUndistributedCoupons(
+        IPoolTypes.PoolData storage poolData
+    ) external view returns (uint256) {
+        if (poolData.config.instrumentType != IPoolTypes.InstrumentType.INTEREST_BEARING) return 0;
+        if (poolData.totalCouponsReceived == 0) return 0;
+        
+        return poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
+    }
+
+    /**
+     * @notice Checks if current timestamp is within tolerance of a scheduled coupon date
+     * @dev Allows 24-hour window around coupon date for flexibility
+     */
+    function isValidCouponDate(
+        IPoolTypes.PoolConfig storage poolConfig
+    ) internal view returns (bool) {
+        if (poolConfig.couponDates.length == 0) return false;
+        
+        uint256 tolerance = 24 hours;
+        
+        for (uint256 i = 0; i < poolConfig.couponDates.length; i++) {
+            uint256 couponDate = poolConfig.couponDates[i];
+            if (block.timestamp >= couponDate - tolerance && 
+                block.timestamp <= couponDate + tolerance) {
+                return true;
+            }
+        }
+        
+        return false;
     }
 }

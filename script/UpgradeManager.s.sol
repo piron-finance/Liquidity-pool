@@ -61,7 +61,7 @@ contract UpgradeManager is Script {
     function _logUpgradeInstructions(
         UpgradeConfig memory config,
         address newImpl,
-        bytes32 upgradeId
+        bytes32 /* upgradeId */
     ) internal view {
         console.log("\n=== UPGRADE INSTRUCTIONS ===");
         console.log("1. Wait 72 hours (UPGRADE_DELAY)");

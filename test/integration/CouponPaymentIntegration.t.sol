@@ -310,7 +310,7 @@ contract CouponPaymentIntegration is BaseTest {
         // Verify user can't claim again immediately
         console.log("  Verifying double-claim prevention...");
         vm.prank(user1);
-        vm.expectRevert("Manager/no new coupons");
+        vm.expectRevert("CalculationLib/no new coupons");
         pool.claimCoupon();
         console.log("  SUCCESS: User1 cannot double-claim");
         

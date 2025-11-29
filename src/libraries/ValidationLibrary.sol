@@ -4,6 +4,8 @@ pragma solidity ^0.8.22;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../types/IPoolTypes.sol";
 import "../interfaces/IPoolRegistry.sol";
+import "../interfaces/ILiquidityPool.sol";
+import "../interfaces/IPoolEscrow.sol";
 
 /**
  * @title ValidationLibrary
@@ -203,6 +205,122 @@ library ValidationLibrary {
         address poolAddress
     ) internal view {
         require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// WITHDRAWAL HANDLERS ////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    event Withdraw(address indexed caller, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
+
+    /**
+     * @notice Handles withdrawal during funding phase
+     * @dev Allows full withdrawal before pool is filled and invested
+     */
+    function handleFundingWithdrawal(
+        mapping(address => IPoolTypes.PoolData) storage pools,
+        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
+        IPoolRegistry registry,
+        address poolAddress,
+        uint256 assets,
+        address receiver,
+        address owner,
+        IPoolTypes.PoolConfig storage poolConfig
+    ) external returns (uint256 shares) {
+        require(block.timestamp <= poolConfig.epochEndTime, "ValidationLib/funding ended");
+        
+        shares = assets;
+        
+        uint256 userShares = IERC20(poolAddress).balanceOf(owner);
+        require(userShares >= shares, "ValidationLib/insufficient shares");
+        
+        require(pools[poolAddress].totalRaised >= assets, "ValidationLib/insufficient pool balance");
+        pools[poolAddress].totalRaised -= assets;
+        
+        ILiquidityPool(poolAddress).burnShares(owner, shares);
+
+        uint256 remainingShares = IERC20(poolAddress).balanceOf(owner);
+
+        if (remainingShares == 0) {
+            poolUsers[poolAddress][owner].depositTime = 0;
+        }
+        
+        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
+        IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
+        escrowContract.releaseFunds(receiver, assets);
+        
+        emit Withdraw(msg.sender, receiver, owner, assets, shares);
+        return shares;
+    }
+    
+    /**
+     * @notice Handles withdrawal after pool maturity
+     * @dev Calculates proportional returns including principal + returns
+     */
+    function handleMaturedWithdrawal(
+        mapping(address => IPoolTypes.PoolData) storage pools,
+        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
+        IPoolRegistry registry,
+        address poolAddress,
+        address receiver,
+        address owner,
+        IPoolTypes.PoolConfig storage poolConfig,
+        uint256 totalReturns
+    ) external returns (uint256 shares) {
+        require(block.timestamp >= poolConfig.maturityDate, "ValidationLib/not matured");
+        
+        uint256 userShares = IERC20(poolAddress).balanceOf(owner);
+        require(userShares != 0, "ValidationLib/no shares");
+        
+        uint256 totalShares = IERC20(poolAddress).totalSupply();
+        
+        uint256 userEntitlement = (userShares * totalReturns) / totalShares;
+        
+        shares = userShares;
+        ILiquidityPool(poolAddress).burnShares(owner, shares);
+        
+        poolUsers[poolAddress][owner].depositTime = 0;
+        
+        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
+        IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
+        escrowContract.releaseFunds(receiver, userEntitlement);
+        
+        emit Withdraw(msg.sender, receiver, owner, userEntitlement, shares);
+        return shares;
+    }
+    
+    /**
+     * @notice Handles emergency withdrawal
+     * @dev Emergency exit mechanism for users when pool is in emergency state
+     */
+    function handleEmergencyWithdrawal(
+        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
+        IPoolRegistry registry,
+        address poolAddress,
+        uint256 assets,
+        address receiver,
+        address owner
+    ) external returns (uint256 shares) {
+        uint256 userShares = IERC20(poolAddress).balanceOf(owner);
+        require(userShares != 0, "ValidationLib/no shares");
+        
+        require(assets <= userShares, "ValidationLib/exceeds refund amount");
+        
+        shares = assets;
+        
+        ILiquidityPool(poolAddress).burnShares(owner, shares);
+
+        uint256 remainingShares = IERC20(poolAddress).balanceOf(owner);
+        if (remainingShares == 0) {
+            poolUsers[poolAddress][owner].depositTime = 0;
+        }
+        
+        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
+        IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
+        escrowContract.releaseFunds(receiver, assets);
+        
+        emit Withdraw(msg.sender, receiver, owner, assets, shares);
+        return shares;
     }
 }
 
