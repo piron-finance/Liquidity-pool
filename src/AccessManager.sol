@@ -62,22 +62,28 @@ contract AccessManager is AccessControl, Pausable {
         require(multisigAdmin != address(0), "AccessManager: invalid multisig admin");
         
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        _grantRole(SPV_ROLE, spv);
-        _grantRole(OPERATOR_ROLE, operator);
-        _grantRole(EMERGENCY_ROLE, emergency);
-        _grantRole(MULTISIG_ADMIN_ROLE, multisigAdmin);
-        
-        // Grant deployment-critical roles to admin with no delay
+        _grantRole(OPERATOR_ROLE, admin);
+        _grantRole(EMERGENCY_ROLE, admin);
         _grantRole(POOL_CREATOR_ROLE, admin);
+        _grantRole(MULTISIG_ADMIN_ROLE, admin);
         _grantRole(ASSET_MANAGER_ROLE, admin);
+        
+        // Grant SPV_ROLE only to SPV address (not admin)
+        _grantRole(SPV_ROLE, spv);
+        
+        if (operator != admin) _grantRole(OPERATOR_ROLE, operator);
+        if (emergency != admin) _grantRole(EMERGENCY_ROLE, emergency);
+        if (multisigAdmin != admin) _grantRole(MULTISIG_ADMIN_ROLE, multisigAdmin);
         
         roleGrantTime[admin] = 0;
         roleGrantTime[spv] = 0;
-        roleGrantTime[operator] = 0;
-        roleGrantTime[emergency] = 0;
-        roleGrantTime[multisigAdmin] = 0;
+        if (operator != admin) roleGrantTime[operator] = 0;
+        if (emergency != admin) roleGrantTime[emergency] = 0;
+        if (multisigAdmin != admin) roleGrantTime[multisigAdmin] = 0;
         
-        emergencyPausers[emergency] = true;
+        emergencyPausers[admin] = true; // Admin has emergency role
+        if (emergency != admin) emergencyPausers[emergency] = true;
+        
         deploymentComplete = false;
     }
     
@@ -91,6 +97,19 @@ contract AccessManager is AccessControl, Pausable {
         require(factory != address(0), "AccessManager: invalid factory");
         _grantRole(FACTORY_ROLE, factory);
         roleGrantTime[factory] = 0;
+    }
+    
+    /**
+     * @notice Grant any role during initial deployment (bypass timelock)
+     * @dev Can only be called by admin before deployment is finalized
+     * @param role Role to grant
+     * @param account Address to receive the role
+     */
+    function grantRoleDuringDeployment(bytes32 role, address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(!deploymentComplete, "AccessManager: deployment already complete");
+        require(account != address(0), "AccessManager: invalid account");
+        _grantRole(role, account);
+        roleGrantTime[account] = 0;
     }
     
     /**

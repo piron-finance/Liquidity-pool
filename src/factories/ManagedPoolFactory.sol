@@ -19,7 +19,7 @@ import "../types/IPoolTypes.sol";
  * @dev factory for deploying  managed pools
  * @notice Deploy managed pools for any approved stablecoin with flexible configuration
  */
-contract ManagedPoolFactory is Initializable, UUPSUpgradeable, AccessControlUpgradeable {
+contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
     
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// STATE VARIABLES //////////////////////////////
@@ -121,7 +121,6 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable, AccessControlUpgr
         require(_managedPoolEscrowImplementation != address(0), "ManagedPoolFactory/invalid escrow implementation");
         
         __UUPSUpgradeable_init();
-        __AccessControl_init();
         
         registry = IPoolRegistry(_registry);
         accessManager = AccessManager(_accessManager);
@@ -132,7 +131,6 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable, AccessControlUpgr
         version = 1;
         deploymentNonce = 0;
         
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
     /**
@@ -167,6 +165,7 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable, AccessControlUpgr
         poolAddress = _deployStableYieldPool(config, escrowAddress);
         
         StableYieldEscrow(escrowAddress).setStableYieldPool(poolAddress);
+        StableYieldEscrow(escrowAddress).setStableYieldManager(address(stableYieldManager));
         
         stableYieldManager.registerPool(
             poolAddress,
@@ -226,9 +225,9 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable, AccessControlUpgr
             config.asset,
             config.poolName,
             config.poolSymbol,
+            escrowAddress,
             address(stableYieldManager),
-            address(accessManager),
-            escrowAddress
+            address(accessManager)
         );
         
         return poolAddress;

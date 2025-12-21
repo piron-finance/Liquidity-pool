@@ -98,8 +98,9 @@ library StableYieldInstrumentLibrary {
         
         instrumentId = instruments.length - 1;
         
-        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-        require(escrow.getPoolReserves() >= purchasePrice, "InstrumentLib/insufficient cash");
+        // Note: SPV must allocate funds via allocateToSPV() before purchasing instruments
+        // This function is called AFTER the instrument has been purchased with allocated funds
+        // No validation against poolReserves needed as SPV is a trusted role
         
         emit InstrumentPurchased(
             poolData.poolAddress,

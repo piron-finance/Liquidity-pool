@@ -292,7 +292,13 @@ contract FeeManagerTest is BaseTest {
     }
     
     function test_SetDefaultExpenseRatio_Success() public {
-        vm.prank(operator);
+        // Setup: Create mock manager and set it in FeeManager
+        address mockManager = makeAddr("mockManager");
+        address mockRegistry = makeAddr("mockRegistry");
+        vm.prank(admin);
+        feeManager.setManagers(mockManager, makeAddr("stableYieldMgr"), mockRegistry);
+        
+        vm.prank(mockManager);
         vm.expectEmit(true, false, false, true);
         emit ExpenseRatioUpdated(pool, 0, 80); // DEFAULT_EXPENSE_RATIO = 80
         

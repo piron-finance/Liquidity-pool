@@ -18,7 +18,6 @@ import "../AccessManager.sol";
 contract StableYieldEscrow is 
     Initializable, 
     UUPSUpgradeable, 
-    AccessControlUpgradeable, 
     ReentrancyGuardUpgradeable 
 {
     using SafeERC20 for IERC20;
@@ -30,6 +29,7 @@ contract StableYieldEscrow is
     IERC20 public asset;
 
     address public stableYieldPool;
+    address public stableYieldManager;
 
     AccessManager public accessManager;
     
@@ -77,6 +77,7 @@ contract StableYieldEscrow is
     modifier onlyStableYieldPoolOrManager() {
         require(
             msg.sender == stableYieldPool || 
+            msg.sender == stableYieldManager ||
             accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), 
             "StableYieldEscrow/only pool or manager"
         );
@@ -125,7 +126,6 @@ contract StableYieldEscrow is
         string memory poolName_
     ) public initializer {
         __UUPSUpgradeable_init();
-        __AccessControl_init();
         __ReentrancyGuard_init();
 
         require(asset_ != address(0), "StableYieldEscrow/invalid asset");
@@ -138,7 +138,6 @@ contract StableYieldEscrow is
         poolName = poolName_;
         version = 1;
 
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
     /**
@@ -151,6 +150,18 @@ contract StableYieldEscrow is
         require(pool_ != address(0), "StableYieldEscrow/invalid pool");
         stableYieldPool = pool_;
         emit PoolLinked(pool_);
+    }
+    
+    /**
+     * @notice Set the stable yield manager address (one-time only)
+     * @dev Can only be called once to link escrow to manager after deployment
+     * @param manager_ The stable yield manager address
+     */
+    function setStableYieldManager(address manager_) external onlyFactory {
+        require(manager_ != address(0), "StableYieldEscrow/invalid manager");
+        require(stableYieldManager == address(0), "StableYieldEscrow/manager already set");
+        
+        stableYieldManager = manager_;
     }
 
     /**
@@ -206,7 +217,12 @@ contract StableYieldEscrow is
         uint256 transactionFee
     ) external onlyStableYieldPoolOrManager {
         require(totalAmount == reserveAmount + transactionFee, "StableYieldEscrow/allocation mismatch");
-        require(cashBuffer >= totalAmount, "StableYieldEscrow/insufficient cash buffer");
+        
+        // Update cash buffer with incoming funds (tokens already transferred to escrow)
+        uint256 currentBalance = asset.balanceOf(address(this));
+        uint256 expectedBuffer = poolReserves + transactionFees + expenseRatioFees + totalAmount;
+        require(currentBalance >= expectedBuffer - cashBuffer, "StableYieldEscrow/insufficient balance");
+        cashBuffer += totalAmount;
         
         poolReserves += reserveAmount;
         transactionFees += transactionFee;
@@ -276,8 +292,12 @@ contract StableYieldEscrow is
         require(spvAddress != address(0), "StableYieldEscrow/invalid SPV");
         require(amount > 0, "StableYieldEscrow/invalid amount");
         require(cashBuffer >= amount, "StableYieldEscrow/insufficient cash buffer");
+        require(poolReserves >= amount, "StableYieldEscrow/insufficient pool reserves");
         
+        // Reduce both cash buffer and pool reserves when allocating to SPV
+        // This ensures poolReserves accurately reflects funds available in escrow
         cashBuffer -= amount;
+        poolReserves -= amount;
         spvAllocations[spvAddress] += amount;
         
         asset.safeTransfer(spvAddress, amount);

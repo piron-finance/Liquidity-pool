@@ -123,7 +123,7 @@ contract StableYieldPool is
     function deposit(uint256 assets, address receiver) public override whenNotPaused returns (uint256 shares) {
         require(assets > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
-        require(IERC20(asset()).allowance(msg.sender, address(escrow)) >= assets, "StableYieldPool/insufficient allowance - approve tokens first");
+        require(IERC20(asset()).allowance(msg.sender, address(this)) >= assets, "StableYieldPool/insufficient allowance - approve tokens first");
 
         IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), assets);
 

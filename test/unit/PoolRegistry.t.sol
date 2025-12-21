@@ -20,6 +20,16 @@ contract MockAccessManager {
     bytes32 public constant ASSET_MANAGER_ROLE = keccak256("ASSET_MANAGER_ROLE");
     bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
     bytes32 public constant MULTISIG_ADMIN_ROLE = keccak256("MULTISIG_ADMIN_ROLE");
+    
+    mapping(bytes32 => mapping(address => bool)) private roles;
+    
+    function hasRole(bytes32 role, address account) external view returns (bool) {
+        return roles[role][account];
+    }
+    
+    function grantRole(bytes32 role, address account) external {
+        roles[role][account] = true;
+    }
 }
 
 /**
@@ -92,6 +102,9 @@ contract PoolRegistryTest is BaseTest {
         
         // Deploy MockAccessManager with all needed roles for testing
         accessManager = new MockAccessManager();
+        
+        // Grant POOL_CREATOR_ROLE to admin on MockAccessManager
+        accessManager.grantRole(accessManager.POOL_CREATOR_ROLE(), admin);
         
         // Deploy TestPoolRegistry implementation with role initialization
         registryImplementation = PoolRegistry(address(new TestPoolRegistry()));
@@ -572,13 +585,7 @@ contract PoolRegistryTest is BaseTest {
         });
         
         vm.prank(user1);
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)",
-                user1,
-                poolCreatorRole
-            )
-        );
+        vm.expectRevert("PoolRegistry/not pool creator");
         registry.registerStableYieldPool(poolData);
     }
     

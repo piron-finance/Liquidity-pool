@@ -294,7 +294,7 @@ contract DeployUpgradeable is Script {
         emit ProxyDeployed("ManagedPoolFactory", contracts.managedPoolFactoryProxy, contracts.managedPoolFactoryImpl);
     }
     
-    function _configureSystem(DeployedContracts memory contracts, DeploymentConfig memory /* config */) internal {
+    function _configureSystem(DeployedContracts memory contracts, DeploymentConfig memory config) internal {
         console.log("=== CONFIGURING UPGRADEABLE SYSTEM ===");
         
         PoolRegistry registry = PoolRegistry(contracts.poolRegistryProxy);
@@ -305,6 +305,14 @@ contract DeployUpgradeable is Script {
         accessMgr.grantFactoryRoleDuringDeployment(contracts.managedPoolFactoryProxy);
         console.log("FACTORY_ROLE granted to ManagedPoolFactory");
         
+        // Grant POOL_CREATOR_ROLE to StableYieldManager so it can register pools in PoolRegistry
+        accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy);
+        console.log("POOL_CREATOR_ROLE granted to StableYieldManager");
+        
+        // Grant OPERATOR_ROLE to StableYieldManager for escrow operations (allocateToSPV, receiveSPVLiquidity, collectMonthlyFees)
+        accessMgr.grantRoleDuringDeployment(accessMgr.OPERATOR_ROLE(), contracts.stableYieldManagerProxy);
+        console.log("OPERATOR_ROLE granted to StableYieldManager");
+        
         // Finalize deployment to prevent further immediate role grants
         accessMgr.finalizeDeployment();
         console.log("Deployment finalized - future role grants require 24h timelock");
@@ -313,9 +321,31 @@ contract DeployUpgradeable is Script {
         registry.setFactory(contracts.poolFactoryProxy);
         console.log("PoolFactory registered in PoolRegistry");
         
+        // Grant POOL_CREATOR_ROLE to StableYieldManager on PoolRegistry (for registerStableYieldPool)
+        registry.grantRole(accessMgr.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy);
+        console.log("POOL_CREATOR_ROLE granted to StableYieldManager on PoolRegistry");
+        
         // Set ManagedPoolFactory in StableYieldManager
         StableYieldManager(contracts.stableYieldManagerProxy).setManagedPoolFactory(contracts.managedPoolFactoryProxy);
         console.log("ManagedPoolFactory registered in StableYieldManager");
+        
+        // Grant SPV_ROLE to admin on StableYieldManager (needed for addInstrument, matureInstrument, etc.)
+        // StableYieldManager uses its own AccessControl, so roles must be granted on it directly
+        StableYieldManager(contracts.stableYieldManagerProxy).grantRole(accessMgr.SPV_ROLE(), config.admin);
+        console.log("SPV_ROLE granted to admin on StableYieldManager");
+        
+        // Grant OPERATOR_ROLE to admin on StableYieldManager (needed for collectMonthlyFees, allocateToSPV, etc.)
+        // StableYieldManager uses its own AccessControl, so roles must be granted on it directly
+        StableYieldManager(contracts.stableYieldManagerProxy).grantRole(accessMgr.OPERATOR_ROLE(), config.admin);
+        console.log("OPERATOR_ROLE granted to admin on StableYieldManager");
+        
+        // Set managers in FeeManager (so it knows who can call setDefaultExpenseRatio)
+        FeeManager(contracts.feeManager).setManagers(
+            contracts.managerProxy,
+            contracts.stableYieldManagerProxy,
+            contracts.poolRegistryProxy
+        );
+        console.log("Managers registered in FeeManager");
         
         // Note: All critical roles (SPV, OPERATOR, EMERGENCY, POOL_CREATOR, ASSET_MANAGER) 
         // are granted to admin in AccessManager constructor with no delay
@@ -383,11 +413,12 @@ contract DeployUpgradeable is Script {
         require(accessManager.hasRole(accessManager.SPV_ROLE(), config.spv), "SPV role not granted");
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), config.operator), "Operator role not granted");
         require(accessManager.hasRole(accessManager.EMERGENCY_ROLE(), config.emergency), "Emergency role not granted");
-        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), config.admin), "Pool creator role not granted");
-        require(accessManager.hasRole(accessManager.ASSET_MANAGER_ROLE(), config.admin), "Asset manager role not granted");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), config.admin), "Pool creator role not granted to admin");
+        require(accessManager.hasRole(accessManager.ASSET_MANAGER_ROLE(), config.admin), "Asset manager role not granted to admin");
         require(accessManager.hasRole(accessManager.FACTORY_ROLE(), contracts.managedPoolFactoryProxy), "Factory role not granted to ManagedPoolFactory");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy), "Pool creator role not granted to StableYieldManager");
         require(accessManager.deploymentComplete(), "Deployment not finalized");
-        console.log("AccessManager roles verified (from constructor and deployment)");
+        console.log("AccessManager roles verified (admin, factories, and managers)");
         
         // Verify timelock configuration
         PironTimelock.PironTimelockController timelock = PironTimelock.PironTimelockController(contracts.timelockController);

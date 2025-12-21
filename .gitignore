@@ -25,6 +25,7 @@ como2.txt
 # Frontend ABIs and deployment info
 frontend-abis/
 deployed-addresses.txt
+changed-abis/
 
 # Except essential project files
 !README.md

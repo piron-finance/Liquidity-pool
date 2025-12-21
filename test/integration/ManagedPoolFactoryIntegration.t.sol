@@ -219,12 +219,17 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         vm.prank(admin);
         stableYieldManager.setManagedPoolFactory(address(managedFactory));
         
-        // Grant POOL_CREATOR_ROLE to StableYieldManager on Registry (for registerStableYieldPool)
-        TestPoolRegistry(address(registry)).grantPoolCreatorToManager(address(stableYieldManager));
+        // Grant POOL_CREATOR_ROLE to StableYieldManager on AccessManager (for registerStableYieldPool)
+        bytes32 poolCreatorRole = keccak256("POOL_CREATOR_ROLE");
+        TestAccessManager(address(accessManager)).grantRoleImmediate(poolCreatorRole, address(stableYieldManager));
         
         // Grant OPERATOR_ROLE to StableYieldManager on AccessManager (for FeeManager operations)
         bytes32 operatorRole = keccak256("OPERATOR_ROLE");
         TestAccessManager(address(accessManager)).grantRoleImmediate(operatorRole, address(stableYieldManager));
+        
+        // Set managers in FeeManager (required for setDefaultExpenseRatio)
+        vm.prank(admin);
+        feeManager.setManagers(address(0), address(stableYieldManager), address(registry));
     }
     
     ////////////////////////////////////////////////////////////////////////////////

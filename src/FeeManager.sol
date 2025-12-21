@@ -2,6 +2,7 @@
 pragma solidity ^0.8.22;
 
 import "./interfaces/IFeeManager.sol";
+import "./interfaces/IPoolRegistry.sol";
 import "./AccessManager.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -18,6 +19,10 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
     
     AccessManager public accessManager;
+    IPoolRegistry public poolRegistry;
+    address public manager;
+    address public stableYieldManager;
+    address public treasury;
     
     /// @dev Treasury holdings by asset
     mapping(address => uint256) public treasuryBalances;
@@ -98,6 +103,11 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         _;
     }
     
+    modifier onlyValidManager() {
+        require(msg.sender == manager || msg.sender == stableYieldManager, "FeeManager/only-manager");
+        _;
+    }
+    
     modifier whenFeeManagerNotPaused() {
         require(!paused(), "FeeManager/paused");
         _;
@@ -111,6 +121,7 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         require(_treasury != address(0), "FeeManager/invalid-treasury");
         
         accessManager = AccessManager(_accessManager);
+        treasury = _treasury;
         
         // Set default fee configuration
         _defaultFeeConfig = FeeConfig({
@@ -122,6 +133,15 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
             refundGasFee: 10,     // 0.1%
             isActive: true
         });
+    }
+    
+    function setManagers(address _manager, address _stableYieldManager, address _poolRegistry) external {
+        require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender), "FeeManager/only-admin");
+        require(_poolRegistry != address(0), "FeeManager/invalid-registry");
+        require(_manager != address(0) || _stableYieldManager != address(0), "FeeManager/at-least-one-manager");
+        manager = _manager;
+        stableYieldManager = _stableYieldManager;
+        poolRegistry = IPoolRegistry(_poolRegistry);
     }
     
     function protocolTreasury() external view override returns (address) {
@@ -214,7 +234,7 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
      * @notice Set default expense ratio for a new pool
      * @param pool Pool address
      */
-    function setDefaultExpenseRatio(address pool) external onlyRole(accessManager.OPERATOR_ROLE()) {
+    function setDefaultExpenseRatio(address pool) external onlyValidManager {
         require(pool != address(0), "FeeManager/invalid pool");
         require(poolExpenseRatios[pool] == 0, "FeeManager/expense ratio already set");
         
@@ -522,7 +542,7 @@ contract FeeManager is IFeeManager, ReentrancyGuard, Pausable {
         poolFeeDistributions[pool] = distribution;
     }
     
-    function setProtocolTreasury(address treasury) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+    function setProtocolTreasury(address _treasury) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
         // FeeManager acts as treasury, this function is kept for interface compatibility
         // but doesn't change anything since treasury is always address(this)
         require(treasury == address(this), "FeeManager/treasury must be this contract");

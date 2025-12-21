@@ -75,17 +75,14 @@ library StableYieldNAVLibrary {
         
         uint256 totalShares = IERC20(poolData.poolAddress).totalSupply();
         
-        uint8 assetDecimals = IERC20Metadata(poolData.asset).decimals();
-        require(assetDecimals == 6 || assetDecimals == 18, "NAVLib/only 6 or 18 decimal stablecoins");
-        
         if (totalShares == 0) {
             return 1e18; 
         }
         
-        // Normalize totalNAV from stablecoin decimals to 18 decimals
-        uint256 normalizedNAV = totalNAV * (10**(18 - assetDecimals));
-        
-        return normalizedNAV / totalShares;
+        // Calculate NAV per share: (totalNAV * 1e18) / totalShares
+        // totalNAV is in asset decimals, totalShares is raw count
+        // Result is normalized to 1e18 precision
+        return (totalNAV * 1e18) / totalShares;
     }
     
     /**

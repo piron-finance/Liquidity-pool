@@ -157,6 +157,10 @@ contract FeeManagementIntegration is BaseTest {
         vm.prank(admin);
         registry.setFactory(address(factory));
         
+        // Set managers in FeeManager (required for setDefaultExpenseRatio)
+        vm.prank(admin);
+        feeManager.setManagers(address(manager), address(0), address(registry));
+        
         // Create a pool for testing
         _createTestPool();
     }
@@ -479,8 +483,8 @@ contract FeeManagementIntegration is BaseTest {
         vm.prank(admin);
         (address newPoolAddress,) = factory.createPool(config);
         
-        // Set default expense ratio
-        vm.prank(operator);
+        // Set default expense ratio (must be called by manager)
+        vm.prank(address(manager));
         feeManager.setDefaultExpenseRatio(newPoolAddress);
         
         assertEq(feeManager.getPoolExpenseRatio(newPoolAddress), 80, "Default expense ratio not set (80 bps = 0.8%)");

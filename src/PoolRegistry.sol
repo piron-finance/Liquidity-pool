@@ -115,6 +115,7 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         _grantRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender);
         _grantRole(accessManager.ASSET_MANAGER_ROLE(), msg.sender);
         _grantRole(accessManager.OPERATOR_ROLE(), msg.sender);
+        _grantRole(accessManager.POOL_CREATOR_ROLE(), msg.sender);
     }
 
     
@@ -178,7 +179,8 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
 
     function registerStableYieldPool(
         IStableYieldTypes.PoolData memory poolData
-    ) external onlyRole(accessManager.POOL_CREATOR_ROLE()) {
+    ) external {
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), msg.sender), "PoolRegistry/not pool creator");
         require(poolData.poolAddress != address(0), "PoolRegistry/invalid pool");
         require(!isStableYieldPool[poolData.poolAddress], "PoolRegistry/pool already registered");
         require(assetInfo[poolData.asset].isApproved, "PoolRegistry/asset not approved");
