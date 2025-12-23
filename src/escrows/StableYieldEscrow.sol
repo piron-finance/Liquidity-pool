@@ -37,13 +37,11 @@ contract StableYieldEscrow is
 
     string public poolName;
  
-    uint256 public cashBuffer;
-
+    /// @notice Pool reserves available for investments and withdrawals (NAV component)
     uint256 public poolReserves;
 
+    /// @notice Transaction fees collected (NOT part of NAV)
     uint256 public transactionFees;
-
-    uint256 public expenseRatioFees;
 
     bool public emergencyWithdrawalEnabled;
 
@@ -55,9 +53,8 @@ contract StableYieldEscrow is
 
     event FundsDeposited(address indexed from, uint256 amount, uint256 newCashBuffer);
     event FundsWithdrawn(address indexed to, uint256 amount, uint256 remainingCashBuffer);
-    event FundsAllocated(uint256 poolReserves, uint256 transactionFee);
-    event FeesCollected(uint256 transactionFees, uint256 expenseRatioFees, address treasury);
-    event CashBufferUpdated(uint256 oldBuffer, uint256 newBuffer);
+    event FundsAllocated(uint256 reserveAmount, uint256 transactionFee);
+    event FeesCollected(uint256 transactionFees, address treasury);
     event EmergencyWithdrawalToggled(bool enabled);
     event PoolNameUpdated(string newPoolName);
     event SPVAllocation(address indexed spv, uint256 amount, uint256 remainingCashBuffer);
@@ -198,10 +195,9 @@ contract StableYieldEscrow is
         require(poolReserves >= amount, "StableYieldEscrow/insufficient pool reserves");
 
         poolReserves -= amount;
-        cashBuffer -= amount;
         asset.safeTransfer(to, amount);
 
-        emit FundsWithdrawn(to, amount, cashBuffer);
+        emit FundsWithdrawn(to, amount, getCashBuffer());
     }
 
     /**
@@ -218,11 +214,10 @@ contract StableYieldEscrow is
     ) external onlyStableYieldPoolOrManager {
         require(totalAmount == reserveAmount + transactionFee, "StableYieldEscrow/allocation mismatch");
         
-        // Update cash buffer with incoming funds (tokens already transferred to escrow)
+        // Verify tokens were received
         uint256 currentBalance = asset.balanceOf(address(this));
-        uint256 expectedBuffer = poolReserves + transactionFees + expenseRatioFees + totalAmount;
-        require(currentBalance >= expectedBuffer - cashBuffer, "StableYieldEscrow/insufficient balance");
-        cashBuffer += totalAmount;
+        uint256 expectedTotal = poolReserves + transactionFees + totalAmount;
+        require(currentBalance >= expectedTotal, "StableYieldEscrow/insufficient balance");
         
         poolReserves += reserveAmount;
         transactionFees += transactionFee;
@@ -244,39 +239,19 @@ contract StableYieldEscrow is
     }
 
     /**
-     * @notice Move accrued expense ratio fees from reserves to fee bucket
-     * @dev Called by StableYieldManager during monthly fee collection
-     * @param amount Amount to move from reserves to expense ratio fees
-     */
-    function collectExpenseRatioFees(uint256 amount) external onlyStableYieldPoolOrManager {
-        require(amount > 0, "StableYieldEscrow/invalid amount");
-        require(poolReserves >= amount, "StableYieldEscrow/insufficient reserves");
-        
-        poolReserves -= amount;
-        expenseRatioFees += amount;
-    }
-
-    /**
-     * @notice Transfer collected fees to treasury
+     * @notice Transfer collected transaction fees to treasury
      * @param treasury Treasury address
      */
     function transferFeesToTreasury(address treasury) external onlyOperator nonReentrant {
         require(treasury != address(0), "StableYieldEscrow/invalid treasury");
+        require(transactionFees > 0, "StableYieldEscrow/no fees to transfer");
         
-        uint256 totalFees = transactionFees + expenseRatioFees;
-        require(totalFees > 0, "StableYieldEscrow/no fees to transfer");
-        require(cashBuffer >= totalFees, "StableYieldEscrow/insufficient cash buffer");
-        
-        uint256 txFees = transactionFees;
-        uint256 expenseFees = expenseRatioFees;
-        
+        uint256 feeAmount = transactionFees;
         transactionFees = 0;
-        expenseRatioFees = 0;
-        cashBuffer -= totalFees;
         
-        asset.safeTransfer(treasury, totalFees);
+        asset.safeTransfer(treasury, feeAmount);
         
-        emit FeesCollected(txFees, expenseFees, treasury);
+        emit FeesCollected(feeAmount, treasury);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -291,18 +266,14 @@ contract StableYieldEscrow is
     function allocateToSPV(address spvAddress, uint256 amount) external onlyOperator nonReentrant {
         require(spvAddress != address(0), "StableYieldEscrow/invalid SPV");
         require(amount > 0, "StableYieldEscrow/invalid amount");
-        require(cashBuffer >= amount, "StableYieldEscrow/insufficient cash buffer");
         require(poolReserves >= amount, "StableYieldEscrow/insufficient pool reserves");
         
-        // Reduce both cash buffer and pool reserves when allocating to SPV
-        // This ensures poolReserves accurately reflects funds available in escrow
-        cashBuffer -= amount;
         poolReserves -= amount;
         spvAllocations[spvAddress] += amount;
         
         asset.safeTransfer(spvAddress, amount);
         
-        emit SPVAllocation(spvAddress, amount, cashBuffer);
+        emit SPVAllocation(spvAddress, amount, getCashBuffer());
     }
     
 
@@ -315,10 +286,9 @@ contract StableYieldEscrow is
         require(amount > 0, "StableYieldEscrow/invalid amount");
         
         asset.safeTransferFrom(msg.sender, address(this), amount);
-        cashBuffer += amount;
         poolReserves += amount;
         
-        emit SPVLiquidityReceived(msg.sender, amount, cashBuffer);
+        emit SPVLiquidityReceived(msg.sender, amount, getCashBuffer());
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -326,10 +296,12 @@ contract StableYieldEscrow is
     ////////////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice Get current cash buffer amount
+     * @notice Get current cash buffer amount (derived value)
+     * @dev Cash buffer = poolReserves + transactionFees
+     *      This is a computed value, not stored state
      */
-    function getCashBuffer() external view returns (uint256) {
-        return cashBuffer;
+    function getCashBuffer() public view returns (uint256) {
+        return poolReserves + transactionFees;
     }
 
     /**
@@ -347,17 +319,10 @@ contract StableYieldEscrow is
     }
 
     /**
-     * @notice Get collected expense ratio fees
-     */
-    function getExpenseRatioFees() external view returns (uint256) {
-        return expenseRatioFees;
-    }
-
-    /**
-     * @notice Get total collected fees
+     * @notice Get total collected fees 
      */
     function getTotalFees() external view returns (uint256) {
-        return transactionFees + expenseRatioFees;
+        return transactionFees;
     }
 
     /**
@@ -408,13 +373,20 @@ contract StableYieldEscrow is
 
         asset.safeTransfer(to, amount);
         
-        if (cashBuffer > amount) {
-            cashBuffer -= amount;
+        // Adjust accounting - prioritize reducing poolReserves first
+        if (poolReserves >= amount) {
+            poolReserves -= amount;
         } else {
-            cashBuffer = 0;
+            uint256 remaining = amount - poolReserves;
+            poolReserves = 0;
+            if (transactionFees >= remaining) {
+                transactionFees -= remaining;
+            } else {
+                transactionFees = 0;
+            }
         }
 
-        emit FundsWithdrawn(to, amount, cashBuffer);
+        emit FundsWithdrawn(to, amount, getCashBuffer());
     }
 
 }

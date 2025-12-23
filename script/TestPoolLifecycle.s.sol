@@ -87,7 +87,6 @@ contract TestPoolLifecycle is Script {
             spvAddress: ADMIN, // Admin acts as SPV for testing
             supportedTenors: tenors,
             minInvestment: 100e6, // 100 USDC
-            expenseRatio: 50, // 0.5%
             underlyingPools: new address[](0)
         });
         

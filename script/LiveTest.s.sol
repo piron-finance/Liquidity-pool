@@ -38,7 +38,6 @@ contract LiveTest is Script {
             spvAddress: admin,
             supportedTenors: tenors,
             minInvestment: 100e6,
-            expenseRatio: 50,
             underlyingPools: new address[](0)
         });
         
@@ -62,14 +61,17 @@ contract LiveTest is Script {
         
         console.log("\n=== STEP 4: ADD INSTRUMENT ===");
         
-        // Ensure admin has SPV_ROLE on StableYieldManager (it checks its own AccessControl, not AccessManager)
+        // Check SPV_ROLE via AccessManager (not on StableYieldManager directly)
         AccessManager accessMgr = AccessManager(ACCESS_MANAGER);
         bytes32 spvRole = accessMgr.SPV_ROLE();
         StableYieldManager manager = StableYieldManager(STABLE_YIELD_MANAGER);
         
-        if (!manager.hasRole(spvRole, admin)) {
-            console.log("Granting SPV_ROLE to admin on StableYieldManager...");
-            manager.grantRole(spvRole, admin);
+        bool hasSpvRole = accessMgr.hasRole(spvRole, admin);
+        console.log("Admin has SPV_ROLE via AccessManager:", hasSpvRole);
+        
+        if (!hasSpvRole) {
+            console.log("NOTE: Admin needs SPV_ROLE to add instruments");
+            console.log("      Grant via AccessManager.grantRoleDuringDeployment or proposal system");
         }
         
         manager.addInstrument(
@@ -98,4 +100,3 @@ contract LiveTest is Script {
         vm.stopBroadcast();
     }
 }
-

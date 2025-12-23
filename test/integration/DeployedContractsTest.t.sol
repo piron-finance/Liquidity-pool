@@ -98,7 +98,6 @@ contract DeployedContractsTest is Test {
             spvAddress: ADMIN,
             supportedTenors: tenors,
             minInvestment: 100e6,
-            expenseRatio: 50,
             underlyingPools: new address[](0)
         });
         

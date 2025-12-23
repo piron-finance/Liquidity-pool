@@ -40,15 +40,11 @@ contract StableYieldManager is
     address public managedPoolFactory;
     
     uint256 public version;
-    
-    
 
     mapping(address => IStableYieldTypes.PoolData) public pools;
     
     mapping(address => IStableYieldTypes.InstrumentHolding[]) public poolInstruments;
     mapping(address => uint256) public poolInstrumentCount;
-    mapping(address => uint256) public deferredFees;
-    mapping(address => uint256) public lastFeeAccrual;
     
     mapping(address => IStableYieldTypes.WithdrawalQueue) public poolQueues;
     mapping(address => mapping(uint256 => IStableYieldTypes.WithdrawalRequest)) public withdrawalRequests;
@@ -66,9 +62,6 @@ contract StableYieldManager is
     event PoolRegistered( address indexed poolAddress, address indexed escrowAddress, address indexed asset, string name );
     event FeeManagerUpdated(address oldFeeManager, address newFeeManager);
     event TransactionFeeCollected(address indexed poolAddress, string feeType, uint256 transactionAmount, uint256 feeAmount);
-    event FeeSweptComplete(address indexed poolAddress, uint256 feeAmount, uint256 remainingAccrued);
-    event FeeSweptPartial(address indexed poolAddress, uint256 paidAmount, uint256 deferredAmount);
-    event FeeSweptDeferred(address indexed poolAddress, uint256 deferredAmount);
     
     event InstrumentPurchased( address indexed poolAddress, uint256 indexed instrumentId, IStableYieldTypes.InstrumentType instrumentType, uint256 purchasePrice, uint256 faceValue, uint256 maturityDate );
     event InstrumentMatured( address indexed poolAddress, uint256 indexed instrumentId, uint256 faceValue, uint256 realizedYield );  
@@ -206,14 +199,8 @@ contract StableYieldManager is
         });
         
         poolInstrumentCount[poolAddress] = 0;
-        deferredFees[poolAddress] = 0;
-        lastFeeAccrual[poolAddress] = block.timestamp;
 
-        registry.registerStableYieldPool(pools[poolAddress]); 
-
-        if (feeManager != address(0)) {
-          IFeeManager(feeManager).setDefaultExpenseRatio(poolAddress); 
-        }
+        registry.registerStableYieldPool(pools[poolAddress]);
         
         emit PoolRegistered(poolAddress, escrowAddress, asset, name);
     }
@@ -236,92 +223,7 @@ contract StableYieldManager is
         emit FeeManagerUpdated(oldFeeManager, newFeeManager);
     }
 
-
     /**
-     * @notice Collect monthly accrued fees with reserve safety ratios
-     * @dev Uses cumulative deferred fee approach with liquidity-aware collection
-     * @param poolAddress Pool address
-     */
-    function collectMonthlyFees(address poolAddress) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) {
-        require(feeManager != address(0), "StableYieldManager/fee manager not set");
-        
-        StableYieldEscrow escrow = StableYieldEscrow(pools[poolAddress].escrowAddress);
-        
-        uint256 totalGrossValue = _calculateGrossAssetValue(poolAddress) + escrow.getPoolReserves();
-        uint256 totalOwed = deferredFees[poolAddress] + (_calculateCurrentAccruedFees(poolAddress, totalGrossValue) - deferredFees[poolAddress]);
-        
-        if (totalOwed == 0) return;
-        
-        _processFeeSweep(poolAddress, escrow, totalGrossValue, totalOwed);
-    }
-
-    /**
-     * @notice Internal function to process fee sweep
-     * @param poolAddress Pool address
-     * @param escrow Escrow contract
-     * @param totalGrossValue Total gross value
-     * @param totalOwed Total owed fees
-     */
-    function _processFeeSweep(
-        address poolAddress,
-        StableYieldEscrow escrow,
-        uint256 totalGrossValue,
-        uint256 totalOwed
-    ) internal {
-        uint256 collectionAmount = _determineCollectionAmount(
-            escrow.getCashBuffer(),
-            escrow.getPoolReserves(),
-            (totalGrossValue * 500) / 10000, // 5% liquidity floor
-            totalOwed
-        );
-        
-        if (collectionAmount > 0) {
-            escrow.collectExpenseRatioFees(collectionAmount);
-            deferredFees[poolAddress] = totalOwed - collectionAmount;
-            lastFeeAccrual[poolAddress] = block.timestamp;
-            
-            if (collectionAmount == totalOwed) {
-                emit FeeSweptComplete(poolAddress, collectionAmount, 0);
-            } else {
-                emit FeeSweptPartial(poolAddress, collectionAmount, deferredFees[poolAddress]);
-            }
-        } else {
-            deferredFees[poolAddress] = totalOwed;
-            lastFeeAccrual[poolAddress] = block.timestamp;
-            emit FeeSweptDeferred(poolAddress, totalOwed); 
-        }
-    }
-
-    /**
-     * @notice Determine collection amount based on liquidity safety constraints
-     * @param cashBuffer Total cash available in escrow
-     * @param poolReserves Available pool reserves (excludes allocated fees)
-     * @param liquidityFloor Minimum liquidity buffer to maintain
-     * @param totalOwed Total owed fees
-     * @return collectionAmount Amount safe to collect
-     */
-    function _determineCollectionAmount(
-        uint256 cashBuffer,
-        uint256 poolReserves,
-        uint256 liquidityFloor,
-        uint256 totalOwed
-    ) internal pure returns (uint256 collectionAmount) {
-        if (totalOwed == 0) return 0;
-        if (cashBuffer <= liquidityFloor) return 0; 
-
-        uint256 availableLiquidity = cashBuffer - liquidityFloor;
-
-        uint256 minRedemptionBuffer = (poolReserves * 1000) / 10000; // 10% 
-        if (availableLiquidity <= minRedemptionBuffer) return 0;
-
-        if (availableLiquidity >= totalOwed) {
-            return totalOwed;
-        }
-
-        return (availableLiquidity * 8000) / 10000; // 80% 
-    }
-
-        /**
      * @notice Allocate funds to SPV for instrument purchases (Operator only)
      * @param poolAddress Pool address
      * @param spvAddress SPV address
@@ -369,7 +271,8 @@ contract StableYieldManager is
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         require(amount >= poolData.minInvestment, "StableYieldManager/below minimum");
         require(receiver != address(0), "StableYieldManager/invalid receiver");
-        
+         
+        // Calculate transaction fee on deposit
         uint256 transactionFee = IFeeManager(feeManager).calculateProtocolFee(poolAddress, amount);
         uint256 netDepositAmount = amount - transactionFee;
         
@@ -408,7 +311,7 @@ contract StableYieldManager is
         address owner
     ) external  poolExists(poolAddress) ActivePool(poolAddress) nonReentrant returns (uint256 actualShares, uint256 withdrawalValue) {
         require(msg.sender == poolAddress, "StableYieldManager/invalid caller");
-         require(registry.isManagedPool(poolAddress), "StableYieldManager/invalid pool"); // check if duplicate with modifier
+         require(registry.isManagedPool(poolAddress), "StableYieldManager/invalid pool");
         require(shares > 0, "StableYieldManager/invalid shares");
         require(receiver != address(0), "StableYieldManager/invalid receiver");
         require(owner != address(0), "StableYieldManager/invalid owner");
@@ -545,19 +448,17 @@ contract StableYieldManager is
     ////////////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice Calculate pool NAV net of accrued fees
-     * @dev Returns NAV that already accounts for time-based accrued fees
+     * @notice Calculate pool NAV
+     * @dev NAV = Gross Asset Value + Pool Reserves
+     *      Transaction fees are NOT deducted (already extracted at transaction time)
      * @param poolAddress Pool address
-     * @return totalNAV Current NAV net of accrued fees
+     * @return totalNAV Current NAV
      */
     function calculatePoolNAV(address poolAddress) public view poolExists(poolAddress) returns (uint256 totalNAV) {
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         return StableYieldNAVLibrary.calculatePoolNAV(
             poolData,
-            poolInstruments[poolAddress],
-            deferredFees[poolAddress],
-            lastFeeAccrual[poolAddress],
-            feeManager
+            poolInstruments[poolAddress]
         );
     }
 
@@ -569,12 +470,8 @@ contract StableYieldManager is
     function calculateNAVPerShare(address poolAddress) public view ActivePool(poolAddress) returns (uint256 navPerShare) {
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         return StableYieldNAVLibrary.calculateNAVPerShare(
-            poolAddress,
             poolData,
-            poolInstruments[poolAddress],
-            deferredFees[poolAddress],
-            lastFeeAccrual[poolAddress],
-            feeManager
+            poolInstruments[poolAddress]
         );
     }
 
@@ -588,25 +485,9 @@ contract StableYieldManager is
     function _calculateGrossAssetValue(address poolAddress) internal view returns (uint256 grossValue) {
         return StableYieldNAVLibrary.calculateGrossAssetValue(poolInstruments[poolAddress]);
     }
-    
-    /**
-     * @notice Calculate current accrued fees for NAV-neutral pricing
-     * @param poolAddress Pool address
-     * @param totalGrossValue Total gross pool value
-     * @return accruedFees Current accrued fees (including deferred)
-     */
-    function _calculateCurrentAccruedFees(address poolAddress, uint256 totalGrossValue) internal view returns (uint256 accruedFees) {
-        return StableYieldNAVLibrary.calculateCurrentAccruedFees(
-            pools[poolAddress],
-            deferredFees[poolAddress],
-            lastFeeAccrual[poolAddress],
-            feeManager,
-            totalGrossValue
-        );
-    }
 
     /**
-     * @notice  discounted instrument value calculation
+     * @notice Discounted instrument value calculation
      * @param instrument Instrument data
      * @param currentTime Current timestamp
      * @return value Current value of discounted instrument
@@ -727,9 +608,6 @@ contract StableYieldManager is
             poolAddress,
             pools[poolAddress],
             poolInstruments[poolAddress],
-            deferredFees[poolAddress],
-            lastFeeAccrual[poolAddress],
-            feeManager,
             reason
         );
     }

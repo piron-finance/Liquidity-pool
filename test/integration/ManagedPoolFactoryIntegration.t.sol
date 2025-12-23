@@ -37,17 +37,6 @@ contract TestAccessManager is AccessManager {
 }
 
 /**
- * @title TestStableYieldManager
- * @notice Helper contract that grants factory role during initialization
- */
-contract TestStableYieldManager is StableYieldManager {
-    // Helper function to grant admin role for tests
-    function grantAdminRole(address account) external {
-        _grantRole(accessManager.DEFAULT_ADMIN_ROLE(), account);
-    }
-}
-
-/**
  * @title TestPoolRegistry
  * @notice Helper contract that grants initial roles during initialization
  */
@@ -121,7 +110,6 @@ contract ManagedPoolFactoryIntegration is BaseTest {
     ////////////////////////////////////////////////////////////////////////////////
     
     uint256 constant MIN_INVESTMENT = 1_000e6; // 1,000 USDC minimum
-    uint256 constant EXPENSE_RATIO = 50; // 0.5% annually
     
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// EVENTS /////////////////////////////////////////
@@ -178,8 +166,8 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         // Deploy FeeManager
         feeManager = new FeeManager(address(accessManager), treasury);
         
-        // Deploy and initialize TestStableYieldManager
-        TestStableYieldManager managerImpl = new TestStableYieldManager();
+        // Deploy and initialize StableYieldManager
+        StableYieldManager managerImpl = new StableYieldManager();
         bytes memory managerInit = abi.encodeWithSignature(
             "initialize(address,address,address,address)",
             address(accessManager),
@@ -212,10 +200,10 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         bytes32 factoryRole = keccak256("FACTORY_ROLE");
         TestAccessManager(address(accessManager)).grantRoleImmediate(factoryRole, address(managedFactory));
         
-        // Grant DEFAULT_ADMIN_ROLE to admin on StableYieldManager for setManagedPoolFactory call
-        TestStableYieldManager(address(stableYieldManager)).grantAdminRole(admin);
+        // Grant DEFAULT_ADMIN_ROLE to admin on AccessManager for StableYieldManager operations
+        TestAccessManager(address(accessManager)).grantRoleImmediate(accessManager.DEFAULT_ADMIN_ROLE(), admin);
         
-        // Set ManagedPoolFactory in StableYieldManager (no POOL_CREATOR_ROLE needed, factory is whitelisted)
+        // Set ManagedPoolFactory in StableYieldManager
         vm.prank(admin);
         stableYieldManager.setManagedPoolFactory(address(managedFactory));
         
@@ -227,7 +215,7 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         bytes32 operatorRole = keccak256("OPERATOR_ROLE");
         TestAccessManager(address(accessManager)).grantRoleImmediate(operatorRole, address(stableYieldManager));
         
-        // Set managers in FeeManager (required for setDefaultExpenseRatio)
+        // Set managers in FeeManager
         vm.prank(admin);
         feeManager.setManagers(address(0), address(stableYieldManager), address(registry));
     }
@@ -249,7 +237,6 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         console.log("  Asset:", address(token));
         console.log("  SPV:", spv);
         console.log("  Min Investment:", MIN_INVESTMENT);
-        console.log("  Expense Ratio:", EXPENSE_RATIO, "bps (0.5%)");
         
         ManagedPoolFactory.PoolDeploymentConfig memory config = ManagedPoolFactory.PoolDeploymentConfig({
             asset: address(token),
@@ -258,7 +245,6 @@ contract ManagedPoolFactoryIntegration is BaseTest {
             spvAddress: spv,
             supportedTenors: new uint256[](0), // Flexible pool
             minInvestment: MIN_INVESTMENT,
-            expenseRatio: EXPENSE_RATIO,
             underlyingPools: new address[](0)
         });
         
@@ -315,7 +301,6 @@ contract ManagedPoolFactoryIntegration is BaseTest {
             spvAddress: spv,
             supportedTenors: new uint256[](0),
             minInvestment: MIN_INVESTMENT,
-            expenseRatio: EXPENSE_RATIO,
             underlyingPools: new address[](0)
         });
         
@@ -332,7 +317,6 @@ contract ManagedPoolFactoryIntegration is BaseTest {
             spvAddress: spv,
             supportedTenors: new uint256[](0),
             minInvestment: MIN_INVESTMENT * 2,
-            expenseRatio: EXPENSE_RATIO + 25,
             underlyingPools: new address[](0)
         });
         
@@ -388,7 +372,6 @@ contract ManagedPoolFactoryIntegration is BaseTest {
             spvAddress: spv,
             supportedTenors: tenors,
             minInvestment: MIN_INVESTMENT,
-            expenseRatio: EXPENSE_RATIO,
             underlyingPools: new address[](0)
         });
         
@@ -425,7 +408,6 @@ contract ManagedPoolFactoryIntegration is BaseTest {
             spvAddress: spv,
             supportedTenors: new uint256[](0),
             minInvestment: MIN_INVESTMENT,
-            expenseRatio: EXPENSE_RATIO,
             underlyingPools: new address[](0)
         });
         
@@ -444,22 +426,12 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         managedFactory.createStableYieldPool(badConfig);
         console.log("  SUCCESS: Rejected zero SPV address");
         
-        // Test 3: Invalid expense ratio (too high)
-        console.log("\nTest 3: Creating pool with excessive expense ratio...");
-        badConfig.spvAddress = spv;
-        badConfig.expenseRatio = 1001; // > 10%
-        
-        vm.prank(admin);
-        vm.expectRevert("ManagedPoolFactory/expense ratio too high");
-        managedFactory.createStableYieldPool(badConfig);
-        console.log("  SUCCESS: Rejected expense ratio > 10%");
-        
-        // Test 4: Invalid tenor
-        console.log("\nTest 4: Creating pool with invalid tenor...");
+        // Test 3: Invalid tenor
+        console.log("\nTest 3: Creating pool with invalid tenor...");
         uint256[] memory invalidTenors = new uint256[](1);
         invalidTenors[0] = 100; // Not 90, 180, 270, or 360
         
-        badConfig.expenseRatio = EXPENSE_RATIO;
+        badConfig.spvAddress = spv;
         badConfig.supportedTenors = invalidTenors;
         
         vm.prank(admin);
@@ -470,69 +442,7 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         console.log("\n====== ALL VALIDATIONS WORKING ======");
         console.log("  Asset approval required");
         console.log("  SPV address validated");
-        console.log("  Expense ratio capped at 10%");
         console.log("  Tenors restricted to standard terms");
-        console.log("=== TEST PASSED ===\n");
-    }
-    
-    /**
-     * @notice Test user deposit flow in stable yield pool
-     * @dev Tests: create pool → user deposits → shares minted → tokens in escrow
-     * @dev SKIPPED: StableYieldPool deposit flow has additional complexity - tested in StableYieldPoolIntegration.t.sol
-     */
-    function skip_test_managedFactory_userDepositFlow() public {
-        console.log("\n=== TEST: User Deposit Flow in Stable Yield Pool ===");
-        
-        console.log("\nStep 1: Creating stable yield pool...");
-        ManagedPoolFactory.PoolDeploymentConfig memory config = ManagedPoolFactory.PoolDeploymentConfig({
-            asset: address(token),
-            poolName: "Deposit Test Pool",
-            poolSymbol: "pDEP",
-            spvAddress: spv,
-            supportedTenors: new uint256[](0),
-            minInvestment: MIN_INVESTMENT,
-            expenseRatio: EXPENSE_RATIO,
-            underlyingPools: new address[](0)
-        });
-        
-        vm.prank(admin);
-        (poolAddress, escrowAddress) = managedFactory.createStableYieldPool(config);
-        
-        console.log("  Pool:", poolAddress);
-        console.log("  Escrow:", escrowAddress);
-        
-        StableYieldPool pool = StableYieldPool(poolAddress);
-        
-        console.log("\nStep 2: User1 depositing...");
-        uint256 depositAmount = 10_000e6;
-        console.log("  Deposit Amount:", depositAmount);
-        console.log("  User1 Balance Before:", token.balanceOf(user1));
-        console.log("  Escrow Balance Before:", token.balanceOf(escrowAddress));
-        console.log("  User1 Shares Before:", pool.balanceOf(user1));
-        
-        vm.startPrank(user1);
-        // Approve pool, escrow, and manager for token transfers
-        token.approve(poolAddress, depositAmount);
-        token.approve(escrowAddress, depositAmount);
-        token.approve(address(stableYieldManager), depositAmount);
-        uint256 sharesMinted = pool.deposit(depositAmount, user1);
-        vm.stopPrank();
-        
-        console.log("\nStep 3: Verifying deposit results...");
-        console.log("  Shares Minted:", sharesMinted);
-        console.log("  User1 Balance After:", token.balanceOf(user1));
-        console.log("  Escrow Balance After:", token.balanceOf(escrowAddress));
-        console.log("  User1 Shares After:", pool.balanceOf(user1));
-        console.log("  Total Supply:", pool.totalSupply());
-        
-        assertEq(pool.balanceOf(user1), sharesMinted, "User shares mismatch");
-        assertEq(token.balanceOf(escrowAddress), depositAmount, "Escrow balance mismatch");
-        assertEq(pool.totalSupply(), sharesMinted, "Total supply mismatch");
-        
-        console.log("\n====== DEPOSIT FLOW COMPLETE ======");
-        console.log("  Tokens transferred to escrow");
-        console.log("  Shares minted to user");
-        console.log("  Total supply updated");
         console.log("=== TEST PASSED ===\n");
     }
     
@@ -590,7 +500,6 @@ contract ManagedPoolFactoryIntegration is BaseTest {
             spvAddress: spv,
             supportedTenors: new uint256[](0),
             minInvestment: MIN_INVESTMENT,
-            expenseRatio: EXPENSE_RATIO,
             underlyingPools: new address[](0)
         });
         
@@ -624,4 +533,3 @@ contract ManagedPoolFactoryIntegration is BaseTest {
         console.log("=== TEST PASSED ===\n");
     }
 }
-

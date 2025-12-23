@@ -225,7 +225,6 @@ contract DeploymentVerification is BaseTest {
             spvAddress: spv,
             supportedTenors: tenors,
             minInvestment: 100e6,
-            expenseRatio: 50,
             underlyingPools: new address[](0)
         });
         
@@ -259,7 +258,6 @@ contract DeploymentVerification is BaseTest {
             spvAddress: spv,
             supportedTenors: tenors,
             minInvestment: 100e6,
-            expenseRatio: 50,
             underlyingPools: new address[](0)
         });
         
@@ -283,7 +281,7 @@ contract DeploymentVerification is BaseTest {
     }
     
     /**
-     * @notice TEST 5: Verify FeeManager can set expense ratio
+     * @notice TEST 5: Verify FeeManager transaction fee calculation works
      */
     function test_deployment_feeManagerWorks() public {
         console.log("\n=== TEST: FeeManager Configuration ===");
@@ -299,19 +297,19 @@ contract DeploymentVerification is BaseTest {
             spvAddress: spv,
             supportedTenors: tenors,
             minInvestment: 100e6,
-            expenseRatio: 50,
             underlyingPools: new address[](0)
         });
         
         vm.prank(admin);
         (address pool,) = managedFactory.createStableYieldPool(config);
         
-        // Verify expense ratio was set during creation
-        uint256 expenseRatio = feeManager.getPoolExpenseRatio(pool);
-        // FeeManager sets DEFAULT_EXPENSE_RATIO (80) not the config.expenseRatio (50)
-        assertEq(expenseRatio, 80, "Expense ratio not set to default");
+        // Verify transaction fee calculation works
+        uint256 amount = 10_000e6;
+        uint256 protocolFee = feeManager.calculateProtocolFee(pool, amount);
+        assertTrue(protocolFee > 0, "Protocol fee should be > 0");
         
         console.log("  FeeManager working correctly!");
+        console.log("  Protocol fee for 10,000:", protocolFee);
     }
 }
 

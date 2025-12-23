@@ -51,7 +51,6 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         address spvAddress;         // SPV for this pool
         uint256[] supportedTenors;  // Optional: [90, 180, 270, 360] days (empty for flexible-only pools)
         uint256 minInvestment;      // 1000 * 10^decimals
-        uint256 expenseRatio;       // 50 basis points (0.5%)
         address[] underlyingPools;  // Optional: existing T-bill pools to aggregate
     }
 
@@ -243,27 +242,25 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         require(bytes(config.poolName).length > 0, "ManagedPoolFactory/invalid pool name");
         require(bytes(config.poolSymbol).length > 0, "ManagedPoolFactory/invalid pool symbol");
         require(config.minInvestment > 0, "ManagedPoolFactory/invalid min investment");
-        require(config.expenseRatio <= 1000, "ManagedPoolFactory/expense ratio too high"); // Max 10%
-        
 
-   if (config.supportedTenors.length > 0) {
-        for (uint256 i = 0; i < config.supportedTenors.length; i++) {
-            uint256 tenor = config.supportedTenors[i];
-            require(
-                tenor == 90 || tenor == 180 || tenor == 270 || tenor == 360,
-                "ManagedPoolFactory/invalid tenor"
-            );
+        if (config.supportedTenors.length > 0) {
+            for (uint256 i = 0; i < config.supportedTenors.length; i++) {
+                uint256 tenor = config.supportedTenors[i];
+                require(
+                    tenor == 90 || tenor == 180 || tenor == 270 || tenor == 360,
+                    "ManagedPoolFactory/invalid tenor"
+                );
+            }
         }
-   }
         
-      if (config.underlyingPools.length > 0) {
-        for (uint256 i = 0; i < config.underlyingPools.length; i++) {
-            require(
-                registry.isRegisteredPool(config.underlyingPools[i]),
-                "ManagedPoolFactory/invalid underlying pool"
-            );
+        if (config.underlyingPools.length > 0) {
+            for (uint256 i = 0; i < config.underlyingPools.length; i++) {
+                require(
+                    registry.isRegisteredPool(config.underlyingPools[i]),
+                    "ManagedPoolFactory/invalid underlying pool"
+                );
+            }
         }
-      }
     }
 
 

@@ -21,8 +21,6 @@ contract FeeManagerTest is BaseTest {
     // Events to test
     event FeeConfigUpdated(address indexed pool, uint256 protocolFee, uint256 spvFee, uint256 performanceFee, uint256 earlyWithdrawalFee);
     event DefaultFeeConfigUpdated(uint256 protocolFee, uint256 spvFee, uint256 performanceFee);
-    event ExpenseRatioUpdated(address indexed pool, uint256 oldRatio, uint256 newRatio);
-    event ExpenseRatioAccrued(address indexed pool, uint256 amount, uint256 timestamp);
     event TransactionFeeCollected(address indexed pool, address indexed asset, uint256 amount, string feeType);
     event TreasuryDeposit(address indexed asset, uint256 amount, uint256 newBalance);
     event TreasuryWithdrawal(address indexed asset, address indexed recipient, uint256 amount, uint256 remainingBalance);
@@ -55,12 +53,11 @@ contract FeeManagerTest is BaseTest {
         assertEq(address(feeManager.accessManager()), address(accessManager));
         assertEq(feeManager.protocolTreasury(), address(feeManager));
         
-        // Check default fee config
+        // Check default fee config (transaction fees only)
         IFeeManager.FeeConfig memory defaultConfig = feeManager.defaultFeeConfig();
-        assertEq(defaultConfig.protocolFee, 6);
-        assertEq(defaultConfig.spvFee, 100);
-        assertEq(defaultConfig.managementFee, 200);
-        assertEq(defaultConfig.performanceFee, 1000);
+        assertEq(defaultConfig.protocolFee, 200); // 2%
+        assertEq(defaultConfig.spvFee, 100);      // 1%
+        assertEq(defaultConfig.performanceFee, 100); // 1% (10% of profits)
         assertTrue(defaultConfig.isActive);
     }
     
@@ -82,8 +79,8 @@ contract FeeManagerTest is BaseTest {
         uint256 amount = 10_000e6; // 10,000 USDC
         uint256 fee = feeManager.calculateProtocolFee(pool, amount);
         
-        // Default protocol fee is 6 bps (0.06%)
-        uint256 expectedFee = (amount * 6) / 10_000;
+        // Default protocol fee is 200 bps (2%) + spv fee 100 bps (1%) = 300 bps (3%)
+        uint256 expectedFee = (amount * 300) / 10_000;
         assertEq(fee, expectedFee);
     }
     
@@ -96,28 +93,20 @@ contract FeeManagerTest is BaseTest {
         assertEq(fee, expectedFee);
     }
     
-    function test_CalculateManagementFee() public view {
-        uint256 totalValue = 1_000_000e6; // 1M USDC
-        uint256 timeElapsed = 365 days; // 1 year
-        
-        uint256 fee = feeManager.calculateManagementFee(pool, totalValue, timeElapsed);
-        
-        // Default management fee is 200 bps (2% per year)
-        uint256 expectedFee = (totalValue * 200 * timeElapsed) / (10_000 * 365 days);
-        assertEq(fee, expectedFee);
-    }
-    
     function test_CalculatePerformanceFee() public view {
         uint256 profit = 100_000e6; // 100k profit
         uint256 fee = feeManager.calculatePerformanceFee(pool, profit);
         
-        // Default performance fee is 1000 bps (10%)
-        uint256 expectedFee = (profit * 1000) / 10_000;
+        // Default performance fee is 100 bps (1%)
+        uint256 expectedFee = (profit * 100) / 10_000;
         assertEq(fee, expectedFee);
     }
     
-    // Note: Dynamic withdrawal fee tests removed as they require custom fee config setup
-    // The function calculateDynamicWithdrawalFee is tested via integration tests
+    function test_CalculateFee_ReturnsZeroForZeroAmount() public view {
+        assertEq(feeManager.calculateProtocolFee(pool, 0), 0);
+        assertEq(feeManager.calculateSpvFee(pool, 0), 0);
+        assertEq(feeManager.calculatePerformanceFee(pool, 0), 0);
+    }
     
     /*//////////////////////////////////////////////////////////////
                     FEE CONFIGURATION TESTS
@@ -127,7 +116,6 @@ contract FeeManagerTest is BaseTest {
         IFeeManager.FeeConfig memory newConfig = IFeeManager.FeeConfig({
             protocolFee: 50,
             spvFee: 100,
-            managementFee: 150,
             performanceFee: 200,
             earlyWithdrawalFee: 100,
             refundGasFee: 10,
@@ -150,7 +138,6 @@ contract FeeManagerTest is BaseTest {
         IFeeManager.FeeConfig memory newConfig = IFeeManager.FeeConfig({
             protocolFee: 50,
             spvFee: 100,
-            managementFee: 150,
             performanceFee: 200,
             earlyWithdrawalFee: 100,
             refundGasFee: 10,
@@ -166,7 +153,6 @@ contract FeeManagerTest is BaseTest {
         IFeeManager.FeeConfig memory newConfig = IFeeManager.FeeConfig({
             protocolFee: 1001, // > MAX_FEE_RATE (1000 = 10%)
             spvFee: 100,
-            managementFee: 150,
             performanceFee: 200,
             earlyWithdrawalFee: 100,
             refundGasFee: 10,
@@ -182,7 +168,6 @@ contract FeeManagerTest is BaseTest {
         IFeeManager.FeeConfig memory poolConfig = IFeeManager.FeeConfig({
             protocolFee: 30,
             spvFee: 80,
-            managementFee: 120,
             performanceFee: 150,
             earlyWithdrawalFee: 50,
             refundGasFee: 5,
@@ -270,117 +255,6 @@ contract FeeManagerTest is BaseTest {
     }
     
     /*//////////////////////////////////////////////////////////////
-                    EXPENSE RATIO TESTS
-    //////////////////////////////////////////////////////////////*/
-    
-    function test_SetPoolExpenseRatio_Success() public {
-        uint256 expenseRatio = 80; // 0.8%
-        
-        vm.prank(admin);
-        vm.expectEmit(true, false, false, true);
-        emit ExpenseRatioUpdated(pool, 0, expenseRatio);
-        
-        feeManager.setPoolExpenseRatio(pool, expenseRatio);
-        
-        assertEq(feeManager.getPoolExpenseRatio(pool), expenseRatio);
-    }
-    
-    function test_SetPoolExpenseRatio_RevertIf_RatioTooHigh() public {
-        vm.prank(admin);
-        vm.expectRevert("FeeManager/expense ratio too high");
-        feeManager.setPoolExpenseRatio(pool, 501); // > MAX_EXPENSE_RATIO (500 = 5%)
-    }
-    
-    function test_SetDefaultExpenseRatio_Success() public {
-        // Setup: Create mock manager and set it in FeeManager
-        address mockManager = makeAddr("mockManager");
-        address mockRegistry = makeAddr("mockRegistry");
-        vm.prank(admin);
-        feeManager.setManagers(mockManager, makeAddr("stableYieldMgr"), mockRegistry);
-        
-        vm.prank(mockManager);
-        vm.expectEmit(true, false, false, true);
-        emit ExpenseRatioUpdated(pool, 0, 80); // DEFAULT_EXPENSE_RATIO = 80
-        
-        feeManager.setDefaultExpenseRatio(pool);
-        
-        assertEq(feeManager.getPoolExpenseRatio(pool), 80);
-    }
-    
-    function test_AccrueExpenseRatio_Success() public {
-        // Setup: Set expense ratio
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(pool, 100); // 1% annual
-        
-        // Fast forward 30 days
-        skip(30 days);
-        
-        uint256 poolTotalAssets = 1_000_000e6; // 1M
-        
-        vm.prank(operator);
-        uint256 accruedAmount = feeManager.accrueExpenseRatio(pool, poolTotalAssets);
-        
-        // Expected: (1M * 100 bps * 30 days) / (10000 * 365 days)
-        uint256 expectedAccrued = (poolTotalAssets * 100 * 30 days) / (10_000 * 365 days);
-        assertEq(accruedAmount, expectedAccrued);
-        assertEq(feeManager.getAccruedExpenseFees(pool), expectedAccrued);
-    }
-    
-    function test_AccrueExpenseRatio_ReturnsZeroIfNoTimeElapsed() public {
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(pool, 100);
-        
-        vm.prank(operator);
-        uint256 accruedAmount = feeManager.accrueExpenseRatio(pool, 1_000_000e6);
-        
-        // No time elapsed since setting ratio, should return 0
-        assertEq(accruedAmount, 0);
-    }
-    
-    function test_CollectAccruedExpenseFees_Success() public {
-        // Setup expense ratio and accrue fees
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(pool, 100);
-        
-        skip(30 days);
-        
-        uint256 poolTotalAssets = 1_000_000e6;
-        vm.prank(operator);
-        uint256 accruedAmount = feeManager.accrueExpenseRatio(pool, poolTotalAssets);
-        
-        // Approve and collect
-        vm.startPrank(operator);
-        token.approve(address(feeManager), accruedAmount);
-        
-        vm.expectEmit(true, true, false, true);
-        emit TransactionFeeCollected(pool, address(token), accruedAmount, "expense_ratio");
-        
-        feeManager.collectAccruedExpenseFees(pool, address(token));
-        vm.stopPrank();
-        
-        assertEq(feeManager.getAccruedExpenseFees(pool), 0);
-        assertEq(feeManager.getTreasuryBalance(address(token)), accruedAmount);
-    }
-    
-    function test_ReduceAccruedFees_Success() public {
-        // Setup accrued fees
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(pool, 100);
-        
-        skip(30 days);
-        
-        vm.prank(operator);
-        uint256 accruedAmount = feeManager.accrueExpenseRatio(pool, 1_000_000e6);
-        
-        uint256 paidAmount = accruedAmount / 2;
-        
-        vm.prank(operator);
-        feeManager.reduceAccruedFees(pool, paidAmount);
-        
-        assertEq(feeManager.getAccruedExpenseFees(pool), accruedAmount - paidAmount);
-    }
-    
-    /*//////////////////////////////////////////////////////////////
                     TRANSACTION FEE COLLECTION TESTS
     //////////////////////////////////////////////////////////////*/
     
@@ -398,6 +272,24 @@ contract FeeManagerTest is BaseTest {
         
         assertEq(feeManager.getTreasuryBalance(address(token)), feeAmount);
         assertEq(feeManager.getTransactionFees(pool, address(token)), feeAmount);
+    }
+    
+    function test_CollectTransactionFee_MultipleCollections() public {
+        uint256 depositFee = 100e6;
+        uint256 withdrawalFee = 50e6;
+        
+        vm.startPrank(operator);
+        token.approve(address(feeManager), depositFee + withdrawalFee);
+        
+        // Collect deposit fee
+        feeManager.collectTransactionFee(pool, address(token), depositFee, "deposit");
+        
+        // Collect withdrawal fee
+        feeManager.collectTransactionFee(pool, address(token), withdrawalFee, "withdrawal");
+        vm.stopPrank();
+        
+        assertEq(feeManager.getTreasuryBalance(address(token)), depositFee + withdrawalFee);
+        assertEq(feeManager.getTransactionFees(pool, address(token)), depositFee + withdrawalFee);
     }
     
     function test_CollectTransactionFee_RevertIf_InvalidFeeType() public {
@@ -488,7 +380,6 @@ contract FeeManagerTest is BaseTest {
         IFeeManager.FeeConfig memory customConfig = IFeeManager.FeeConfig({
             protocolFee: 30,
             spvFee: 80,
-            managementFee: 120,
             performanceFee: 150,
             earlyWithdrawalFee: 50,
             refundGasFee: 5,
@@ -503,6 +394,18 @@ contract FeeManagerTest is BaseTest {
         assertEq(retrievedConfig.spvFee, 80);
     }
     
+    function test_EstimateFeesForAmount() public view {
+        uint256 amount = 10_000e6;
+        
+        uint256 protocolFee = feeManager.estimateFeesForAmount(pool, amount, "protocol");
+        uint256 spvFee = feeManager.estimateFeesForAmount(pool, amount, "spv");
+        uint256 unknownFee = feeManager.estimateFeesForAmount(pool, amount, "unknown");
+        
+        assertTrue(protocolFee > 0);
+        assertTrue(spvFee > 0);
+        assertEq(unknownFee, 0);
+    }
+    
     /*//////////////////////////////////////////////////////////////
                     FUZZ TESTS
     //////////////////////////////////////////////////////////////*/
@@ -512,25 +415,10 @@ contract FeeManagerTest is BaseTest {
         
         uint256 fee = feeManager.calculateProtocolFee(pool, amount);
         
-        // Fee should be proportional to amount
+        // Fee should be proportional to amount and not exceed amount
         assertTrue(fee <= amount);
-        assertEq(fee, (amount * 6) / 10_000);
-    }
-    
-    function testFuzz_AccrueExpenseRatio(uint256 poolAssets, uint256 timeElapsed) public {
-        vm.assume(poolAssets > 0 && poolAssets < 1e12 * 1e6); // Max 1 trillion
-        vm.assume(timeElapsed > 0 && timeElapsed < 365 days);
-        
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(pool, 100); // 1%
-        
-        skip(timeElapsed);
-        
-        vm.prank(operator);
-        uint256 accrued = feeManager.accrueExpenseRatio(pool, poolAssets);
-        
-        uint256 expectedAccrued = (poolAssets * 100 * timeElapsed) / (10_000 * 365 days);
-        assertEq(accrued, expectedAccrued);
+        // Protocol fee is 200 bps + spv fee 100 bps = 300 bps
+        assertEq(fee, (amount * 300) / 10_000);
     }
     
     function testFuzz_TreasuryDeposit(uint256 amount) public {
@@ -543,5 +431,16 @@ contract FeeManagerTest is BaseTest {
         
         assertEq(feeManager.getTreasuryBalance(address(token)), amount);
     }
+    
+    function testFuzz_TransactionFeeCollection(uint256 amount) public {
+        vm.assume(amount > 0 && amount <= INITIAL_BALANCE);
+        
+        vm.startPrank(operator);
+        token.approve(address(feeManager), amount);
+        feeManager.collectTransactionFee(pool, address(token), amount, "deposit");
+        vm.stopPrank();
+        
+        assertEq(feeManager.getTransactionFees(pool, address(token)), amount);
+        assertEq(feeManager.getTreasuryBalance(address(token)), amount);
+    }
 }
-

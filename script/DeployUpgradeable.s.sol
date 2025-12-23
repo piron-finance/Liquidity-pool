@@ -329,17 +329,12 @@ contract DeployUpgradeable is Script {
         StableYieldManager(contracts.stableYieldManagerProxy).setManagedPoolFactory(contracts.managedPoolFactoryProxy);
         console.log("ManagedPoolFactory registered in StableYieldManager");
         
-        // Grant SPV_ROLE to admin on StableYieldManager (needed for addInstrument, matureInstrument, etc.)
-        // StableYieldManager uses its own AccessControl, so roles must be granted on it directly
-        StableYieldManager(contracts.stableYieldManagerProxy).grantRole(accessMgr.SPV_ROLE(), config.admin);
-        console.log("SPV_ROLE granted to admin on StableYieldManager");
+        // Note: SPV_ROLE and OPERATOR_ROLE for StableYieldManager operations are granted 
+        // via the shared AccessManager, not on StableYieldManager itself
+        // These roles were already granted to admin during AccessManager setup
+        console.log("SPV and OPERATOR roles available via AccessManager");
         
-        // Grant OPERATOR_ROLE to admin on StableYieldManager (needed for collectMonthlyFees, allocateToSPV, etc.)
-        // StableYieldManager uses its own AccessControl, so roles must be granted on it directly
-        StableYieldManager(contracts.stableYieldManagerProxy).grantRole(accessMgr.OPERATOR_ROLE(), config.admin);
-        console.log("OPERATOR_ROLE granted to admin on StableYieldManager");
-        
-        // Set managers in FeeManager (so it knows who can call setDefaultExpenseRatio)
+        // Set managers in FeeManager
         FeeManager(contracts.feeManager).setManagers(
             contracts.managerProxy,
             contracts.stableYieldManagerProxy,
@@ -376,19 +371,18 @@ contract DeployUpgradeable is Script {
         // TODO: Add USDT address when available for this network
         console.log("NOTE: Add USDT approval before mainnet deployment");
         
-        // Configure fee manager
+        // Configure fee manager (transaction-only fee model)
         FeeManager feeManager = FeeManager(contracts.feeManager);
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
-            protocolFee: 0,          // 0% protocol fee (reserved for future use)
-            spvFee: 100,            // 1.0% SPV fee
-            managementFee: 200,     // 2.0% annual management fee
-            performanceFee: 0,      // 0% performance fee (reserved for future use)
+            protocolFee: 200,        // 2.0% protocol fee (transaction fee on deposits/withdrawals)
+            spvFee: 100,             // 1.0% SPV fee
+            performanceFee: 100,     // 1.0% performance fee (10% of profits)
             earlyWithdrawalFee: 100, // 1.0% early withdrawal fee
-            refundGasFee: 10,       // 0.1% refund gas fee
+            refundGasFee: 10,        // 0.1% refund gas fee
             isActive: true
         });
         feeManager.setDefaultFeeConfig(feeConfig);
-        console.log("Default fee configuration set");
+        console.log("Default fee configuration set (transaction-only model)");
         
         console.log("Upgradeable system configuration complete!");
     }
