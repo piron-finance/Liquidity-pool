@@ -155,9 +155,8 @@ contract StableYieldPool is
         // Then: netAssets = grossAssets * (1 - feeRate/10000)
         // So: grossAssets = netAssets / (1 - feeRate/10000) = netAssets * 10000 / (10000 - feeRate)
         
-        // Get fee config to calculate exact gross amount needed
-        IFeeManager.FeeConfig memory feeConfig = IFeeManager(stableYieldManager.feeManager()).getPoolFeeConfig(address(this));
-        uint256 protocolFeeRate = feeConfig.protocolFee; // in basis points
+        // Get fee rate to calculate exact gross amount needed
+        uint256 protocolFeeRate = stableYieldManager.getPoolTransactionFee(address(this));
         
         assets = (netAssetsNeeded * 10000) / (10000 - protocolFeeRate);
         
@@ -192,9 +191,7 @@ contract StableYieldPool is
         
         _enforceHoldingPeriod(owner);
 
-        IFeeManager.FeeConfig memory feeConfig = IFeeManager(stableYieldManager.feeManager()).getPoolFeeConfig(address(this));
-        uint256 protocolFeeRate = feeConfig.protocolFee;
-        
+        uint256 protocolFeeRate = stableYieldManager.getPoolTransactionFee(address(this));
         uint256 grossWithdrawalNeeded = (assets * 10000) / (10000 - protocolFeeRate);
         
         uint256 navPerShare = stableYieldManager.calculateNAVPerShare(address(this));

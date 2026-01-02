@@ -11,8 +11,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "./AccessManager.sol";
 import "./interfaces/IPoolRegistry.sol";
-import "./interfaces/IFeeManager.sol";
-import "./escrows/StableYieldEscrow.sol";
+import "./escrows/StableYieldEscrow.sol"; 
 import "./types/IStableYieldTypes.sol";
 import "./libraries/StableYieldNAVLibrary.sol";
 import "./libraries/StableYieldInstrumentLibrary.sol";
@@ -36,8 +35,12 @@ contract StableYieldManager is
     AccessManager public accessManager;
     IPoolRegistry public registry;
     address public timelockController;
-    address public feeManager;
     address public managedPoolFactory;
+    
+    uint256 public constant BASIS_POINTS = 10000;
+    uint256 public constant MAX_TRANSACTION_FEE = 500; // 5% max
+    uint256 public defaultTransactionFeeBps; // Default fee in basis points (e.g., 300 = 3%)
+    mapping(address => uint256) public poolTransactionFeeBps; // Per-pool fee override
     
     uint256 public version;
 
@@ -70,7 +73,8 @@ contract StableYieldManager is
     ////////////////////////////////////////////////////////////////////////////////
 
     event PoolRegistered( address indexed poolAddress, address indexed escrowAddress, address indexed asset, string name );
-    event FeeManagerUpdated(address oldFeeManager, address newFeeManager);
+    event TransactionFeeConfigUpdated(uint256 oldFeeBps, uint256 newFeeBps);
+    event PoolTransactionFeeUpdated(address indexed pool, uint256 feeBps);
     event TransactionFeeCollected(address indexed poolAddress, string feeType, uint256 transactionAmount, uint256 feeAmount);
     
     event InstrumentPurchased( address indexed poolAddress, uint256 indexed instrumentId, IStableYieldTypes.InstrumentType instrumentType, uint256 purchasePrice, uint256 faceValue, uint256 maturityDate );
@@ -136,13 +140,13 @@ contract StableYieldManager is
      * @param accessManager_ AccessManager contract address
      * @param registry_ PoolRegistry contract address
      * @param timelockController_ Timelock controller address
-     * @param feeManager_ FeeManager contract address
+     * @param defaultFeeBps_ Default transaction fee in basis points
      */
     function initialize(
         address accessManager_,
         address registry_,
         address timelockController_,
-        address feeManager_
+        uint256 defaultFeeBps_
     ) public virtual initializer {
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
@@ -150,12 +154,12 @@ contract StableYieldManager is
         require(accessManager_ != address(0), "PoolManager/invalid access manager");
         require(registry_ != address(0), "PoolManager/invalid registry");
         require(timelockController_ != address(0), "PoolManager/invalid timelock");
-        require(feeManager_ != address(0), "StableYieldManager/invalid fee manager");
+        require(defaultFeeBps_ <= MAX_TRANSACTION_FEE, "StableYieldManager/fee too high");
 
         accessManager = AccessManager(accessManager_);
         registry = IPoolRegistry(registry_);
         timelockController = timelockController_;
-        feeManager = feeManager_;
+        defaultTransactionFeeBps = defaultFeeBps_;
         version = 1;
         
         defaultMinAbsoluteReserve = 0;
@@ -231,16 +235,54 @@ contract StableYieldManager is
 
 
     /**
-     * @notice Update fee manager contract (admin only)
-     * @param newFeeManager New fee manager address
+     * @notice Set default transaction fee (admin only)
+     * @param feeBps Fee in basis points (e.g., 300 = 3%)
      */
-    function setFeeManager(address newFeeManager) external onlyRole(accessManager.OPERATOR_ROLE()) {
-        require(newFeeManager != address(0), "StableYieldManager/invalid fee manager");
+    function setDefaultTransactionFee(uint256 feeBps) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(feeBps <= MAX_TRANSACTION_FEE, "StableYieldManager/fee too high");
         
-        address oldFeeManager = feeManager;
-        feeManager = newFeeManager;
+        uint256 oldFee = defaultTransactionFeeBps;
+        defaultTransactionFeeBps = feeBps;
         
-        emit FeeManagerUpdated(oldFeeManager, newFeeManager);
+        emit TransactionFeeConfigUpdated(oldFee, feeBps);
+    }
+
+    /**
+     * @notice Set transaction fee for a specific pool (admin only)
+     * @param poolAddress Pool address
+     * @param feeBps Fee in basis points (0 = use default)
+     */
+    function setPoolTransactionFee(address poolAddress, uint256 feeBps) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) {
+        require(feeBps <= MAX_TRANSACTION_FEE, "StableYieldManager/fee too high");
+        
+        poolTransactionFeeBps[poolAddress] = feeBps;
+        
+        emit PoolTransactionFeeUpdated(poolAddress, feeBps);
+    }
+
+    /**
+     * @notice Get transaction fee for a pool (returns pool-specific or default)
+     * @param poolAddress Pool address
+     * @return feeBps Fee in basis points
+     */
+    function getPoolTransactionFee(address poolAddress) public view returns (uint256 feeBps) {
+        feeBps = poolTransactionFeeBps[poolAddress];
+        if (feeBps == 0) {
+            feeBps = defaultTransactionFeeBps;
+        }
+        return feeBps;
+    }
+
+    /**
+     * @notice Calculate transaction fee for an amount
+     * @param poolAddress Pool address
+     * @param amount Amount to calculate fee on
+     * @return fee Fee amount
+     */
+    function calculateTransactionFee(address poolAddress, uint256 amount) public view returns (uint256 fee) {
+        if (amount == 0) return 0;
+        uint256 feeBps = getPoolTransactionFee(poolAddress);
+        return (amount * feeBps) / BASIS_POINTS;
     }
 
     /**
@@ -347,7 +389,7 @@ contract StableYieldManager is
         require(receiver != address(0), "StableYieldManager/invalid receiver");
          
         // Calculate transaction fee on deposit
-        uint256 transactionFee = IFeeManager(feeManager).calculateProtocolFee(poolAddress, amount);
+        uint256 transactionFee = calculateTransactionFee(poolAddress, amount);
         uint256 netDepositAmount = amount - transactionFee;
         
         uint256 navPerShare = calculateNAVPerShare(poolAddress);
@@ -398,7 +440,7 @@ contract StableYieldManager is
         uint256 navPerShare = calculateNAVPerShare(poolAddress);
         uint256 grossWithdrawalValue = (shares * navPerShare) / 1e18;
         
-        uint256 transactionFee = IFeeManager(feeManager).calculateProtocolFee(poolAddress, grossWithdrawalValue);
+        uint256 transactionFee = calculateTransactionFee(poolAddress, grossWithdrawalValue);
         withdrawalValue = grossWithdrawalValue - transactionFee;
         
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);

@@ -72,12 +72,6 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         _;
     }
     
-    modifier onlyRoleWithDelay(bytes32 role) {
-        require(accessManager.hasRole(role, msg.sender), "Manager/access denied");
-        require(accessManager.canActWithDelay(role, msg.sender), "Manager/role delay not met");
-        _;
-    }
-    
     modifier whenNotPaused {
         require(!accessManager.paused(), "Manager/paused");
         _;
