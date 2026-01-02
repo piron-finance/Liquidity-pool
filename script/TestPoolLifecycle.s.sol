@@ -33,6 +33,7 @@ contract TestPoolLifecycle is Script {
     
     address poolAddress;
     address escrowAddress;
+    bytes32 pendingAllocationId;
     
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -126,17 +127,15 @@ contract TestPoolLifecycle is Script {
     }
     
     function _allocateToSPV() internal {
-        console.log("\n[STEP 3] Allocating Funds to SPV...");
+        console.log("\n[STEP 3] Creating Pending Allocation...");
         
-        uint256 allocationAmount = 5000e6; // 5,000 USDC for investment
+        uint256 allocationAmount = 5000e6;
         
-        // Check reserves before
         StableYieldEscrow escrow = StableYieldEscrow(escrowAddress);
         uint256 reservesBefore = escrow.getPoolReserves();
         console.log("  Reserves before:", reservesBefore);
         
-        // Allocate to SPV (admin has OPERATOR_ROLE)
-        escrow.allocateToSPV(ADMIN, allocationAmount);
+        pendingAllocationId = stableYieldMgr.createPendingAllocation(poolAddress, ADMIN, allocationAmount);
         
         uint256 reservesAfter = escrow.getPoolReserves();
         console.log("  Allocated to SPV:", allocationAmount);
@@ -148,15 +147,15 @@ contract TestPoolLifecycle is Script {
     function _addInstrument() internal {
         console.log("\n[STEP 4] Adding Instrument...");
         
-        // Admin acts as SPV and has SPV_ROLE
         stableYieldMgr.addInstrument(
             poolAddress,
+            pendingAllocationId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
-            4500e6, // Purchase price (10% discount)
-            5000e6, // Face value
-            block.timestamp + 90 days, // Maturity
-            0, // No coupon for discounted
-            0  // No frequency for discounted
+            4500e6,
+            5000e6,
+            block.timestamp + 90 days,
+            0,
+            0
         );
         
         console.log("  Instrument added:");

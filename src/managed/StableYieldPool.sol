@@ -192,18 +192,11 @@ contract StableYieldPool is
         
         _enforceHoldingPeriod(owner);
 
-        // Calculate shares needed to get exact asset amount after fees
-        // User wants 'assets' net amount, so we need to work backwards:
-        // If netWithdrawal = grossWithdrawal - fee, and fee = grossWithdrawal * feeRate
-        // Then: assets = grossWithdrawal * (1 - feeRate)
-        // So: grossWithdrawal = assets / (1 - feeRate) = assets * 10000 / (10000 - feeRate)
-        
         IFeeManager.FeeConfig memory feeConfig = IFeeManager(stableYieldManager.feeManager()).getPoolFeeConfig(address(this));
-        uint256 protocolFeeRate = feeConfig.protocolFee; // in basis points
+        uint256 protocolFeeRate = feeConfig.protocolFee;
         
         uint256 grossWithdrawalNeeded = (assets * 10000) / (10000 - protocolFeeRate);
         
-        // Convert gross withdrawal amount to shares
         uint256 navPerShare = stableYieldManager.calculateNAVPerShare(address(this));
         shares = (grossWithdrawalNeeded * 1e18) / navPerShare;
 
@@ -211,10 +204,11 @@ contract StableYieldPool is
             _spendAllowance(owner, msg.sender, shares);
         }
 
-        (uint256 actualShares, uint256 withdrawalValue) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
+        (uint256 actualShares, uint256 withdrawalValue, bool immediate) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
         
-        if (actualShares > 0) {
-            _burn(owner, actualShares);
+        _burn(owner, actualShares);
+        
+        if (immediate) {
             escrow.withdraw(receiver, withdrawalValue);
             emit Withdraw(msg.sender, receiver, owner, withdrawalValue, actualShares);
         } else {
@@ -242,12 +236,12 @@ contract StableYieldPool is
             _spendAllowance(owner, msg.sender, shares);
         }
 
-
-      ( uint256 actualShares, uint256 withdrawalValue) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
+        (uint256 actualShares, uint256 withdrawalValue, bool immediate) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
         
-        if (actualShares > 0) {
-            _burn(owner, actualShares);
-                escrow.withdraw(receiver, withdrawalValue);
+        _burn(owner, actualShares);
+        
+        if (immediate) {
+            escrow.withdraw(receiver, withdrawalValue);
             emit Withdraw(msg.sender, receiver, owner, withdrawalValue, actualShares);
         } else {
             emit WithdrawalRequested(owner, shares, withdrawalValue);
@@ -361,6 +355,21 @@ contract StableYieldPool is
         }
     }
 
+    /**
+     * @notice Override ERC20 _update to track holding period on transfers
+     * @dev Ensures recipients of transferred shares must also wait 30 days
+     * @param from Sender address
+     * @param to Recipient address
+     * @param value Amount transferred
+     */
+    function _update(address from, address to, uint256 value) internal override {
+        super._update(from, to, value);
+        
+        if (to != address(0) && from != address(0)) {
+            lastDepositTime[to] = block.timestamp;
+        }
+    }
+
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// ADMIN FUNCTIONS ////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
@@ -395,11 +404,11 @@ contract StableYieldPool is
         require(receiver != address(0), "StableYieldPool/invalid receiver");
         require(owner != address(0), "StableYieldPool/invalid owner");
 
-        // Skip holding period check in emergency
-        (uint256 actualShares, uint256 withdrawalValue) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
+        (uint256 actualShares, uint256 withdrawalValue, bool immediate) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
         
-        if (actualShares > 0) {
-            _burn(owner, actualShares);
+        _burn(owner, actualShares);
+        
+        if (immediate) {
             escrow.withdraw(receiver, withdrawalValue);
             emit Withdraw(msg.sender, receiver, owner, withdrawalValue, actualShares);
         } else {

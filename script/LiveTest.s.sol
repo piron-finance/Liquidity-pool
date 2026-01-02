@@ -55,17 +55,16 @@ contract LiveTest is Script {
         console.log("Deposited: 10000e6");
         console.log("Shares received:", shares);
         
-        console.log("\n=== STEP 3: ALLOCATE TO SPV ===");
-        StableYieldEscrow(escrow).allocateToSPV(admin, 5000e6);
-        console.log("Allocated 5000e6 to SPV");
+        console.log("\n=== STEP 3: CREATE PENDING ALLOCATION ===");
+        StableYieldManager manager = StableYieldManager(STABLE_YIELD_MANAGER);
+        AccessManager accessMgr = AccessManager(ACCESS_MANAGER);
+        
+        bytes32 allocationId = manager.createPendingAllocation(pool, admin, 5000e6);
+        console.log("Created pending allocation for 5000e6");
         
         console.log("\n=== STEP 4: ADD INSTRUMENT ===");
         
-        // Check SPV_ROLE via AccessManager (not on StableYieldManager directly)
-        AccessManager accessMgr = AccessManager(ACCESS_MANAGER);
         bytes32 spvRole = accessMgr.SPV_ROLE();
-        StableYieldManager manager = StableYieldManager(STABLE_YIELD_MANAGER);
-        
         bool hasSpvRole = accessMgr.hasRole(spvRole, admin);
         console.log("Admin has SPV_ROLE via AccessManager:", hasSpvRole);
         
@@ -76,6 +75,7 @@ contract LiveTest is Script {
         
         manager.addInstrument(
             pool,
+            allocationId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
             4500e6,
             5000e6,

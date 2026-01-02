@@ -53,6 +53,16 @@ contract StableYieldManager is
     uint256 public constant MAX_APY = 5000; // 50% max APY
     uint256 public constant SECONDS_PER_YEAR = 365 days;
     uint256 public constant RESERVE_RATIO = 1000; // 10%
+    uint256 public constant ALLOCATION_EXPIRY = 10 days;
+
+    mapping(address => uint256) public totalSPVAllocations;
+    mapping(address => mapping(address => uint256)) public poolToSPVAllocations;
+    mapping(bytes32 => IStableYieldTypes.PendingAllocation) public pendingAllocations;
+    mapping(address => bytes32[]) public poolPendingAllocationIds;
+    mapping(address => IStableYieldTypes.ReserveConfig) public poolReserveConfigs;
+
+    uint256 public defaultMinAbsoluteReserve;
+    uint256 public defaultReserveRatioBps;
     
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -78,6 +88,14 @@ contract StableYieldManager is
     
     event ReservesRebalanced( address indexed poolAddress, uint256 newReserve, uint256 totalAUM);  
     event UserPositionsCleanedUp( address indexed poolAddress, address indexed user, uint256 removedCount );
+
+    event AllocationCreated(address indexed pool, address indexed spv, bytes32 indexed allocationId, uint256 amount, uint256 timestamp);
+    event AllocationInvested(address indexed pool, bytes32 indexed allocationId, uint256 instrumentId, uint256 timestamp);
+    event AllocationReturned(address indexed pool, bytes32 indexed allocationId, uint256 returnedAmount, uint256 timestamp);
+    event AllocationMatured(address indexed pool, uint256 indexed instrumentId, bytes32 allocationId, uint256 maturedAmount, uint256 timestamp);
+    event AllocationCancelled(address indexed pool, bytes32 indexed allocationId, uint256 amount, uint256 timestamp);
+    event ReserveConfigUpdated(address indexed pool, uint256 minAbsoluteReserve, uint256 reserveRatioBps);
+    event PoolReadyForAllocation(address indexed pool, uint256 availableAmount, uint256 timestamp);
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// MODIFIERS ///////////////////////////////////
@@ -140,6 +158,8 @@ contract StableYieldManager is
         feeManager = feeManager_;
         version = 1;
         
+        defaultMinAbsoluteReserve = 0;
+        defaultReserveRatioBps = 1000;
     }
 
     /**
@@ -224,27 +244,81 @@ contract StableYieldManager is
     }
 
     /**
-     * @notice Allocate funds to SPV for instrument purchases (Operator only)
+     * @notice Create pending allocation for SPV (Operator only)
+     * @dev SPV must call addInstrument with returned allocationId to complete
      * @param poolAddress Pool address
      * @param spvAddress SPV address
      * @param amount Amount to allocate
+     * @return allocationId Unique identifier for this allocation
      */
-    function allocateToSPV(
+    function createPendingAllocation(
         address poolAddress,
         address spvAddress,
         uint256 amount
-    ) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) nonReentrant {
+    ) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) nonReentrant returns (bytes32 allocationId) {
         require(spvAddress != address(0), "StableYieldManager/invalid SPV");
         require(amount > 0, "StableYieldManager/invalid amount");
         
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
         
-        require(escrow.getCashBuffer() >= amount, "StableYieldManager/insufficient cash buffer");
+        (bool ready, uint256 available) = isReadyForAllocation(poolAddress);
+        require(ready && available >= amount, "StableYieldManager/insufficient allocatable funds");
+        
+        allocationId = keccak256(abi.encodePacked(
+            poolAddress,
+            spvAddress,
+            amount,
+            block.timestamp,
+            poolInstrumentCount[poolAddress]
+        ));
+        
+        require(pendingAllocations[allocationId].createdAt == 0, "StableYieldManager/allocation exists");
+        
+        pendingAllocations[allocationId] = IStableYieldTypes.PendingAllocation({
+            allocationId: allocationId,
+            pool: poolAddress,
+            spv: spvAddress,
+            amount: amount,
+            createdAt: block.timestamp,
+            expiresAt: block.timestamp + ALLOCATION_EXPIRY,
+            status: IStableYieldTypes.AllocationStatus.PENDING
+        });
+        
+        poolPendingAllocationIds[poolAddress].push(allocationId);
+        
+        totalSPVAllocations[spvAddress] += amount;
+        poolToSPVAllocations[poolAddress][spvAddress] += amount;
         
         escrow.allocateToSPV(spvAddress, amount);
         
+        emit AllocationCreated(poolAddress, spvAddress, allocationId, amount, block.timestamp);
+        
         _triggerNAVUpdate(poolAddress, "spv_allocation");
+        
+        return allocationId;
+    }
+
+    /**
+     * @notice Cancel expired or unused pending allocation
+     * @dev SPV must return funds before calling this
+     * @param allocationId Allocation to cancel
+     */
+    function cancelPendingAllocation(
+        bytes32 allocationId
+    ) external onlyRole(accessManager.OPERATOR_ROLE()) nonReentrant {
+        IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
+        
+        require(allocation.createdAt > 0, "StableYieldManager/allocation not found");
+        require(allocation.status == IStableYieldTypes.AllocationStatus.PENDING, "StableYieldManager/not pending");
+        require(block.timestamp >= allocation.expiresAt, "StableYieldManager/not expired");
+        
+        allocation.status = IStableYieldTypes.AllocationStatus.CANCELLED;
+        
+        totalSPVAllocations[allocation.spv] -= allocation.amount;
+        poolToSPVAllocations[allocation.pool][allocation.spv] -= allocation.amount;
+        
+        emit AllocationCancelled(allocation.pool, allocationId, allocation.amount, block.timestamp);
     }
 
    
@@ -302,16 +376,18 @@ contract StableYieldManager is
      * @param shares Number of shares to redeem
      * @param receiver Recipient of assets
      * @param owner Share owner
-     * @return actualShares Shares actually processed (0 if queued)
+     * @return actualShares Shares to burn (always equals input shares)
+     * @return withdrawalValue Net value after fees
+     * @return immediate True if funds transferred immediately, false if queued
      */
     function validateWithdrawal(
         address poolAddress,
         uint256 shares,
         address receiver,
         address owner
-    ) external  poolExists(poolAddress) ActivePool(poolAddress) nonReentrant returns (uint256 actualShares, uint256 withdrawalValue) {
+    ) external poolExists(poolAddress) ActivePool(poolAddress) nonReentrant returns (uint256 actualShares, uint256 withdrawalValue, bool immediate) {
         require(msg.sender == poolAddress, "StableYieldManager/invalid caller");
-         require(registry.isManagedPool(poolAddress), "StableYieldManager/invalid pool");
+        require(registry.isManagedPool(poolAddress), "StableYieldManager/invalid pool");
         require(shares > 0, "StableYieldManager/invalid shares");
         require(receiver != address(0), "StableYieldManager/invalid receiver");
         require(owner != address(0), "StableYieldManager/invalid owner");
@@ -334,12 +410,12 @@ contract StableYieldManager is
             }
             
             emit WithdrawalValidated(poolAddress, owner, shares, withdrawalValue, true);
-            return (shares, withdrawalValue);
+            return (shares, withdrawalValue, true);
         } else {
             _queueWithdrawal(poolAddress, owner, shares, withdrawalValue);
             
             emit WithdrawalValidated(poolAddress, owner, shares, withdrawalValue, false);
-            return (0, withdrawalValue); 
+            return (shares, withdrawalValue, false);
         }
     }
 
@@ -512,8 +588,10 @@ contract StableYieldManager is
     ////////////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice Add new instrument to pool (SPV attestation)
+     * @notice Add new instrument to pool with allocation linkage (SPV attestation)
+     * @dev Requires a pending allocation created via createPendingAllocation
      * @param poolAddress Pool address
+     * @param allocationId Pending allocation to link
      * @param instrumentType Type of instrument (DISCOUNTED or INTEREST_BEARING)
      * @param purchasePrice Amount paid for instrument
      * @param faceValue Maturity value
@@ -523,17 +601,26 @@ contract StableYieldManager is
      */
     function addInstrument(
         address poolAddress,
+        bytes32 allocationId,
         IStableYieldTypes.InstrumentType instrumentType,
         uint256 purchasePrice,
         uint256 faceValue,
         uint256 maturityDate,
         uint256 annualCouponRate,
-        uint8 couponFrequency // 0=T-bill, 2=semi-annual, 4=quarterly, 12=monthly
+        uint8 couponFrequency
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
-        StableYieldInstrumentLibrary.addInstrument(
-            pools[poolAddress],
-            poolInstruments[poolAddress],
-            poolInstrumentCount[poolAddress],
+        IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
+        
+        require(allocation.createdAt > 0, "StableYieldManager/allocation not found");
+        require(allocation.pool == poolAddress, "StableYieldManager/pool mismatch");
+        require(allocation.spv == msg.sender, "StableYieldManager/not allocation SPV");
+        require(allocation.status == IStableYieldTypes.AllocationStatus.PENDING, "StableYieldManager/not pending");
+        require(block.timestamp < allocation.expiresAt, "StableYieldManager/allocation expired");
+        require(purchasePrice <= allocation.amount, "StableYieldManager/exceeds allocation");
+        
+        _addInstrumentWithAllocation(
+            poolAddress,
+            allocationId,
             instrumentType,
             purchasePrice,
             faceValue,
@@ -541,13 +628,52 @@ contract StableYieldManager is
             annualCouponRate,
             couponFrequency
         );
+    }
+
+    function _addInstrumentWithAllocation(
+        address poolAddress,
+        bytes32 allocationId,
+        IStableYieldTypes.InstrumentType instrumentType,
+        uint256 purchasePrice,
+        uint256 faceValue,
+        uint256 maturityDate,
+        uint256 annualCouponRate,
+        uint8 couponFrequency
+    ) internal {
+        IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
+        
+        require(maturityDate > block.timestamp, "StableYieldManager/invalid maturity");
+        require(faceValue >= purchasePrice, "StableYieldManager/invalid face value");
+        
+        uint256 instrumentId = poolInstrumentCount[poolAddress];
+        
+        poolInstruments[poolAddress].push(IStableYieldTypes.InstrumentHolding({
+            instrumentType: instrumentType,
+            purchasePrice: purchasePrice,
+            faceValue: faceValue,
+            purchaseDate: block.timestamp,
+            maturityDate: maturityDate,
+            annualCouponRate: annualCouponRate,
+            couponFrequency: couponFrequency,
+            nextCouponDueDate: couponFrequency > 0 ? block.timestamp + (365 days / couponFrequency) : 0,
+            couponsPaid: 0,
+            isActive: true,
+            allocationId: allocationId
+        }));
+        
+        allocation.status = IStableYieldTypes.AllocationStatus.INVESTED;
         
         poolInstrumentCount[poolAddress]++;
+        
+        emit InstrumentPurchased(poolAddress, instrumentId, instrumentType, purchasePrice, faceValue, maturityDate);
+        emit AllocationInvested(poolAddress, allocationId, instrumentId, block.timestamp);
+        
         _triggerNAVUpdate(poolAddress, "instrument_added");
     }
 
     /**
-     * @notice Process matured instrument and remove from active tracking
+     * @notice Process matured instrument
+     * @dev SPV must first call receiveSPVLiquidity on escrow directly, then call this
      * @param poolAddress Pool address
      * @param instrumentId Instrument ID
      */
@@ -555,13 +681,132 @@ contract StableYieldManager is
         address poolAddress,
         uint256 instrumentId
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
-        StableYieldInstrumentLibrary.matureInstrument(
-            pools[poolAddress],
-            poolInstruments[poolAddress],
-            instrumentId
-        );
+        require(instrumentId < poolInstruments[poolAddress].length, "StableYieldManager/invalid instrument");
+        
+        IStableYieldTypes.InstrumentHolding storage instrument = poolInstruments[poolAddress][instrumentId];
+        require(instrument.isActive, "StableYieldManager/instrument not active");
+        require(block.timestamp >= instrument.maturityDate, "StableYieldManager/not matured");
+        
+        bytes32 allocationId = instrument.allocationId;
+        if (allocationId != bytes32(0)) {
+            IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
+            if (allocation.createdAt > 0) {
+                allocation.status = IStableYieldTypes.AllocationStatus.MATURED;
+                
+                if (totalSPVAllocations[allocation.spv] >= allocation.amount) {
+                    totalSPVAllocations[allocation.spv] -= allocation.amount;
+                }
+                if (poolToSPVAllocations[poolAddress][allocation.spv] >= allocation.amount) {
+                    poolToSPVAllocations[poolAddress][allocation.spv] -= allocation.amount;
+                }
+                
+                emit AllocationMatured(poolAddress, instrumentId, allocationId, instrument.faceValue, block.timestamp);
+            }
+        }
+        
+        uint256 realizedYield = instrument.faceValue > instrument.purchasePrice ? instrument.faceValue - instrument.purchasePrice : 0;
+        
+        emit InstrumentMatured(poolAddress, instrumentId, instrument.faceValue, realizedYield);
+        
+        _removeInstrument(poolAddress, instrumentId, "matured");
         
         _triggerNAVUpdate(poolAddress, "instrument_matured");
+    }
+
+    /**
+     * @notice Process matured instrument with fund return in one call
+     * @dev SPV transfers maturity proceeds which are pulled via safeTransferFrom
+     * @param poolAddress Pool address
+     * @param instrumentId Instrument ID
+     * @param maturityAmount Amount received at maturity
+     */
+    function matureInstrumentWithFunds(
+        address poolAddress,
+        uint256 instrumentId,
+        uint256 maturityAmount
+    ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
+        require(instrumentId < poolInstruments[poolAddress].length, "StableYieldManager/invalid instrument");
+        
+        IStableYieldTypes.InstrumentHolding storage instrument = poolInstruments[poolAddress][instrumentId];
+        require(instrument.isActive, "StableYieldManager/instrument not active");
+        require(block.timestamp >= instrument.maturityDate, "StableYieldManager/not matured");
+        require(maturityAmount > 0, "StableYieldManager/invalid amount");
+        
+        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
+        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
+        
+        IERC20 asset = IERC20(poolData.asset);
+        asset.safeTransferFrom(msg.sender, address(escrow), maturityAmount);
+        escrow.recordReceivedLiquidity(maturityAmount);
+        
+        bytes32 allocationId = instrument.allocationId;
+        if (allocationId != bytes32(0)) {
+            IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
+            if (allocation.createdAt > 0) {
+                allocation.status = IStableYieldTypes.AllocationStatus.MATURED;
+                
+                if (totalSPVAllocations[allocation.spv] >= allocation.amount) {
+                    totalSPVAllocations[allocation.spv] -= allocation.amount;
+                }
+                if (poolToSPVAllocations[poolAddress][allocation.spv] >= allocation.amount) {
+                    poolToSPVAllocations[poolAddress][allocation.spv] -= allocation.amount;
+                }
+                
+                emit AllocationMatured(poolAddress, instrumentId, allocationId, maturityAmount, block.timestamp);
+            }
+        }
+        
+        uint256 realizedYield = maturityAmount > instrument.purchasePrice ? maturityAmount - instrument.purchasePrice : 0;
+        
+        emit InstrumentMatured(poolAddress, instrumentId, instrument.faceValue, realizedYield);
+        
+        _removeInstrument(poolAddress, instrumentId, "matured");
+        
+        _triggerNAVUpdate(poolAddress, "instrument_matured");
+    }
+
+    /**
+     * @notice Return unused funds from a pending allocation
+     * @dev SPV must approve manager before calling
+     * @param allocationId Allocation to return funds for
+     * @param returnAmount Amount being returned
+     */
+    function returnUnusedFunds(
+        bytes32 allocationId,
+        uint256 returnAmount
+    ) external onlyRole(accessManager.SPV_ROLE()) nonReentrant {
+        IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
+        
+        require(allocation.createdAt > 0, "StableYieldManager/allocation not found");
+        require(allocation.spv == msg.sender, "StableYieldManager/not allocation SPV");
+        require(
+            allocation.status == IStableYieldTypes.AllocationStatus.PENDING ||
+            allocation.status == IStableYieldTypes.AllocationStatus.INVESTED,
+            "StableYieldManager/invalid status"
+        );
+        require(returnAmount > 0, "StableYieldManager/invalid amount");
+        
+        IStableYieldTypes.PoolData storage poolData = pools[allocation.pool];
+        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
+        
+        IERC20 asset = IERC20(poolData.asset);
+        asset.safeTransferFrom(msg.sender, address(escrow), returnAmount);
+        escrow.recordReceivedLiquidity(returnAmount);
+        
+        if (totalSPVAllocations[allocation.spv] >= returnAmount) {
+            totalSPVAllocations[allocation.spv] -= returnAmount;
+        }
+        if (poolToSPVAllocations[allocation.pool][allocation.spv] >= returnAmount) {
+            poolToSPVAllocations[allocation.pool][allocation.spv] -= returnAmount;
+        }
+        
+        if (allocation.status == IStableYieldTypes.AllocationStatus.PENDING && returnAmount >= allocation.amount) {
+            allocation.status = IStableYieldTypes.AllocationStatus.RETURNED;
+        }
+        
+        emit AllocationReturned(allocation.pool, allocationId, returnAmount, block.timestamp);
+        
+        _triggerNAVUpdate(allocation.pool, "funds_returned");
     }
 
     /**
@@ -719,6 +964,42 @@ contract StableYieldManager is
     }
 
     /**
+     * @notice Set default reserve configuration for new pools
+     * @param minAbsoluteReserve Minimum reserve floor
+     * @param reserveRatioBps Reserve ratio in basis points
+     */
+    function setDefaultReserveConfig(
+        uint256 minAbsoluteReserve,
+        uint256 reserveRatioBps
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(reserveRatioBps <= 5000, "StableYieldManager/ratio too high");
+        
+        defaultMinAbsoluteReserve = minAbsoluteReserve;
+        defaultReserveRatioBps = reserveRatioBps;
+    }
+
+    /**
+     * @notice Set reserve configuration for a specific pool
+     * @param poolAddress Pool to configure
+     * @param minAbsoluteReserve Minimum reserve floor in pool asset decimals
+     * @param reserveRatioBps Reserve ratio in basis points
+     */
+    function setPoolReserveConfig(
+        address poolAddress,
+        uint256 minAbsoluteReserve,
+        uint256 reserveRatioBps
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) {
+        require(reserveRatioBps <= 5000, "StableYieldManager/ratio too high");
+        
+        poolReserveConfigs[poolAddress] = IStableYieldTypes.ReserveConfig({
+            minAbsoluteReserve: minAbsoluteReserve,
+            reserveRatioBps: reserveRatioBps
+        });
+        
+        emit ReserveConfigUpdated(poolAddress, minAbsoluteReserve, reserveRatioBps);
+    }
+
+    /**
      * @notice Rebalance pool reserves to maintain target ratio(note: this function will be used for porion v1.2)
      * @dev Coordinates with SPV to liquidate instruments or invest excess cash
      * @param poolAddress Pool to rebalance
@@ -801,6 +1082,42 @@ contract StableYieldManager is
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @notice Check if pool is ready for SPV allocation
+     * @param poolAddress Pool to check
+     * @return ready True if pool has sufficient reserves above threshold
+     * @return availableAmount Amount available for allocation
+     */
+    function isReadyForAllocation(address poolAddress) public view poolExists(poolAddress) returns (bool ready, uint256 availableAmount) {
+        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
+        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
+        
+        uint256 currentReserves = escrow.getPoolReserves();
+        uint256 totalNAV = calculatePoolNAV(poolAddress);
+        
+        IStableYieldTypes.ReserveConfig storage config = poolReserveConfigs[poolAddress];
+        uint256 minReserve = config.minAbsoluteReserve;
+        uint256 ratioBps = config.reserveRatioBps;
+        
+        if (minReserve == 0 && ratioBps == 0) {
+            minReserve = defaultMinAbsoluteReserve;
+            ratioBps = defaultReserveRatioBps;
+        }
+        
+        uint256 ratioBasedReserve = (totalNAV * ratioBps) / 10000;
+        uint256 requiredReserve = minReserve > ratioBasedReserve ? minReserve : ratioBasedReserve;
+        
+        if (currentReserves > requiredReserve) {
+            availableAmount = currentReserves - requiredReserve;
+            ready = true;
+        } else {
+            availableAmount = 0;
+            ready = false;
+        }
+        
+        return (ready, availableAmount);
+    }
 
     /**
      * @notice Get pool data
@@ -917,11 +1234,62 @@ contract StableYieldManager is
             return 1e18; 
         }      
         
-        // Calculate NAV per share: (totalNAV * 1e18) / totalShares
-        // totalNAV is in asset decimals, totalShares is raw count
-        // Result is normalized to 1e18 precision
         return (totalNAV * 1e18) / totalShares;
     }
+
+    /**
+     * @notice Get pending allocation details
+     */
+    function getPendingAllocation(bytes32 allocationId) external view returns (IStableYieldTypes.PendingAllocation memory) {
+        return pendingAllocations[allocationId];
+    }
+
+    /**
+     * @notice Get all pending allocation IDs for a pool
+     */
+    function getPoolPendingAllocations(address poolAddress) external view returns (bytes32[] memory) {
+        return poolPendingAllocationIds[poolAddress];
+    }
+
+    /**
+     * @notice Get total allocation to SPV across all pools
+     */
+    function getTotalSPVAllocation(address spvAddress) external view returns (uint256) {
+        return totalSPVAllocations[spvAddress];
+    }
+
+    /**
+     * @notice Get allocation from specific pool to SPV
+     */
+    function getPoolToSPVAllocation(address poolAddress, address spvAddress) external view returns (uint256) {
+        return poolToSPVAllocations[poolAddress][spvAddress];
+    }
+
+    /**
+     * @notice Get reserve configuration for a pool
+     */
+    function getPoolReserveConfig(address poolAddress) external view returns (IStableYieldTypes.ReserveConfig memory) {
+        IStableYieldTypes.ReserveConfig storage config = poolReserveConfigs[poolAddress];
         
-    
+        if (config.minAbsoluteReserve == 0 && config.reserveRatioBps == 0) {
+            return IStableYieldTypes.ReserveConfig({
+                minAbsoluteReserve: defaultMinAbsoluteReserve,
+                reserveRatioBps: defaultReserveRatioBps
+            });
+        }
+        
+        return config;
+    }
+
+    /**
+     * @notice Check pool allocation readiness and emit event if ready
+     * @dev Can be called by anyone to signal pool readiness
+     */
+    function checkAndEmitPoolReadiness(address poolAddress) external poolExists(poolAddress) {
+        (bool ready, uint256 available) = isReadyForAllocation(poolAddress);
+        
+        if (ready && available > 0) {
+            emit PoolReadyForAllocation(poolAddress, available, block.timestamp);
+        }
+    }
 }

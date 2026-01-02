@@ -88,4 +88,13 @@ interface IPoolRegistry {
     function getStableYieldPoolAtIndex(uint256 index) external view returns (address);
     
     function getManagedPoolAtIndex(uint256 index) external view returns (address);
+    
+    function registerLockedPool(
+        address poolAddress,
+        address escrowAddress,
+        address asset,
+        string memory name
+    ) external;
+    function totalLockedPools() external view returns (uint256);
+    function getLockedPoolAtIndex(uint256 index) external view returns (address);
 } 

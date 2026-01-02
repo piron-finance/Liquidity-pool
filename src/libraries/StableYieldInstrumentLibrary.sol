@@ -93,7 +93,8 @@ library StableYieldInstrumentLibrary {
             couponFrequency: couponFrequency,
             nextCouponDueDate: nextCouponDate,
             couponsPaid: 0,
-            isActive: true
+            isActive: true,
+            allocationId: bytes32(0)
         }));
         
         instrumentId = instruments.length - 1;

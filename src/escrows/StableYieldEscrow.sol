@@ -36,12 +36,16 @@ contract StableYieldEscrow is
     uint256 public version;
 
     string public poolName;
- 
-    /// @notice Pool reserves available for investments and withdrawals (NAV component)
+
     uint256 public poolReserves;
 
-    /// @notice Transaction fees collected (NOT part of NAV)
-    uint256 public transactionFees;
+    struct FeeAccounting {
+        uint256 accrued;
+        uint256 total;
+    }
+
+    FeeAccounting private fees;
+
 
     bool public emergencyWithdrawalEnabled;
 
@@ -186,7 +190,7 @@ contract StableYieldEscrow is
      * @param to Recipient address
      * @param amount Amount to withdraw
      */
-    function withdraw(
+    function withdraw( // where is fee collection??
         address to,
         uint256 amount
     ) external onlyStableYieldPoolOrManager nonReentrant {
@@ -214,13 +218,13 @@ contract StableYieldEscrow is
     ) external onlyStableYieldPoolOrManager {
         require(totalAmount == reserveAmount + transactionFee, "StableYieldEscrow/allocation mismatch");
         
-        // Verify tokens were received
         uint256 currentBalance = asset.balanceOf(address(this));
-        uint256 expectedTotal = poolReserves + transactionFees + totalAmount;
+        uint256 expectedTotal = poolReserves + fees.accrued + totalAmount;
         require(currentBalance >= expectedTotal, "StableYieldEscrow/insufficient balance");
         
         poolReserves += reserveAmount;
-        transactionFees += transactionFee;
+        fees.accrued += transactionFee;
+        fees.total += transactionFee;
         
         emit FundsAllocated(reserveAmount, transactionFee);
     }
@@ -235,7 +239,8 @@ contract StableYieldEscrow is
         require(poolReserves >= transactionFee, "StableYieldEscrow/insufficient reserves");
         
         poolReserves -= transactionFee;
-        transactionFees += transactionFee;
+        fees.accrued += transactionFee;
+        fees.total += transactionFee;
     }
 
     /**
@@ -244,10 +249,10 @@ contract StableYieldEscrow is
      */
     function transferFeesToTreasury(address treasury) external onlyOperator nonReentrant {
         require(treasury != address(0), "StableYieldEscrow/invalid treasury");
-        require(transactionFees > 0, "StableYieldEscrow/no fees to transfer");
+        require(fees.accrued > 0, "StableYieldEscrow/no fees to transfer");
         
-        uint256 feeAmount = transactionFees;
-        transactionFees = 0;
+        uint256 feeAmount = fees.accrued;
+        fees.accrued = 0;
         
         asset.safeTransfer(treasury, feeAmount);
         
@@ -279,13 +284,34 @@ contract StableYieldEscrow is
 
     
     /**
-     * @notice Receive liquidity back from SPV
+     * @notice Receive liquidity back from SPV (SPV calls directly)
+     * @dev SPV must approve escrow before calling
      * @param amount Amount received
      */
-    function receiveSPVLiquidity(uint256 amount) external onlyOperator nonReentrant {
+    function receiveSPVLiquidity(uint256 amount) external nonReentrant {
+        require(
+            msg.sender == stableYieldManager ||
+            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) ||
+            accessManager.hasRole(accessManager.SPV_ROLE(), msg.sender),
+            "StableYieldEscrow/not authorized"
+        );
         require(amount > 0, "StableYieldEscrow/invalid amount");
         
         asset.safeTransferFrom(msg.sender, address(this), amount);
+        poolReserves += amount;
+        
+        emit SPVLiquidityReceived(msg.sender, amount, getCashBuffer());
+    }
+
+    /**
+     * @notice Record liquidity received from SPV (when transfer done externally)
+     * @dev Called by StableYieldManager after transferring funds directly to escrow
+     * @param amount Amount received
+     */
+    function recordReceivedLiquidity(uint256 amount) external {
+        require(msg.sender == stableYieldManager, "StableYieldEscrow/only manager");
+        require(amount > 0, "StableYieldEscrow/invalid amount");
+        
         poolReserves += amount;
         
         emit SPVLiquidityReceived(msg.sender, amount, getCashBuffer());
@@ -301,7 +327,7 @@ contract StableYieldEscrow is
      *      This is a computed value, not stored state
      */
     function getCashBuffer() public view returns (uint256) {
-        return poolReserves + transactionFees;
+        return poolReserves + fees.accrued;
     }
 
     /**
@@ -314,15 +340,15 @@ contract StableYieldEscrow is
     /**
      * @notice Get collected transaction fees
      */
-    function getTransactionFees() external view returns (uint256) {
-        return transactionFees;
+    function getAccruedFees() external view returns (uint256) {
+        return fees.accrued;
     }
 
     /**
      * @notice Get total collected fees 
      */
-    function getTotalFees() external view returns (uint256) {
-        return transactionFees;
+    function getTotalFeesCollected() external view returns (uint256) {
+        return fees.total;
     }
 
     /**
@@ -379,10 +405,10 @@ contract StableYieldEscrow is
         } else {
             uint256 remaining = amount - poolReserves;
             poolReserves = 0;
-            if (transactionFees >= remaining) {
-                transactionFees -= remaining;
+            if (fees.accrued >= remaining) {
+                fees.accrued -= remaining;
             } else {
-                transactionFees = 0;
+                fees.accrued = 0;
             }
         }
 

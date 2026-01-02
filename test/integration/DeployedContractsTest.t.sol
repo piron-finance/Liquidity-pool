@@ -192,12 +192,12 @@ contract DeployedContractsTest is Test {
         
         console.log("  Initial deposit:", depositAmount);
         
-        // Allocate to SPV
+        // Create pending allocation via manager
         StableYieldEscrow escrow = StableYieldEscrow(escrowAddress);
         uint256 allocationAmount = 5000e6;
         uint256 reservesBefore = escrow.getPoolReserves();
         
-        escrow.allocateToSPV(ADMIN, allocationAmount);
+        bytes32 allocationId = stableYieldMgr.createPendingAllocation(poolAddress, ADMIN, allocationAmount);
         
         uint256 reservesAfter = escrow.getPoolReserves();
         console.log("  Allocated to SPV:", allocationAmount);
@@ -206,9 +206,10 @@ contract DeployedContractsTest is Test {
         
         assertEq(reservesAfter, reservesBefore - allocationAmount, "Reserves not updated");
         
-        // Add instrument
+        // Add instrument with allocation linkage
         stableYieldMgr.addInstrument(
             poolAddress,
+            allocationId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
             4500e6,
             5000e6,

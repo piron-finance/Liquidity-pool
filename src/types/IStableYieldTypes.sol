@@ -18,6 +18,14 @@ interface IStableYieldTypes {
         INTEREST_BEARING // Bonds with periodic coupons
     }
 
+    enum AllocationStatus {
+        PENDING,    // Funds allocated to SPV, awaiting instrument creation
+        INVESTED,   // Linked to an instrument
+        RETURNED,   // Excess funds returned by SPV
+        MATURED,    // Instrument matured, funds returned
+        CANCELLED   // Allocation cancelled before investment
+    }
+
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// STRUCTS //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
@@ -43,6 +51,7 @@ interface IStableYieldTypes {
         uint256 nextCouponDueDate;       // For bonds, next coupon payment date
         uint8 couponsPaid;               // How many coupons actually paid
         bool isActive;                   // Still held by pool
+        bytes32 allocationId;            // Links instrument to its allocation
     }
 
     struct WithdrawalQueue {
@@ -58,6 +67,21 @@ interface IStableYieldTypes {
         uint256 estimatedValue;
         bool processed;
         uint256 processedTime;
+    }
+
+    struct PendingAllocation {
+        bytes32 allocationId;
+        address pool;
+        address spv;
+        uint256 amount;
+        uint256 createdAt;
+        uint256 expiresAt;
+        AllocationStatus status;
+    }
+
+    struct ReserveConfig {
+        uint256 minAbsoluteReserve;  // Minimum reserve floor in asset decimals
+        uint256 reserveRatioBps;     // Reserve ratio in basis points (e.g., 1000 = 10%)
     }
 }
 

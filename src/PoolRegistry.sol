@@ -25,6 +25,9 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
     uint256 public override totalPools;
     uint256 public override activePools;
     uint256 public totalStableYieldPools;
+    uint256 public totalLockedPools;
+
+
     address[] private poolList;
     address[] public approvedAssetsList;
     
@@ -36,12 +39,16 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
     mapping(address => IStableYieldTypes.PoolData) public stableYieldPools;
     mapping(uint256 => address) public stableYieldPoolAtIndex;
     mapping(address => bool) public isStableYieldPool;
+
+   
+    mapping(uint256 => address) public lockedPoolAtIndex;
+    mapping(address => bool) public isLockedPool;
     
 
     struct AssetInfo {
         bool isApproved;           // Asset approved for use
         string name;               // "Nigerian Naira"
-        string symbol;             // "CNGN"
+        string symbol;             // "CNGN, USDC"
         string country;            // "Nigeria" (empty for multi-country)
         string region;             // "West Africa" (for regional pools)
         address tokenAddress;      // CNGN token contract
@@ -53,7 +60,8 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
 
     enum PoolCategory {
         SINGLE_ASSET,
-        STABLE_YIELD_FLEXIBLE
+        STABLE_YIELD_FLEXIBLE,
+        LOCKED_POOL
     }
 
    
@@ -68,6 +76,8 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
     event ImplementationRevoked(address indexed implementation);
     event StableYieldPoolRegistered( address indexed poolAddress, address indexed escrowAddress, address indexed asset, string name );
     event StableYieldPoolStatusUpdated(address indexed pool, bool isActive);
+    event LockedPoolRegistered( address indexed poolAddress, address indexed escrowAddress, address indexed asset, string name );
+    event LockedPoolStatusUpdated(address indexed pool, bool isActive);
     
     event AssetApproved( address indexed asset, string name, string symbol, string country, string region );
     event AssetMetadataUpdated(address indexed asset);
@@ -198,178 +208,27 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         );
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    function getPoolInfo(address pool) external view override returns (PoolInfo memory) {
-        return poolInfos[pool];
-    }
-    
-    function isRegisteredPool(address pool) external view override returns (bool) {
-        return poolInfos[pool].createdAt != 0;
-    }
-    
-    function isActivePool(address pool) external view override returns (bool) {
-        return poolInfos[pool].createdAt != 0 && poolInfos[pool].isActive;
+    function registerLockedPool(
+        address poolAddress,
+        address escrowAddress,
+        address asset,
+        string memory name
+    ) external {
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), msg.sender), "PoolRegistry/not pool creator");
+        require(poolAddress != address(0), "PoolRegistry/invalid pool");
+        require(escrowAddress != address(0), "PoolRegistry/invalid escrow");
+        require(!isLockedPool[poolAddress], "PoolRegistry/pool already registered");
+        require(assetInfo[asset].isApproved, "PoolRegistry/asset not approved");
+        
+        isLockedPool[poolAddress] = true;
+        lockedPoolAtIndex[totalLockedPools] = poolAddress;
+        totalLockedPools++;
+        
+        emit LockedPoolRegistered(poolAddress, escrowAddress, asset, name);
     }
 
+  
 
-    /**
-     * @notice Check if address is a managed pool (StableYield pool)
-     * @param pool Address to check
-     * @return True if it's a StableYield pool
-     */
-    function isManagedPool(address pool) external view returns (bool) {
-        return isStableYieldPool[pool];
-    }
-    
-    /**
-     * @notice Get StableYield pool data
-     * @param pool Pool address
-     * @return StableYield pool data
-     */
-    function getStableYieldPoolData(address pool) external view returns (IStableYieldTypes.PoolData memory) {
-        require(isStableYieldPool[pool], "PoolRegistry/not a StableYield pool");
-        return stableYieldPools[pool];
-    }
-    
-    /**
-     * @notice Get total number of StableYield pools
-     * @return Total StableYield pools count
-     */
-    function getTotalStableYieldPools() external view returns (uint256) {
-        return totalStableYieldPools;
-    }
-    
-    
-    /**
-     * @notice Get StableYield pool at specific index
-     * @param index Index of StableYield pool
-     * @return StableYield pool address
-     */
-    function getStableYieldPoolAtIndex(uint256 index) external view returns (address) {
-        require(index < totalStableYieldPools, "PoolRegistry/index out of bounds");
-        return stableYieldPoolAtIndex[index];
-    }
-    
-    /**
-     * @notice Get managed pool at specific index (StableYield pools)
-     * @param index Index of managed pool
-     * @return Managed pool address
-     */
-    function getManagedPoolAtIndex(uint256 index) external view returns (address) {
-        require(index < totalStableYieldPools, "PoolRegistry/index out of bounds");
-        return stableYieldPoolAtIndex[index];
-    }
-    
-    
-    function updatePoolStatus(address pool, bool isActive) public override onlyRole(accessManager.OPERATOR_ROLE()) {
-        bool wasActive;
-
-        if (isStableYieldPool[pool]) {
-            wasActive = stableYieldPools[pool].isActive;
-            stableYieldPools[pool].isActive = isActive;
-            
-            emit StableYieldPoolStatusUpdated(pool, isActive);
-        } else {
-            require(poolInfos[pool].createdAt != 0, "PoolRegistry/pool-not-registered");
-            wasActive = poolInfos[pool].isActive;
-            poolInfos[pool].isActive = isActive;
-        }
-
-        if (wasActive && !isActive) {
-            activePools--;
-        } else if (!wasActive && isActive) {
-            activePools++;
-        }
-        
-        emit PoolStatusUpdated(pool, isActive);
-    }
-    
-    function updatePoolCategory(address pool, string memory newCategory) external override onlyRole(accessManager.OPERATOR_ROLE()) {
-        require(poolInfos[pool].createdAt != 0, "PoolRegistry/pool-not-registered");
-        
-        string memory oldCategory = poolInfos[pool].instrumentType;
-        poolInfos[pool].instrumentType = newCategory;
-        
-        emit PoolCategoryUpdated(pool, oldCategory, newCategory);
-    }
-    
-    /**
-     * @notice Get pool count for pagination
-     * @return Total number of traditional pools
-     */
-    function getPoolCount() external view override returns (uint256) {
-        return poolList.length;
-    }
-    
-    /**
-     * @notice Get pool at specific index for pagination
-     * @param index Pool index
-     * @return Pool address
-     */
-    function getPoolAtIndex(uint256 index) external view override returns (address) {
-        require(index < poolList.length, "Index out of bounds");
-        return poolList[index];
-    }
-    
-    /**
-     * @notice Get pools by type (efficient - direct mapping access)
-     * @param instrumentType Type of instrument
-     * @return Array of pool addresses of that type
-     */
-    function getPoolsByType(string memory instrumentType) external view override returns (address[] memory) {
-        return poolsByType[instrumentType];
-    }
-    
-    function pausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
-        updatePoolStatus(pool, false);
-    }
-    
-    function unpausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
-        updatePoolStatus(pool, true);
-    }
-    
-    function emergencyDeactivatePool(address pool) external override onlyRole(accessManager.EMERGENCY_ROLE()) {
-        updatePoolStatus(pool, false);
-    }
-    
-
-    /**
-     * @notice Approve a new pool implementation
-     * @param implementation Address of the new implementation contract
-     * @dev Only callable by EXECUTOR_ROLE (rare, high-privilege operation)
-     */
-    function approveImplementation(address implementation) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
-        require(implementation != address(0), "Invalid implementation");
-        require(!approvedImplementations[implementation], "Already approved");
-        
-        approvedImplementations[implementation] = true;
-        
-        emit ImplementationApproved(implementation);
-    }
-
-    /**
-     * @notice Revoke an implementation approval
-     * @param implementation Address of the implementation to revoke
-     */
-    function revokeImplementation(address implementation) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
-        require(approvedImplementations[implementation], "Implementation not approved");
-        
-        approvedImplementations[implementation] = false;
-        
-        emit ImplementationRevoked(implementation);
-    }
-
-    /**
-     * @notice Check if implementation is approved
-     * @param implementation Address to check
-     * @return approved True if implementation is approved
-     */
-    function isApprovedImplementation(address implementation) external view returns (bool) {
-        return approvedImplementations[implementation];
-    }
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// ASSET MANAGEMENT ////////////////////////////
@@ -454,29 +313,165 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         emit AssetMetadataUpdated(asset);
     }
     
-    /**
-     * @notice Check if asset is approved
-     * @param asset Asset token address
-     * @return Whether asset is approved
-     */
+  
+  
+
+    ///////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// ADMIN & OPERATOR////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+
+       function updatePoolStatus(address pool, bool isActive) public override onlyRole(accessManager.OPERATOR_ROLE()) {
+        bool wasActive;
+
+        if (isStableYieldPool[pool]) {
+            wasActive = stableYieldPools[pool].isActive;
+            stableYieldPools[pool].isActive = isActive;
+            
+            emit StableYieldPoolStatusUpdated(pool, isActive);
+        } else {
+            require(poolInfos[pool].createdAt != 0, "PoolRegistry/pool-not-registered");
+            wasActive = poolInfos[pool].isActive;
+            poolInfos[pool].isActive = isActive;
+        }
+
+        if (wasActive && !isActive) {
+            activePools--;
+        } else if (!wasActive && isActive) {
+            activePools++;
+        }
+        
+        emit PoolStatusUpdated(pool, isActive);
+    }
+    
+    function updatePoolCategory(address pool, string memory newCategory) external override onlyRole(accessManager.OPERATOR_ROLE()) {
+        require(poolInfos[pool].createdAt != 0, "PoolRegistry/pool-not-registered");
+        
+        string memory oldCategory = poolInfos[pool].instrumentType;
+        poolInfos[pool].instrumentType = newCategory;
+        
+        emit PoolCategoryUpdated(pool, oldCategory, newCategory);
+    }
+
+     ///////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// UPGRADE & MULTISIG  ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    function approveImplementation(address implementation) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
+        require(implementation != address(0), "Invalid implementation");
+        require(!approvedImplementations[implementation], "Already approved");
+        
+        approvedImplementations[implementation] = true;
+        
+        emit ImplementationApproved(implementation);
+    }
+
+
+    function revokeImplementation(address implementation) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
+        require(approvedImplementations[implementation], "Implementation not approved");
+        
+        approvedImplementations[implementation] = false;
+        
+        emit ImplementationRevoked(implementation);
+    }
+
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+    
+    function getPoolInfo(address pool) external view override returns (PoolInfo memory) {
+        return poolInfos[pool];
+    }
+
+     function isActivePool(address pool) external view override returns (bool) {
+        return poolInfos[pool].createdAt != 0 && poolInfos[pool].isActive;
+    }
+    
+    function isRegisteredPool(address pool) external view override returns (bool) {
+        return poolInfos[pool].createdAt != 0;
+    } 
+
+    function isManagedPool(address pool) external view returns (bool) {
+        return isStableYieldPool[pool];
+    }
+    
+    function isManagedLockedPool(address pool) external view returns (bool) {
+        return isLockedPool[pool];
+    }
+    
+   
+    function getStableYieldPoolData(address pool) external view returns (IStableYieldTypes.PoolData memory) {
+        require(isStableYieldPool[pool], "PoolRegistry/not a StableYield pool");
+        return stableYieldPools[pool];
+    }
+    
+
+    function getTotalStableYieldPools() external view returns (uint256) {
+        return totalStableYieldPools;
+    }
+    
+
+    function getStableYieldPoolAtIndex(uint256 index) external view returns (address) {
+        require(index < totalStableYieldPools, "PoolRegistry/index out of bounds");
+        return stableYieldPoolAtIndex[index];
+    }
+    
+    function getPoolAtIndex(uint256 index) external view override returns (address) {
+        require(index < poolList.length, "Index out of bounds");
+        return poolList[index];
+    }
+
+    function getLockedPoolAtIndex(uint256 index) external view returns (address) {
+        require (index < totalLockedPools, "Index out of bounds");
+
+        return lockedPoolAtIndex[index];
+    }
+
+    function getManagedPoolAtIndex(uint256 index) external view returns (address) {
+        require(index < totalStableYieldPools, "PoolRegistry/index out of bounds");
+        return stableYieldPoolAtIndex[index];
+    }
+    
     function isApprovedAsset(address asset) external view returns (bool) {
         return assetInfo[asset].isApproved;
     }
     
-    /**
-     * @notice Get asset information
-     * @param asset Asset token address
-     * @return Asset information struct
-     */
+  
     function getAssetInfo(address asset) external view returns (AssetInfo memory) {
         return assetInfo[asset];
     }
     
-    /**
-     * @notice Get all approved assets
-     * @return Array of approved asset addresses
-     */
+  
     function getAllApprovedAssets() external view returns (address[] memory) {
         return approvedAssetsList;
     }
+ 
+    
+    function getPoolCount() external view override returns (uint256) {
+        return poolList.length;
+    }
+
+    function getPoolsByType(string memory instrumentType) external view override returns (address[] memory) {
+        return poolsByType[instrumentType];
+    }
+
+    
+    function pausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
+        updatePoolStatus(pool, false);
+    }
+
+    function unpausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
+        updatePoolStatus(pool, true);
+    }
+    
+
+    function emergencyDeactivatePool(address pool) external override onlyRole(accessManager.EMERGENCY_ROLE()) {
+        updatePoolStatus(pool, false);
+    }
+    
+    function isApprovedImplementation(address implementation) external view returns (bool) {
+        return approvedImplementations[implementation];
+    }
+
 } 
