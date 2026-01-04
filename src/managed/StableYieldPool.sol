@@ -18,13 +18,6 @@ import "../AccessManager.sol";
  * @dev ERC4626 vault for flexible managed pools with 30-day minimum holding period
  * @notice Flexible stable yield pool supporting cross-border stablecoin investments
  * 
- * Key Features:
- * - 30-day minimum holding period (as per Piron's flexible pool design)
- * - NAV-based pricing with fee deduction
- * - Withdrawal queue system for liquidity management
- * - Support for multiple stablecoins (USDC, USDT, DAI, etc.)
- * - Cross-border accessibility via stablecoin rails
- * - ERC4626 compliant for DeFi integrations
  */
 contract StableYieldPool is 
     Initializable,
@@ -32,12 +25,13 @@ contract StableYieldPool is
     UUPSUpgradeable,
     PausableUpgradeable
 {
-    using SafeERC20 for IERC20;
+    
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// STATE VARIABLES //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
+    using SafeERC20 for IERC20;
     StableYieldManager public stableYieldManager;
     StableYieldEscrow public escrow;
     AccessManager public accessManager;
@@ -54,7 +48,6 @@ contract StableYieldPool is
 
     event PoolInitialized(address indexed asset, address indexed escrow, address indexed manager);
     event WithdrawalRequested(address indexed user, uint256 shares, uint256 estimatedValue);
-    event HoldingPeriodViolation(address indexed user, uint256 timeRemaining);
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// INITIALIZATION /////////////////////////////
@@ -138,7 +131,7 @@ contract StableYieldPool is
 
     /**
      * @notice Mint exact number of shares
-     * @dev ERC4626 compliant - calculates required assets for exact shares
+     * @dev  calculates required assets for exact shares
      * @param shares Number of shares to mint
      * @param receiver Address to receive shares
      * @return assets Amount of assets required for the shares
@@ -150,17 +143,11 @@ contract StableYieldPool is
         uint256 navPerShare = stableYieldManager.calculateNAVPerShare(address(this));
         uint256 netAssetsNeeded = (shares * navPerShare) / 1e18;
         
-        // Calculate gross assets by working backwards from fee formula
-        // If fee = grossAssets * feeRate / 10000, and netAssets = grossAssets - fee
-        // Then: netAssets = grossAssets * (1 - feeRate/10000)
-        // So: grossAssets = netAssets / (1 - feeRate/10000) = netAssets * 10000 / (10000 - feeRate)
-        
-        // Get fee rate to calculate exact gross amount needed
         uint256 protocolFeeRate = stableYieldManager.getPoolTransactionFee(address(this));
         
         assets = (netAssetsNeeded * 10000) / (10000 - protocolFeeRate);
         
-        require(IERC20(asset()).allowance(msg.sender, address(escrow)) >= assets, "StableYieldPool/insufficient allowance - approve tokens first");
+        require(IERC20(asset()).allowance(msg.sender, address(this)) >= assets, "StableYieldPool/insufficient allowance - approve tokens first");
 
         IERC20(asset()).safeTransferFrom(msg.sender, address(escrow), assets);
 
@@ -178,7 +165,7 @@ contract StableYieldPool is
   
     /**
      * @notice Withdraw exact amount of assets
-     * @dev ERC4626 compliant - calculates required shares for exact assets
+     * @dev calculates required shares for exact assets
      * @param assets Amount of assets to withdraw
      * @param receiver Address to receive assets
      * @param owner Address that owns the shares

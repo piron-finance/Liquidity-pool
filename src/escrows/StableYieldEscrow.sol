@@ -186,25 +186,6 @@ contract StableYieldEscrow is
 
 
     /**
-     * @notice Withdraw funds to user (for processed withdrawal requests)
-     * @param to Recipient address
-     * @param amount Amount to withdraw
-     */
-    function withdraw( // where is fee collection??
-        address to,
-        uint256 amount
-    ) external onlyStableYieldPoolOrManager nonReentrant {
-        require(to != address(0), "StableYieldEscrow/invalid recipient");
-        require(amount > 0, "StableYieldEscrow/invalid amount");
-        require(poolReserves >= amount, "StableYieldEscrow/insufficient pool reserves");
-
-        poolReserves -= amount;
-        asset.safeTransfer(to, amount);
-
-        emit FundsWithdrawn(to, amount, getCashBuffer());
-    }
-
-    /**
      * @notice Allocate deposited funds between pool reserves and transaction fees
      * @dev Called by StableYieldManager after deposit validation
      * @param totalAmount Total amount deposited
@@ -242,6 +223,26 @@ contract StableYieldEscrow is
         fees.accrued += transactionFee;
         fees.total += transactionFee;
     }
+
+    /**
+     * @notice Withdraw funds to user (for processed withdrawal requests)
+     * @param to Recipient address
+     * @param amount Amount to withdraw
+     */
+    function withdraw( 
+        address to,
+        uint256 amount
+    ) external onlyStableYieldPoolOrManager nonReentrant {
+        require(to != address(0), "StableYieldEscrow/invalid recipient");
+        require(amount > 0, "StableYieldEscrow/invalid amount");
+        require(poolReserves >= amount, "StableYieldEscrow/insufficient pool reserves");
+
+        poolReserves -= amount;
+        asset.safeTransfer(to, amount);
+
+        emit FundsWithdrawn(to, amount, getCashBuffer());
+    }
+
 
     /**
      * @notice Transfer collected transaction fees to treasury
@@ -282,30 +283,9 @@ contract StableYieldEscrow is
     }
     
 
-    
     /**
-     * @notice Receive liquidity back from SPV (SPV calls directly)
-     * @dev SPV must approve escrow before calling
-     * @param amount Amount received
-     */
-    function receiveSPVLiquidity(uint256 amount) external nonReentrant {
-        require(
-            msg.sender == stableYieldManager ||
-            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) ||
-            accessManager.hasRole(accessManager.SPV_ROLE(), msg.sender),
-            "StableYieldEscrow/not authorized"
-        );
-        require(amount > 0, "StableYieldEscrow/invalid amount");
-        
-        asset.safeTransferFrom(msg.sender, address(this), amount);
-        poolReserves += amount;
-        
-        emit SPVLiquidityReceived(msg.sender, amount, getCashBuffer());
-    }
-
-    /**
-     * @notice Record liquidity received from SPV (when transfer done externally)
-     * @dev Called by StableYieldManager after transferring funds directly to escrow
+     * @notice Record liquidity received from SPV
+     * @dev Called by StableYieldManager after transferring funds to escrow
      * @param amount Amount received
      */
     function recordReceivedLiquidity(uint256 amount) external {
@@ -369,14 +349,6 @@ contract StableYieldEscrow is
     /////////////////////////////// ADMIN FUNCTIONS ////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    /**
-     * @notice Update pool name
-     */
-    function updatePoolName(string memory newPoolName) external onlyAdmin {
-        require(bytes(newPoolName).length > 0, "StableYieldEscrow/invalid pool name");
-        poolName = newPoolName;
-        emit PoolNameUpdated(newPoolName);
-    }
 
     /**
      * @notice Toggle emergency withdrawal capability

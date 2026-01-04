@@ -73,7 +73,9 @@ interface IStableYieldTypes {
         bytes32 allocationId;
         address pool;
         address spv;
-        uint256 amount;
+        uint256 amount;          // Original allocated amount
+        uint256 usedAmount;      // Amount actually invested in instruments
+        uint256 returnedAmount;  // Amount returned to pool
         uint256 createdAt;
         uint256 expiresAt;
         AllocationStatus status;
