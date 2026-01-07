@@ -6,10 +6,9 @@ import "./AccessManager.sol";
 import "./types/IStableYieldTypes.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
-contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeable, IPoolRegistry {
+contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
 
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -20,11 +19,14 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
     address public override factory;
     AccessManager public accessManager;
     address public timelockController;
-    uint256 public version;
+    uint256 public version; 
     
     uint256 public override totalPools;
     uint256 public override activePools;
     uint256 public totalStableYieldPools;
+    uint256 public totalLockedPools;
+
+
     address[] private poolList;
     address[] public approvedAssetsList;
     
@@ -36,14 +38,16 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
     mapping(address => IStableYieldTypes.PoolData) public stableYieldPools;
     mapping(uint256 => address) public stableYieldPoolAtIndex;
     mapping(address => bool) public isStableYieldPool;
+
+   
+    mapping(uint256 => address) public lockedPoolAtIndex;
+    mapping(address => bool) public isLockedPool;
     
 
     struct AssetInfo {
         bool isApproved;           // Asset approved for use
         string name;               // "Nigerian Naira"
-        string symbol;             // "CNGN"
-        string country;            // "Nigeria" (empty for multi-country)
-        string region;             // "West Africa" (for regional pools)
+        string symbol;             // "CNGN, USDC"
         address tokenAddress;      // CNGN token contract
         uint8 decimals;           // 18
         bool isStablecoin;        // true
@@ -53,25 +57,9 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
 
     enum PoolCategory {
         SINGLE_ASSET,
-        STABLE_YIELD_FLEXIBLE
+        STABLE_YIELD_FLEXIBLE,
+        LOCKED_POOL
     }
-
-   
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    
-    event FactoryUpdated(address indexed oldFactory, address indexed newFactory);
-    event AccessManagerUpdated(address indexed oldAccessManager, address indexed newAccessManager);
-    event ImplementationApproved(address indexed implementation);
-    event ImplementationRevoked(address indexed implementation);
-    event StableYieldPoolRegistered( address indexed poolAddress, address indexed escrowAddress, address indexed asset, string name );
-    event StableYieldPoolStatusUpdated(address indexed pool, bool isActive);
-    
-    event AssetApproved( address indexed asset, string name, string symbol, string country, string region );
-    event AssetMetadataUpdated(address indexed asset);
-
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// MODIFIERS ///////////////////////////////////
@@ -80,6 +68,11 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
     
     modifier onlyFactory() {
         require(msg.sender == factory, "PoolRegistry/only-factory");
+        _;
+    }
+
+    modifier onlyRole(bytes32 role) {
+        require(accessManager.hasRole(role, msg.sender), "PoolRegistry/access denied");
         _;
     }
     ////////////////////////////////////////////////////////////////////////////////
@@ -104,17 +97,11 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         require(_timelockController != address(0), "Invalid timelock controller");
         
         __UUPSUpgradeable_init();
-        __AccessControl_init();
         
         accessManager = AccessManager(_accessManager);
         timelockController = _timelockController;
         factory = address(0);
         version = 1;
-        
-        // Grant roles to deployer for initial configuration
-        _grantRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender);
-        _grantRole(accessManager.ASSET_MANAGER_ROLE(), msg.sender);
-        _grantRole(accessManager.OPERATOR_ROLE(), msg.sender);
     }
 
     
@@ -178,7 +165,7 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
 
     function registerStableYieldPool(
         IStableYieldTypes.PoolData memory poolData
-    ) external onlyRole(accessManager.POOL_CREATOR_ROLE()) {
+    ) external override onlyRole(accessManager.POOL_CREATOR_ROLE()) {
         require(poolData.poolAddress != address(0), "PoolRegistry/invalid pool");
         require(!isStableYieldPool[poolData.poolAddress], "PoolRegistry/pool already registered");
         require(assetInfo[poolData.asset].isApproved, "PoolRegistry/asset not approved");
@@ -196,73 +183,91 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         );
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    function getPoolInfo(address pool) external view override returns (PoolInfo memory) {
-        return poolInfos[pool];
-    }
-    
-    function isRegisteredPool(address pool) external view override returns (bool) {
-        return poolInfos[pool].createdAt != 0;
-    }
-    
-    function isActivePool(address pool) external view override returns (bool) {
-        return poolInfos[pool].createdAt != 0 && poolInfos[pool].isActive;
+    function registerLockedPool(
+        address poolAddress,
+        address escrowAddress,
+        address asset,
+        string memory name
+    ) external override onlyRole(accessManager.POOL_CREATOR_ROLE()) {
+        require(poolAddress != address(0), "PoolRegistry/invalid pool");
+        require(escrowAddress != address(0), "PoolRegistry/invalid escrow");
+        require(!isLockedPool[poolAddress], "PoolRegistry/pool already registered");
+        require(assetInfo[asset].isApproved, "PoolRegistry/asset not approved");
+        
+        isLockedPool[poolAddress] = true;
+        lockedPoolAtIndex[totalLockedPools] = poolAddress;
+        totalLockedPools++;
+        
+        emit LockedPoolRegistered(poolAddress, escrowAddress, asset, name);
     }
 
+  
+
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// ASSET MANAGEMENT ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice Check if address is a managed pool (StableYield pool)
-     * @param pool Address to check
-     * @return True if it's a StableYield pool
+     * @notice Approve a new asset for use in pools
+     * @param asset Asset token address
+     * @param name Asset name (e.g., "USD Coin")
+     * @param symbol Asset symbol (e.g., "USDC")
+     * @param isStablecoin Whether asset is a stablecoin
      */
-    function isManagedPool(address pool) external view returns (bool) {
-        return isStableYieldPool[pool];
+    function approveAsset(
+        address asset,
+        string memory name,
+        string memory symbol,
+        bool isStablecoin
+    ) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(asset != address(0), "PoolRegistry/invalid asset");
+        require(bytes(name).length > 0, "PoolRegistry/invalid name");
+        require(bytes(symbol).length > 0, "PoolRegistry/invalid symbol");
+        require(!assetInfo[asset].isApproved, "PoolRegistry/already approved");
+        
+        uint8 decimals = 18; // Default
+        try IERC20Metadata(asset).decimals() returns (uint8 d) {
+            decimals = d;
+        } catch {}
+        
+        assetInfo[asset] = AssetInfo({
+            isApproved: true,
+            name: name,
+            symbol: symbol,
+            tokenAddress: asset,
+            decimals: decimals,
+            isStablecoin: isStablecoin,
+            approvedAt: block.timestamp
+        });
+        
+        approvedAssetsList.push(asset);
+        
+        emit AssetApproved(asset, name, symbol);
     }
     
     /**
-     * @notice Get StableYield pool data
-     * @param pool Pool address
-     * @return StableYield pool data
+     * @notice Revoke asset approval
+     * @param asset Asset token address
      */
-    function getStableYieldPoolData(address pool) external view returns (IStableYieldTypes.PoolData memory) {
-        require(isStableYieldPool[pool], "PoolRegistry/not a StableYield pool");
-        return stableYieldPools[pool];
+    function revokeAsset(address asset) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        require(assetInfo[asset].isApproved, "PoolRegistry/asset not approved");
+        
+        assetInfo[asset].isApproved = false;
+        
+        emit AssetRevoked(asset);
     }
     
-    /**
-     * @notice Get total number of StableYield pools
-     * @return Total StableYield pools count
-     */
-    function getTotalStableYieldPools() external view returns (uint256) {
-        return totalStableYieldPools;
-    }
-    
-    
-    /**
-     * @notice Get StableYield pool at specific index
-     * @param index Index of StableYield pool
-     * @return StableYield pool address
-     */
-    function getStableYieldPoolAtIndex(uint256 index) external view returns (address) {
-        require(index < totalStableYieldPools, "PoolRegistry/index out of bounds");
-        return stableYieldPoolAtIndex[index];
-    }
-    
-    /**
-     * @notice Get managed pool at specific index (StableYield pools)
-     * @param index Index of managed pool
-     * @return Managed pool address
-     */
-    function getManagedPoolAtIndex(uint256 index) external view returns (address) {
-        require(index < totalStableYieldPools, "PoolRegistry/index out of bounds");
-        return stableYieldPoolAtIndex[index];
-    }
-    
-    
-    function updatePoolStatus(address pool, bool isActive) public override onlyRole(accessManager.OPERATOR_ROLE()) {
+
+  
+  
+
+    ///////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// ADMIN & OPERATOR////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+
+       function updatePoolStatus(address pool, bool isActive) public override onlyRole(accessManager.OPERATOR_ROLE()) {
         bool wasActive;
 
         if (isStableYieldPool[pool]) {
@@ -285,61 +290,13 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         emit PoolStatusUpdated(pool, isActive);
     }
     
-    function updatePoolCategory(address pool, string memory newCategory) external override onlyRole(accessManager.OPERATOR_ROLE()) {
-        require(poolInfos[pool].createdAt != 0, "PoolRegistry/pool-not-registered");
-        
-        string memory oldCategory = poolInfos[pool].instrumentType;
-        poolInfos[pool].instrumentType = newCategory;
-        
-        emit PoolCategoryUpdated(pool, oldCategory, newCategory);
-    }
-    
-    /**
-     * @notice Get pool count for pagination
-     * @return Total number of traditional pools
-     */
-    function getPoolCount() external view override returns (uint256) {
-        return poolList.length;
-    }
-    
-    /**
-     * @notice Get pool at specific index for pagination
-     * @param index Pool index
-     * @return Pool address
-     */
-    function getPoolAtIndex(uint256 index) external view override returns (address) {
-        require(index < poolList.length, "Index out of bounds");
-        return poolList[index];
-    }
-    
-    /**
-     * @notice Get pools by type (efficient - direct mapping access)
-     * @param instrumentType Type of instrument
-     * @return Array of pool addresses of that type
-     */
-    function getPoolsByType(string memory instrumentType) external view override returns (address[] memory) {
-        return poolsByType[instrumentType];
-    }
-    
-    function pausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
-        updatePoolStatus(pool, false);
-    }
-    
-    function unpausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
-        updatePoolStatus(pool, true);
-    }
-    
-    function emergencyDeactivatePool(address pool) external override onlyRole(accessManager.EMERGENCY_ROLE()) {
-        updatePoolStatus(pool, false);
-    }
-    
 
-    /**
-     * @notice Approve a new pool implementation
-     * @param implementation Address of the new implementation contract
-     * @dev Only callable by EXECUTOR_ROLE (rare, high-privilege operation)
-     */
-    function approveImplementation(address implementation) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
+
+     ///////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// UPGRADE & MULTISIG  ////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    function approveImplementation(address implementation) external override onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
         require(implementation != address(0), "Invalid implementation");
         require(!approvedImplementations[implementation], "Already approved");
         
@@ -348,11 +305,8 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         emit ImplementationApproved(implementation);
     }
 
-    /**
-     * @notice Revoke an implementation approval
-     * @param implementation Address of the implementation to revoke
-     */
-    function revokeImplementation(address implementation) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
+
+    function revokeImplementation(address implementation) external override onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
         require(approvedImplementations[implementation], "Implementation not approved");
         
         approvedImplementations[implementation] = false;
@@ -360,121 +314,103 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         emit ImplementationRevoked(implementation);
     }
 
-    /**
-     * @notice Check if implementation is approved
-     * @param implementation Address to check
-     * @return approved True if implementation is approved
-     */
-    function isApprovedImplementation(address implementation) external view returns (bool) {
-        return approvedImplementations[implementation];
-    }
 
     ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ASSET MANAGEMENT ////////////////////////////
+    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
+    
+    function getPoolInfo(address pool) external view override returns (PoolInfo memory) {
+        return poolInfos[pool];
+    }
 
-    /**
-     * @notice Approve a new asset for use in managed pools
-     * @param asset Asset token address
-     * @param name Asset name (e.g., "Nigerian Naira")
-     * @param symbol Asset symbol (e.g., "CNGN")
-     * @param country Country name (empty for multi-country assets)
-     * @param region Region name (e.g., "West Africa")
-     * @param isStablecoin Whether asset is a stablecoin
-     */
-    function approveAsset(
-        address asset,
-        string memory name,
-        string memory symbol,
-        string memory country, // we dont really use this anymore . prob has no relevance again
-        string memory region, //same as above
-        bool isStablecoin
-    ) external onlyRole(accessManager.ASSET_MANAGER_ROLE()) {
-        require(asset != address(0), "PoolRegistry/invalid asset");
-        require(bytes(name).length > 0, "PoolRegistry/invalid name");
-        require(bytes(symbol).length > 0, "PoolRegistry/invalid symbol");
-        require(!assetInfo[asset].isApproved, "PoolRegistry/already approved");
-        
-        uint8 decimals = 18; // Default
-        try IERC20Metadata(asset).decimals() returns (uint8 d) {
-            decimals = d;
-        } catch {}
-        
-        assetInfo[asset] = AssetInfo({
-            isApproved: true,
-            name: name,
-            symbol: symbol,
-            country: country,
-            region: region,
-            tokenAddress: asset,
-            decimals: decimals,
-            isStablecoin: isStablecoin,
-            approvedAt: block.timestamp
-        });
-        
-        approvedAssetsList.push(asset);
-        
-        emit AssetApproved(asset, name, symbol, country, region);
+     function isActivePool(address pool) external view override returns (bool) {
+        return poolInfos[pool].createdAt != 0 && poolInfos[pool].isActive;
     }
     
-    /**
-     * @notice Revoke asset approval
-     * @param asset Asset token address
-     */
-    function revokeAsset(address asset) external onlyRole(accessManager.ASSET_MANAGER_ROLE()) {
-        require(assetInfo[asset].isApproved, "PoolRegistry/asset not approved");
-        
-        assetInfo[asset].isApproved = false;
-        
-        emit AssetRevoked(asset);
+    function isRegisteredPool(address pool) external view override returns (bool) {
+        return poolInfos[pool].createdAt != 0;
+    } 
+
+    function isManagedPool(address pool) external view override returns (bool) {
+        return isStableYieldPool[pool];
     }
     
-    /**
-     * @notice Update asset metadata
-     * @param asset Asset token address
-     * @param name New asset name
-     * @param country New country name
-     * @param region New region name
-     */
-    function updateAssetMetadata(
-        address asset,
-        string memory name,
-        string memory country,
-        string memory region
-    ) external onlyRole(accessManager.ASSET_MANAGER_ROLE()) {
-        require(assetInfo[asset].isApproved, "PoolRegistry/asset not approved");
-        
-        AssetInfo storage info = assetInfo[asset];
-        info.name = name;
-        info.country = country;
-        info.region = region;
-        
-        emit AssetMetadataUpdated(asset);
+    function isManagedLockedPool(address pool) external view override returns (bool) {
+        return isLockedPool[pool];
     }
     
-    /**
-     * @notice Check if asset is approved
-     * @param asset Asset token address
-     * @return Whether asset is approved
-     */
-    function isApprovedAsset(address asset) external view returns (bool) {
+   
+    function getStableYieldPoolData(address pool) external view returns (IStableYieldTypes.PoolData memory) {
+        require(isStableYieldPool[pool], "PoolRegistry/not a StableYield pool");
+        return stableYieldPools[pool];
+    }
+    
+
+    function getTotalStableYieldPools() external view override returns (uint256) {
+        return totalStableYieldPools;
+    }
+    
+
+    function getStableYieldPoolAtIndex(uint256 index) external view override returns (address) {
+        require(index < totalStableYieldPools, "PoolRegistry/index out of bounds");
+        return stableYieldPoolAtIndex[index];
+    }
+    
+    function getPoolAtIndex(uint256 index) external view override returns (address) {
+        require(index < poolList.length, "Index out of bounds");
+        return poolList[index];
+    }
+
+    function getLockedPoolAtIndex(uint256 index) external view override returns (address) {
+        require (index < totalLockedPools, "Index out of bounds");
+
+        return lockedPoolAtIndex[index];
+    }
+
+    function getManagedPoolAtIndex(uint256 index) external view override returns (address) {
+        require(index < totalStableYieldPools, "PoolRegistry/index out of bounds");
+        return stableYieldPoolAtIndex[index];
+    }
+    
+    function isApprovedAsset(address asset) external view override returns (bool) {
         return assetInfo[asset].isApproved;
     }
     
-    /**
-     * @notice Get asset information
-     * @param asset Asset token address
-     * @return Asset information struct
-     */
+  
     function getAssetInfo(address asset) external view returns (AssetInfo memory) {
         return assetInfo[asset];
     }
     
-    /**
-     * @notice Get all approved assets
-     * @return Array of approved asset addresses
-     */
+  
     function getAllApprovedAssets() external view returns (address[] memory) {
         return approvedAssetsList;
     }
+ 
+    
+    function getPoolCount() external view override returns (uint256) {
+        return poolList.length;
+    }
+
+    function getPoolsByType(string memory instrumentType) external view override returns (address[] memory) {
+        return poolsByType[instrumentType];
+    }
+
+    
+    function pausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
+        updatePoolStatus(pool, false);
+    }
+
+    function unpausePool(address pool) external override onlyRole(accessManager.OPERATOR_ROLE()) {
+        updatePoolStatus(pool, true);
+    }
+    
+
+    function emergencyDeactivatePool(address pool) external override onlyRole(accessManager.EMERGENCY_ROLE()) {
+        updatePoolStatus(pool, false);
+    }
+    
+    function isApprovedImplementation(address implementation) external view override returns (bool) {
+        return approvedImplementations[implementation];
+    }
+
 } 

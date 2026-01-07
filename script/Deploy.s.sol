@@ -177,16 +177,15 @@ contract PironPoolsDeployment is Script {
         
         FeeManager feeManager = FeeManager(contracts.feeManager);
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
-            protocolFee: 0,          // 0% protocol fee (reserved for future use)
-            spvFee: 100,            // 1.0% SPV fee
-            managementFee: 200,     // 2.0% annual management fee
-            performanceFee: 0,      // 0% performance fee (reserved for future use)
+            protocolFee: 200,        // 2.0% protocol fee (transaction fee on deposits/withdrawals)
+            spvFee: 100,             // 1.0% SPV fee
+            performanceFee: 100,     // 1.0% performance fee (10% of profits)
             earlyWithdrawalFee: 100, // 1.0% early withdrawal fee
-            refundGasFee: 10,       // 0.1% refund gas fee
+            refundGasFee: 10,        // 0.1% refund gas fee
             isActive: true
         });
         feeManager.setDefaultFeeConfig(feeConfig);
-        console.log("Default fee configuration set");
+        console.log("Default fee configuration set (transaction-only model)");
         
         console.log("System configuration complete!");
         console.log("");

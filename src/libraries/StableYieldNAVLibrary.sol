@@ -19,73 +19,46 @@ library StableYieldNAVLibrary {
     event NAVUpdated(address indexed poolAddress, uint256 totalNAV, uint256 navPerShare, string reason, uint256 timestamp);
     
     /**
-     * @notice Calculate pool NAV net of accrued fees
+     * @notice Calculate pool NAV 
      * @param poolData Pool data storage
      * @param instruments Array of instrument holdings
-     * @param deferredFees Deferred fees for the pool
-     * @param lastFeeAccrual Last fee accrual timestamp
-     * @param feeManager Fee manager address
-     * @return totalNAV Current NAV net of accrued fees
+     * @return totalNAV Current NAV
      */
     function calculatePoolNAV(
         IStableYieldTypes.PoolData storage poolData,
-        IStableYieldTypes.InstrumentHolding[] storage instruments,
-        uint256 deferredFees,
-        uint256 lastFeeAccrual,
-        address feeManager
+        IStableYieldTypes.InstrumentHolding[] storage instruments
     ) public view returns (uint256 totalNAV) {
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
         
         uint256 grossAssetValue = calculateGrossAssetValue(instruments);
         uint256 poolReserves = escrow.getPoolReserves();
-        uint256 totalGrossValue = grossAssetValue + poolReserves;
         
-        uint256 accruedFees = calculateCurrentAccruedFees(
-            poolData,
-            deferredFees,
-            lastFeeAccrual,
-            feeManager,
-            totalGrossValue
-        );
-        
-        totalNAV = totalGrossValue > accruedFees ? totalGrossValue - accruedFees : 0;
-        
-        return totalNAV;
+    
+        return grossAssetValue + poolReserves;
     }
     
     /**
      * @notice Calculate NAV per share
-     * @param poolAddress Pool address
      * @param poolData Pool data storage
      * @param instruments Array of instrument holdings
-     * @param deferredFees Deferred fees for the pool
-     * @param lastFeeAccrual Last fee accrual timestamp
-     * @param feeManager Fee manager address
      * @return navPerShare NAV per share (normalized to 18 decimals)
      */
     function calculateNAVPerShare(
-        address poolAddress,
         IStableYieldTypes.PoolData storage poolData,
-        IStableYieldTypes.InstrumentHolding[] storage instruments,
-        uint256 deferredFees,
-        uint256 lastFeeAccrual,
-        address feeManager
+        IStableYieldTypes.InstrumentHolding[] storage instruments
     ) public view returns (uint256 navPerShare) {
-        uint256 totalNAV = calculatePoolNAV(poolData, instruments, deferredFees, lastFeeAccrual, feeManager);
+        uint256 totalNAV = calculatePoolNAV(poolData, instruments);
         
         uint256 totalShares = IERC20(poolData.poolAddress).totalSupply();
-        
-        uint8 assetDecimals = IERC20Metadata(poolData.asset).decimals();
-        require(assetDecimals == 6 || assetDecimals == 18, "NAVLib/only 6 or 18 decimal stablecoins");
         
         if (totalShares == 0) {
             return 1e18; 
         }
         
-        // Normalize totalNAV from stablecoin decimals to 18 decimals
-        uint256 normalizedNAV = totalNAV * (10**(18 - assetDecimals));
-        
-        return normalizedNAV / totalShares;
+        // Calculate NAV per share: (totalNAV * 1e18) / totalShares
+        // totalNAV is in asset decimals, totalShares is raw count
+        // Result is normalized to 1e18 precision
+        return (totalNAV * 1e18) / totalShares;
     }
     
     /**
@@ -102,55 +75,18 @@ library StableYieldNAVLibrary {
         for (uint256 i; i < length;) {
             IStableYieldTypes.InstrumentHolding storage instrument = instruments[i];
             
-            if (instrument.instrumentType == IStableYieldTypes.InstrumentType.DISCOUNTED) {
-                grossValue += calculateDiscountedValue(instrument, currentTime);
-            } else {
-                grossValue += calculateInterestBearingValue(instrument, currentTime);
+            if (instrument.isActive) {
+                if (instrument.instrumentType == IStableYieldTypes.InstrumentType.DISCOUNTED) {
+                    grossValue += calculateDiscountedValue(instrument, currentTime);
+                } else {
+                    grossValue += calculateInterestBearingValue(instrument, currentTime);
+                }
             }
             
             unchecked { ++i; }
         }
 
         return grossValue;
-    }
-    
-    /**
-     * @notice Calculate current accrued fees for NAV-neutral pricing
-     * @param poolData Pool data storage
-     * @param deferredFees Deferred fees
-     * @param lastAccrual Last fee accrual timestamp
-     * @param feeManager Fee manager address
-     * @param totalGrossValue Total gross pool value
-     * @return accruedFees Current accrued fees (including deferred)
-     */
-    function calculateCurrentAccruedFees(
-        IStableYieldTypes.PoolData storage poolData,
-        uint256 deferredFees,
-        uint256 lastAccrual,
-        address feeManager,
-        uint256 totalGrossValue
-    ) public view returns (uint256 accruedFees) {
-        if (feeManager == address(0)) return deferredFees;
-        
-        // Dynamic call to fee manager
-        (bool success, bytes memory data) = feeManager.staticcall(
-            abi.encodeWithSignature("getPoolExpenseRatio(address)", poolData.poolAddress)
-        );
-        
-        if (!success || data.length == 0) return deferredFees;
-        
-        uint256 expenseRatioBps = abi.decode(data, (uint256));
-        if (expenseRatioBps == 0) return deferredFees;
-        
-        uint256 lastAccrualTime = lastAccrual == 0 ? poolData.createdAt : lastAccrual;
-        
-        uint256 timeElapsed = block.timestamp - lastAccrualTime;
-        if (timeElapsed == 0) return deferredFees;
-
-        uint256 annualFee = (totalGrossValue * expenseRatioBps) / 10000;
-        uint256 currentAccrued = (annualFee * timeElapsed) / SECONDS_PER_YEAR;
-        
-        return deferredFees + currentAccrued;
     }
     
     /**
@@ -202,26 +138,19 @@ library StableYieldNAVLibrary {
      * @param poolAddress Pool address
      * @param poolData Pool data storage
      * @param instruments Array of instrument holdings
-     * @param deferredFees Deferred fees
-     * @param lastFeeAccrual Last fee accrual timestamp
-     * @param feeManager Fee manager address
      * @param reason Reason for update
      */
     function triggerNAVUpdate(
         address poolAddress,
         IStableYieldTypes.PoolData storage poolData,
         IStableYieldTypes.InstrumentHolding[] storage instruments,
-        uint256 deferredFees,
-        uint256 lastFeeAccrual,
-        address feeManager,
         string memory reason
     ) external {
-        uint256 totalNAV = calculatePoolNAV(poolData, instruments, deferredFees, lastFeeAccrual, feeManager);
+        uint256 totalNAV = calculatePoolNAV(poolData, instruments);
         uint256 totalShares = IERC20(poolData.poolAddress).totalSupply();
-        uint256 navPerShare = calculateNAVPerShare(poolAddress, poolData, instruments, deferredFees, lastFeeAccrual, feeManager);
+        uint256 navPerShare = calculateNAVPerShare( poolData, instruments);
         
         emit NAVUpdated(poolAddress, totalNAV, navPerShare, reason, block.timestamp);
         emit NAVCalculated(poolAddress, totalNAV, navPerShare, totalShares, block.timestamp);
     }
 }
-

@@ -619,7 +619,6 @@ contract AccessControlIntegration is BaseTest {
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
             protocolFee: 10,
             spvFee: 100,
-            managementFee: 200,
             performanceFee: 1000,
             earlyWithdrawalFee: 50,
             refundGasFee: 10,
@@ -644,7 +643,6 @@ contract AccessControlIntegration is BaseTest {
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
             protocolFee: 10,
             spvFee: 100,
-            managementFee: 200,
             performanceFee: 1000,
             earlyWithdrawalFee: 50,
             refundGasFee: 10,
@@ -658,45 +656,40 @@ contract AccessControlIntegration is BaseTest {
     }
     
     /**
-     * @notice Test that operator can accrue expense ratios on pools
-     * @dev Verifies operator can trigger periodic fee accrual
+     * @notice Test that operator can collect transaction fees
+     * @dev Verifies operator can trigger transaction fee collection
      */
-    function test_accessControl_operatorCanAccrueExpenseRatio() public {
+    function test_accessControl_operatorCanCollectTransactionFee() public {
         (poolAddress,) = _createTestPool();
         
-        // Set expense ratio
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(poolAddress, 80);
+        // Mint tokens to operator for fee collection simulation
+        token.mint(operator, 100e6);
         
-        // Deposit to create pool value
-        vm.startPrank(user1);
-        token.approve(poolAddress, 100_000e6);
-        LiquidityPool(poolAddress).deposit(100_000e6, user1);
+        // Operator can collect transaction fees
+        vm.startPrank(operator);
+        token.approve(address(feeManager), 100e6);
+        feeManager.collectTransactionFee(poolAddress, address(token), 100e6, "deposit");
         vm.stopPrank();
         
-        vm.warp(block.timestamp + 30 days);
-        
-        // Operator can accrue
-        vm.prank(operator);
-        uint256 accrued = feeManager.accrueExpenseRatio(poolAddress, 100_000e6);
-        
-        assertGt(accrued, 0, "No fees accrued");
+        assertEq(feeManager.getTransactionFees(poolAddress, address(token)), 100e6, "Fees not collected");
     }
     
     /**
-     * @notice Test that non-operators cannot accrue expense ratios
-     * @dev Verifies fee accrual is restricted to operators
+     * @notice Test that non-operators cannot collect transaction fees
+     * @dev Verifies fee collection is restricted to operators
      */
-    function test_accessControl_nonOperatorCannotAccrueExpenseRatio() public {
+    function test_accessControl_nonOperatorCannotCollectTransactionFee() public {
         (poolAddress,) = _createTestPool();
         
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(poolAddress, 80);
+        // Mint tokens to user for fee collection attempt
+        token.mint(user1, 100e6);
         
-        // User cannot accrue
-        vm.prank(user1);
+        // User cannot collect transaction fees
+        vm.startPrank(user1);
+        token.approve(address(feeManager), 100e6);
         vm.expectRevert("FeeManager/access-denied");
-        feeManager.accrueExpenseRatio(poolAddress, 100_000e6);
+        feeManager.collectTransactionFee(poolAddress, address(token), 100e6, "deposit");
+        vm.stopPrank();
     }
     
     ////////////////////////////////////////////////////////////////////////////////

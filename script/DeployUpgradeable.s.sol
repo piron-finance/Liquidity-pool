@@ -294,7 +294,7 @@ contract DeployUpgradeable is Script {
         emit ProxyDeployed("ManagedPoolFactory", contracts.managedPoolFactoryProxy, contracts.managedPoolFactoryImpl);
     }
     
-    function _configureSystem(DeployedContracts memory contracts, DeploymentConfig memory /* config */) internal {
+    function _configureSystem(DeployedContracts memory contracts, DeploymentConfig memory config) internal {
         console.log("=== CONFIGURING UPGRADEABLE SYSTEM ===");
         
         PoolRegistry registry = PoolRegistry(contracts.poolRegistryProxy);
@@ -305,6 +305,14 @@ contract DeployUpgradeable is Script {
         accessMgr.grantFactoryRoleDuringDeployment(contracts.managedPoolFactoryProxy);
         console.log("FACTORY_ROLE granted to ManagedPoolFactory");
         
+        // Grant POOL_CREATOR_ROLE to StableYieldManager so it can register pools in PoolRegistry
+        accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy);
+        console.log("POOL_CREATOR_ROLE granted to StableYieldManager");
+        
+        // Grant OPERATOR_ROLE to StableYieldManager for escrow operations (allocateToSPV, receiveSPVLiquidity, collectMonthlyFees)
+        accessMgr.grantRoleDuringDeployment(accessMgr.OPERATOR_ROLE(), contracts.stableYieldManagerProxy);
+        console.log("OPERATOR_ROLE granted to StableYieldManager");
+        
         // Finalize deployment to prevent further immediate role grants
         accessMgr.finalizeDeployment();
         console.log("Deployment finalized - future role grants require 24h timelock");
@@ -313,9 +321,26 @@ contract DeployUpgradeable is Script {
         registry.setFactory(contracts.poolFactoryProxy);
         console.log("PoolFactory registered in PoolRegistry");
         
+        // Grant POOL_CREATOR_ROLE to StableYieldManager on PoolRegistry (for registerStableYieldPool)
+        registry.grantRole(accessMgr.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy);
+        console.log("POOL_CREATOR_ROLE granted to StableYieldManager on PoolRegistry");
+        
         // Set ManagedPoolFactory in StableYieldManager
         StableYieldManager(contracts.stableYieldManagerProxy).setManagedPoolFactory(contracts.managedPoolFactoryProxy);
         console.log("ManagedPoolFactory registered in StableYieldManager");
+        
+        // Note: SPV_ROLE and OPERATOR_ROLE for StableYieldManager operations are granted 
+        // via the shared AccessManager, not on StableYieldManager itself
+        // These roles were already granted to admin during AccessManager setup
+        console.log("SPV and OPERATOR roles available via AccessManager");
+        
+        // Set managers in FeeManager
+        FeeManager(contracts.feeManager).setManagers(
+            contracts.managerProxy,
+            contracts.stableYieldManagerProxy,
+            contracts.poolRegistryProxy
+        );
+        console.log("Managers registered in FeeManager");
         
         // Note: All critical roles (SPV, OPERATOR, EMERGENCY, POOL_CREATOR, ASSET_MANAGER) 
         // are granted to admin in AccessManager constructor with no delay
@@ -346,19 +371,18 @@ contract DeployUpgradeable is Script {
         // TODO: Add USDT address when available for this network
         console.log("NOTE: Add USDT approval before mainnet deployment");
         
-        // Configure fee manager
+        // Configure fee manager (transaction-only fee model)
         FeeManager feeManager = FeeManager(contracts.feeManager);
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
-            protocolFee: 0,          // 0% protocol fee (reserved for future use)
-            spvFee: 100,            // 1.0% SPV fee
-            managementFee: 200,     // 2.0% annual management fee
-            performanceFee: 0,      // 0% performance fee (reserved for future use)
+            protocolFee: 200,        // 2.0% protocol fee (transaction fee on deposits/withdrawals)
+            spvFee: 100,             // 1.0% SPV fee
+            performanceFee: 100,     // 1.0% performance fee (10% of profits)
             earlyWithdrawalFee: 100, // 1.0% early withdrawal fee
-            refundGasFee: 10,       // 0.1% refund gas fee
+            refundGasFee: 10,        // 0.1% refund gas fee
             isActive: true
         });
         feeManager.setDefaultFeeConfig(feeConfig);
-        console.log("Default fee configuration set");
+        console.log("Default fee configuration set (transaction-only model)");
         
         console.log("Upgradeable system configuration complete!");
     }
@@ -383,11 +407,12 @@ contract DeployUpgradeable is Script {
         require(accessManager.hasRole(accessManager.SPV_ROLE(), config.spv), "SPV role not granted");
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), config.operator), "Operator role not granted");
         require(accessManager.hasRole(accessManager.EMERGENCY_ROLE(), config.emergency), "Emergency role not granted");
-        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), config.admin), "Pool creator role not granted");
-        require(accessManager.hasRole(accessManager.ASSET_MANAGER_ROLE(), config.admin), "Asset manager role not granted");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), config.admin), "Pool creator role not granted to admin");
+        require(accessManager.hasRole(accessManager.ASSET_MANAGER_ROLE(), config.admin), "Asset manager role not granted to admin");
         require(accessManager.hasRole(accessManager.FACTORY_ROLE(), contracts.managedPoolFactoryProxy), "Factory role not granted to ManagedPoolFactory");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy), "Pool creator role not granted to StableYieldManager");
         require(accessManager.deploymentComplete(), "Deployment not finalized");
-        console.log("AccessManager roles verified (from constructor and deployment)");
+        console.log("AccessManager roles verified (admin, factories, and managers)");
         
         // Verify timelock configuration
         PironTimelock.PironTimelockController timelock = PironTimelock.PironTimelockController(contracts.timelockController);

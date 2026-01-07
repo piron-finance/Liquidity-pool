@@ -48,12 +48,12 @@ contract TestPoolRegistry is PoolRegistry {
 /**
  * @title FeeManagementIntegration
  * @notice Integration test for FeeManager with pools
- * @dev Tests expense ratios, transaction fees, and performance fees
+ * @dev Tests transaction-only fee model
+ * 
+ 
  * 
  * TEST COVERAGE:
- * - Expense ratio accrual over time
- * - Transaction fee collection (protocol, SPV, management, performance)
- * - Early withdrawal penalties
+ * - Transaction fee collection (protocol, SPV, performance)
  * - Fee distribution to treasury
  * - Performance fee calculations
  */
@@ -88,9 +88,9 @@ contract FeeManagementIntegration is BaseTest {
     /////////////////////////////// EVENTS /////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
     
-    event ExpenseRatioAccrued(address indexed pool, uint256 amount, uint256 timestamp);
     event TransactionFeeCollected(address indexed pool, address indexed asset, uint256 amount, string feeType);
     event TreasuryDeposit(address indexed asset, uint256 amount, uint256 newBalance);
+    event PerformanceFeeCollected(address indexed pool, uint256 amount, uint256 totalCollected);
     
     function setUp() public override {
         super.setUp();
@@ -157,6 +157,10 @@ contract FeeManagementIntegration is BaseTest {
         vm.prank(admin);
         registry.setFactory(address(factory));
         
+        // Set managers in FeeManager
+        vm.prank(admin);
+        feeManager.setManagers(address(manager), address(0), address(registry));
+        
         // Create a pool for testing
         _createTestPool();
     }
@@ -184,87 +188,25 @@ contract FeeManagementIntegration is BaseTest {
     }
     
     /**
-     * @notice Test expense ratio accrual over time
-     * @dev Tests: set ratio → deposit → time passes → accrue fees based on time elapsed
-     */
-    function test_feeManager_expenseRatioAccrual() public {
-        console.log("\n=== TEST: Expense Ratio Accrual Over Time ===");
-        
-        // Set expense ratio for pool (0.8% annually = 80 bps)
-        console.log("\nStep 1: Admin setting expense ratio...");
-        console.log("  Pool:", poolAddress);
-        console.log("  Expense Ratio: 80 bps (0.8% annually)");
-        
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(poolAddress, 80);
-        
-        console.log("  Expense Ratio Set:", feeManager.getPoolExpenseRatio(poolAddress));
-        assertEq(feeManager.getPoolExpenseRatio(poolAddress), 80, "Expense ratio not set");
-        
-        // Users deposit to create pool value
-        console.log("\nStep 2: User depositing to create pool value...");
-        uint256 depositAmount = 100_000e6;
-        console.log("  Deposit Amount:", depositAmount);
-        
-        vm.startPrank(user1);
-        token.approve(poolAddress, depositAmount);
-        pool.deposit(depositAmount, user1);
-        vm.stopPrank();
-        
-        console.log("  Total Assets in Pool:", manager.totalRaised());
-        
-        // Fast forward 180 days (half a year)
-        console.log("\nStep 3: Fast-forwarding 180 days (half year)...");
-        console.log("  Current Time:", block.timestamp);
-        vm.warp(block.timestamp + 180 days);
-        console.log("  New Time:", block.timestamp);
-        console.log("  Days Elapsed: 180");
-        
-        // Accrue expense ratio
-        console.log("\nStep 4: Operator accruing expense ratio...");
-        uint256 poolTotalAssets = manager.totalRaised();
-        console.log("  Pool Total Assets:", poolTotalAssets);
-        
-        vm.prank(operator);
-        uint256 accruedFees = feeManager.accrueExpenseRatio(poolAddress, poolTotalAssets);
-        
-        // Expected: (100,000 * 80 bps * 180 days) / (10000 * 365 days)
-        // = (100,000 * 0.008 * 180) / 365 = ~394.52 USDC
-        uint256 expectedFees = (poolTotalAssets * 80 * 180 days) / (10000 * 365 days);
-        
-        console.log("  Accrued Fees:", accruedFees);
-        console.log("  Expected Fees:", expectedFees);
-        console.log("  Formula: (Assets * 80 bps * 180 days) / (10000 * 365 days)");
-        console.log("  Stored Accrued Fees:", feeManager.getAccruedExpenseFees(poolAddress));
-        
-        assertApproxEqAbs(accruedFees, expectedFees, 1e6, "Accrued fees mismatch");
-        assertEq(feeManager.getAccruedExpenseFees(poolAddress), accruedFees, "Stored accrued fees mismatch");
-        
-        console.log("\n=== TEST PASSED ===\n");
-    }
-    
-    /**
      * @notice Test transaction fee collection and treasury deposit
      * @dev Tests: set fee config → calculate protocol fee → collect → deposit to treasury
      */
     function test_feeManager_transactionFeeCollection() public {
         console.log("\n=== TEST: Transaction Fee Collection ===");
         
-        // Configure protocol fee (0.06% = 6 bps)
+        // Configure protocol fee
         console.log("\nStep 1: Admin configuring fee structure...");
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
-            protocolFee: 6,
-            spvFee: 100,
-            managementFee: 200,
-            performanceFee: 1000,
+            protocolFee: 200,       // 2%
+            spvFee: 100,            // 1%
+            performanceFee: 100,    // 1%
             earlyWithdrawalFee: 50,
             refundGasFee: 10,
             isActive: true
         });
-        console.log("  Protocol Fee: 6 bps (0.06%)");
+        console.log("  Protocol Fee: 200 bps (2%)");
         console.log("  SPV Fee: 100 bps (1%)");
-        console.log("  Management Fee: 200 bps (2%)");
-        console.log("  Performance Fee: 1000 bps (10%)");
+        console.log("  Performance Fee: 100 bps (1%)");
         
         vm.prank(admin);
         feeManager.setPoolFeeConfig(poolAddress, feeConfig);
@@ -280,13 +222,13 @@ contract FeeManagementIntegration is BaseTest {
         pool.deposit(depositAmount, user1);
         vm.stopPrank();
         
-        // Calculate protocol fee
+        // Calculate protocol fee (includes protocolFee + spvFee)
         console.log("\nStep 3: Calculating protocol fee...");
         uint256 protocolFee = feeManager.calculateProtocolFee(poolAddress, depositAmount);
         console.log("  Deposit Amount:", depositAmount);
-        console.log("  Protocol Fee (0.06%):", protocolFee);
-        console.log("  Expected:", (depositAmount * 6) / 10000);
-        assertEq(protocolFee, (depositAmount * 6) / 10000, "Protocol fee calculation mismatch");
+        console.log("  Protocol Fee (3% total):", protocolFee);
+        console.log("  Expected:", (depositAmount * 300) / 10000);
+        assertEq(protocolFee, (depositAmount * 300) / 10000, "Protocol fee calculation mismatch");
         
         // Simulate fee collection (in real scenario, pool would collect this)
         console.log("\nStep 4: Collecting transaction fee to treasury...");
@@ -313,18 +255,17 @@ contract FeeManagementIntegration is BaseTest {
     
     /**
      * @notice Test performance fee calculation on profits
-     * @dev Tests: set performance fee → simulate profit → calculate 10% performance fee
+     * @dev Tests: set performance fee → simulate profit → calculate performance fee
      */
     function test_feeManager_performanceFeeCalculation() public {
         console.log("\n=== TEST: Performance Fee Calculation ===");
         
-        // Configure performance fee (10% = 1000 bps)
+        // Configure performance fee
         console.log("\nStep 1: Configuring performance fee...");
         IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
-            protocolFee: 6,
+            protocolFee: 200,
             spvFee: 100,
-            managementFee: 200,
-            performanceFee: 1000,
+            performanceFee: 1000,   // 10% of profits
             earlyWithdrawalFee: 50,
             refundGasFee: 10,
             isActive: true
@@ -388,7 +329,7 @@ contract FeeManagementIntegration is BaseTest {
         console.log("  Treasury Balance Before Withdrawal:", token.balanceOf(treasury));
         
         vm.prank(admin);
-        feeManager.withdrawFromTreasury(address(token), treasury, withdrawAmount);
+        feeManager.withdrawFromTreasury(address(token), withdrawAmount, treasury);
         
         console.log("  Treasury Balance After Withdrawal:", token.balanceOf(treasury));
         console.log("  FeeManager Treasury Balance:", feeManager.getTreasuryBalance(address(token)));
@@ -400,6 +341,9 @@ contract FeeManagementIntegration is BaseTest {
         console.log("\n=== TEST PASSED ===\n");
     }
     
+    /**
+     * @notice Test default fee config is applied for new pools
+     */
     function test_feeManager_defaultFeeConfigForNewPool() public {
         // Create new pool without custom fee config
         uint256 maturityDate = block.timestamp + EPOCH_DURATION + 30 days;
@@ -429,62 +373,73 @@ contract FeeManagementIntegration is BaseTest {
         assertEq(poolFeeConfig.performanceFee, defaultConfig.performanceFee, "Default performance fee not applied");
     }
     
-    function test_feeManager_expenseRatioPartialPayment() public {
-        // Set expense ratio
-        vm.prank(admin);
-        feeManager.setPoolExpenseRatio(poolAddress, 80);
+    /**
+     * @notice Test collecting performance fees after pool profits
+     */
+    function test_feeManager_collectPerformanceFee() public {
+        console.log("\n=== TEST: Collect Performance Fee ===");
         
-        // Users deposit
+        // Users deposit to create pool value
+        console.log("\nStep 1: User depositing to create pool value...");
         uint256 depositAmount = 100_000e6;
+        
         vm.startPrank(user1);
         token.approve(poolAddress, depositAmount);
         pool.deposit(depositAmount, user1);
         vm.stopPrank();
         
-        // Accrue fees over 180 days
-        vm.warp(block.timestamp + 180 days);
+        // Simulate profit and collect performance fee
+        console.log("\nStep 2: Simulating profit and collecting performance fee...");
+        uint256 profit = 5_000e6; // 5k profit
+        uint256 performanceFee = feeManager.calculatePerformanceFee(poolAddress, profit);
+        console.log("  Profit:", profit);
+        console.log("  Performance Fee:", performanceFee);
         
-        vm.prank(operator);
-        uint256 accruedFees = feeManager.accrueExpenseRatio(poolAddress, depositAmount);
+        // Mint fee amount to operator to simulate fee collection
+        token.mint(operator, performanceFee);
         
-        assertGt(accruedFees, 0, "No fees accrued");
+        vm.startPrank(operator);
+        token.approve(address(feeManager), performanceFee);
         
-        // Partial payment
-        uint256 partialPayment = accruedFees / 2;
+        vm.expectEmit(true, false, false, true);
+        emit PerformanceFeeCollected(poolAddress, performanceFee, performanceFee);
         
-        vm.prank(operator);
-        feeManager.reduceAccruedFees(poolAddress, partialPayment);
+        feeManager.collectPerformanceFee(poolAddress, address(token), performanceFee);
+        vm.stopPrank();
         
-        assertEq(feeManager.getAccruedExpenseFees(poolAddress), accruedFees - partialPayment, "Accrued fees not reduced");
+        console.log("\nStep 3: Verifying fee collection...");
+        console.log("  Performance Fees Tracked:", feeManager.getPerformanceFees(poolAddress));
+        console.log("  Treasury Balance:", feeManager.getTreasuryBalance(address(token)));
+        
+        assertEq(feeManager.getPerformanceFees(poolAddress), performanceFee, "Performance fees not tracked");
+        assertEq(feeManager.getTreasuryBalance(address(token)), performanceFee, "Treasury balance mismatch");
+        
+        console.log("\n=== TEST PASSED ===\n");
     }
     
-    function test_feeManager_setDefaultExpenseRatio() public {
-        // Create new pool
-        uint256 maturityDate = block.timestamp + EPOCH_DURATION + 30 days;
+    /**
+     * @notice Test fee calculation with zero amounts
+     */
+    function test_feeManager_zeroAmountFees() public view {
+        assertEq(feeManager.calculateProtocolFee(poolAddress, 0), 0, "Protocol fee for 0 should be 0");
+        assertEq(feeManager.calculateSpvFee(poolAddress, 0), 0, "SPV fee for 0 should be 0");
+        assertEq(feeManager.calculatePerformanceFee(poolAddress, 0), 0, "Performance fee for 0 should be 0");
+    }
+    
+    /**
+     * @notice Test fee estimation helper
+     */
+    function test_feeManager_estimateFeesForAmount() public view {
+        uint256 amount = 10_000e6;
         
-        IPoolFactory.PoolConfig memory config = IPoolFactory.PoolConfig({
-            asset: address(token),
-            instrumentType: IPoolTypes.InstrumentType.DISCOUNTED,
-            instrumentName: "TEST-DEFAULT-EXPENSE",
-            targetRaise: TARGET_RAISE,
-            epochDuration: EPOCH_DURATION,
-            maturityDate: maturityDate,
-            discountRate: DISCOUNT_RATE,
-            spvAddress: spv,
-            couponDates: new uint256[](0),
-            couponRates: new uint256[](0),
-            minimumFundingThreshold: 8000
-        });
+        uint256 protocolFee = feeManager.estimateFeesForAmount(poolAddress, amount, "protocol");
+        uint256 spvFee = feeManager.estimateFeesForAmount(poolAddress, amount, "spv");
+        uint256 performanceFee = feeManager.estimateFeesForAmount(poolAddress, amount, "performance");
+        uint256 unknownFee = feeManager.estimateFeesForAmount(poolAddress, amount, "unknown");
         
-        vm.prank(admin);
-        (address newPoolAddress,) = factory.createPool(config);
-        
-        // Set default expense ratio
-        vm.prank(operator);
-        feeManager.setDefaultExpenseRatio(newPoolAddress);
-        
-        assertEq(feeManager.getPoolExpenseRatio(newPoolAddress), 80, "Default expense ratio not set (80 bps = 0.8%)");
+        assertTrue(protocolFee > 0, "Protocol fee should be > 0");
+        assertTrue(spvFee > 0, "SPV fee should be > 0");
+        assertTrue(performanceFee > 0, "Performance fee should be > 0");
+        assertEq(unknownFee, 0, "Unknown fee type should return 0");
     }
 }
-
-
