@@ -139,22 +139,29 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
     ) public initializer {
         require(_registry != address(0), "ManagedPoolFactory/invalid registry");
         require(_accessManager != address(0), "ManagedPoolFactory/invalid access manager");
-        require(_stableYieldManager != address(0), "ManagedPoolFactory/invalid stable yield manager");
         require(_timelockController != address(0), "ManagedPoolFactory/invalid timelock controller");
-        require(_stableYieldPoolImplementation != address(0), "ManagedPoolFactory/invalid pool implementation");
-        require(_managedPoolEscrowImplementation != address(0), "ManagedPoolFactory/invalid escrow implementation");
+        // StableYieldManager is optional - only required for creating StableYield pools
+        // StableYieldPool implementation is optional - only required for creating StableYield pools
+        // ManagedPoolEscrow implementation is optional - only required for creating StableYield pools
         
         __UUPSUpgradeable_init();
         
         registry = IPoolRegistry(_registry);
         accessManager = AccessManager(_accessManager);
-        stableYieldManager = StableYieldManager(_stableYieldManager);
         timelockController = _timelockController;
-        stableYieldPoolImplementation = _stableYieldPoolImplementation;
-        managedPoolEscrowImplementation = _managedPoolEscrowImplementation;
         version = 1;
         deploymentNonce = 0;
         
+        // Set optional StableYield components if provided
+        if (_stableYieldManager != address(0)) {
+            stableYieldManager = StableYieldManager(_stableYieldManager);
+        }
+        if (_stableYieldPoolImplementation != address(0)) {
+            stableYieldPoolImplementation = _stableYieldPoolImplementation;
+        }
+        if (_managedPoolEscrowImplementation != address(0)) {
+            managedPoolEscrowImplementation = _managedPoolEscrowImplementation;
+        }
     }
 
     /**
@@ -182,6 +189,9 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         onlyPoolCreator() 
         returns (address poolAddress, address escrowAddress) 
     {
+        require(address(stableYieldManager) != address(0), "ManagedPoolFactory/stable yield manager not set");
+        require(stableYieldPoolImplementation != address(0), "ManagedPoolFactory/pool impl not set");
+        require(managedPoolEscrowImplementation != address(0), "ManagedPoolFactory/escrow impl not set");
         _validateDeploymentConfig(config);
         
         escrowAddress = _deployManagedPoolEscrow(config);
@@ -215,6 +225,9 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         onlyPoolCreator() 
         returns (address poolAddress, address escrowAddress) 
     {
+        require(address(lockedPoolManager) != address(0), "ManagedPoolFactory/locked pool manager not set");
+        require(lockedPoolImplementation != address(0), "ManagedPoolFactory/locked pool impl not set");
+        require(lockedPoolEscrowImplementation != address(0), "ManagedPoolFactory/locked escrow impl not set");
         _validateLockedPoolConfig(config);
         
         escrowAddress = _deployLockedPoolEscrow(config);

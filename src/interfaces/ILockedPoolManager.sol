@@ -52,6 +52,13 @@ interface ILockedPoolManager {
         uint256 payout
     );
 
+    event PositionMatured(
+        address indexed poolAddress,
+        address indexed user,
+        uint256 indexed positionId,
+        uint256 maturityTime
+    );
+
     event EarlyExitProcessed(
         address indexed poolAddress,
         address indexed user,
@@ -72,6 +79,21 @@ interface ILockedPoolManager {
         address indexed poolAddress,
         bytes32 indexed allocationId,
         uint256 returnedAmount
+    );
+
+    event AutoRolloverSet(
+        uint256 indexed positionId,
+        address indexed user,
+        bool enabled
+    );
+
+    event PositionRolledOver(
+        address indexed poolAddress,
+        address indexed user,
+        uint256 indexed oldPositionId,
+        uint256 newPositionId,
+        uint256 principalRolled,
+        uint256 interestHandled
     );
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -127,6 +149,20 @@ interface ILockedPoolManager {
         uint256 positionId,
         address caller
     ) external returns (uint256 payout, uint256 penalty);
+
+    function setAutoRollover(
+        uint256 positionId,
+        bool enabled,
+        address caller
+    ) external;
+
+    function executeRollover(
+        uint256 positionId
+    ) external returns (uint256 newPositionId);
+
+    function batchExecuteRollovers(
+        uint256[] calldata positionIds
+    ) external returns (uint256[] memory newPositionIds);
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// SPV FUNCTIONS ////////////////////////////////

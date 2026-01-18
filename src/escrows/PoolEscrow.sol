@@ -55,6 +55,9 @@ contract PoolEscrow is Initializable, UUPSUpgradeable, IPoolEscrow, ReentrancyGu
     event FundsReleased(address indexed recipient, uint256 amount, bytes32 indexed transferId);
     event FundsLocked(uint256 amount, string reason);
     event LargeTransferDetected(bytes32 indexed transferId, uint256 amount, uint256 threshold);
+    event CouponPaymentTracked(uint256 amount, uint256 totalCoupons, uint256 timestamp);
+    event MaturityReturnTracked(uint256 amount, uint256 totalReturns, uint256 timestamp);
+    event CouponClaimed(address indexed user, uint256 amount, uint256 timestamp);
     
     modifier onlyManager() {
         require(msg.sender == manager, "PoolEscrow/only-manager");
@@ -214,7 +217,7 @@ contract PoolEscrow is Initializable, UUPSUpgradeable, IPoolEscrow, ReentrancyGu
         totalCouponPaymentsReceived += amount;
         totalCouponPool += amount;
         
-        emit FundsReleased(address(this), amount, bytes32(uint256(0xcafe)));
+        emit CouponPaymentTracked(amount, totalCouponPaymentsReceived, block.timestamp);
     }
     
     function trackMaturityReturn(uint256 amount) external onlyManager {
@@ -222,7 +225,7 @@ contract PoolEscrow is Initializable, UUPSUpgradeable, IPoolEscrow, ReentrancyGu
         
         totalMaturityReturns += amount;
         
-        emit FundsReleased(address(this), amount, bytes32(uint256(0xfeed)));
+        emit MaturityReturnTracked(amount, totalMaturityReturns, block.timestamp);
     }
     
     function claimCoupon(address user, uint256 amount) external onlyManager nonReentrant {
@@ -235,7 +238,7 @@ contract PoolEscrow is Initializable, UUPSUpgradeable, IPoolEscrow, ReentrancyGu
         
         asset.safeTransfer(user, amount);
         
-        emit FundsReleased(user, amount, bytes32(uint256(0xc0ff)));
+        emit CouponClaimed(user, amount, block.timestamp);
     }
     
 

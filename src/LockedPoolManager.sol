@@ -21,28 +21,32 @@ import "./libraries/LockedPoolLibrary.sol";
  * @dev Manages locked pool business logic
  * @notice Handles deposits, redemptions, early exits, and SPV coordination
  */
+
 contract LockedPoolManager is 
     Initializable,
     UUPSUpgradeable,
     ReentrancyGuardUpgradeable,
     ILockedPoolManager
 {
-    using SafeERC20 for IERC20;
+   
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// STATE VARIABLES //////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
+    using SafeERC20 for IERC20;
     AccessManager public accessManager;
     IPoolRegistry public registry;
+    
     address public timelockController;
     address public managedPoolFactory;
     
     uint256 public version;
 
     uint256 public nextPositionId;
+    address public yieldReserve;
 
-    uint8 public constant MAX_TIERS = 10;
+    uint8 public constant MAX_TIERS = 5;
 
     mapping(address => ILockedPoolTypes.PoolConfig) public poolConfigs;
     mapping(address => address) public poolEscrows;
@@ -57,7 +61,7 @@ contract LockedPoolManager is
     mapping(bytes32 => ILockedPoolTypes.SPVAllocation) public spvAllocations;
     mapping(address => bytes32[]) public poolAllocationIds;
 
-    address public yieldReserve;
+
     
     mapping(address => ILockedPoolTypes.PoolProtocolAccounting) public poolAccounting;
     mapping(uint256 => ILockedPoolTypes.DebtPosition) public debtPositions;
@@ -175,12 +179,18 @@ contract LockedPoolManager is
 
     /**
      * @notice Configure a lock tier for a pool
+     * @dev Callable by operator or factory (during pool creation)
      */
     function configureLockTier(
         address poolAddress,
         uint8 tierIndex,
         ILockedPoolTypes.LockTier memory tier
-    ) external override onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) {
+    ) external override poolExists(poolAddress) {
+        require(
+            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) || 
+            msg.sender == managedPoolFactory,
+            "LockedPoolManager/not authorized"
+        );
         require(tierIndex < MAX_TIERS, "LockedPoolManager/invalid tier index");
         require(tier.durationDays > 0, "LockedPoolManager/invalid duration");
         require(tier.apyBps > 0 && tier.apyBps <= 5000, "LockedPoolManager/invalid apy");
@@ -188,17 +198,13 @@ contract LockedPoolManager is
         
         ILockedPoolTypes.LockTier[] storage tiers = poolTiers[poolAddress];
         
-        while (tiers.length <= tierIndex) {
-            tiers.push(ILockedPoolTypes.LockTier({
-                durationDays: 0,
-                apyBps: 0,
-                earlyExitPenaltyBps: 0,
-                minDeposit: 0,
-                isActive: false
-            }));
+        if (tierIndex < tiers.length) {
+            tiers[tierIndex] = tier;
+        } else if (tierIndex == tiers.length) {
+            tiers.push(tier);
+        } else {
+            revert("LockedPoolManager/configure tiers sequentially");
         }
-        
-        tiers[tierIndex] = tier;
         
         emit LockTierConfigured(
             poolAddress,
@@ -299,7 +305,9 @@ contract LockedPoolManager is
             status: ILockedPoolTypes.PositionStatus.ACTIVE,
             actualPayout: 0,
             penaltyPaid: 0,
-            interestEarned: 0
+            interestEarned: 0,
+            autoRollover: false,
+            rolledFromPositionId: 0
         });
         
         userPositionIds[poolAddress][depositor].push(positionId);
@@ -315,6 +323,7 @@ contract LockedPoolManager is
         if (paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
             escrow.payInterest(depositor, interestAmount);
             positions[positionId].interestPaid = true;
+            positions[positionId].interestEarned = interestAmount;
             metrics.totalInterestPaidUpfront += interestAmount;
             
             emit InterestPaidUpfront(poolAddress, depositor, positionId, interestAmount);
@@ -354,9 +363,9 @@ contract LockedPoolManager is
         
         require(position.user == caller, "LockedPoolManager/not owner");
         require(
-            position.status == ILockedPoolTypes.PositionStatus.ACTIVE ||
+            position.status == ILockedPoolTypes.PositionStatus.ACTIVE || 
             position.status == ILockedPoolTypes.PositionStatus.MATURED,
-            "LockedPoolManager/not redeemable"
+            "LockedPoolManager/invalid status"
         );
         require(block.timestamp >= position.lockEnd, "LockedPoolManager/not matured");
         
@@ -364,7 +373,11 @@ contract LockedPoolManager is
         
         position.status = ILockedPoolTypes.PositionStatus.REDEEMED;
         position.actualPayout = payout;
-        position.interestEarned = position.fullInterestAmount;
+        
+        // Set interestEarned for AT_MATURITY positions (UPFRONT already set at deposit)
+        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.AT_MATURITY) {
+            position.interestEarned = position.fullInterestAmount;
+        }
         
         ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
         metrics.activePositions--;
@@ -381,6 +394,332 @@ contract LockedPoolManager is
         emit PositionRedeemed(poolAddress, caller, positionId, payout);
         
         return payout;
+    }
+
+    /**
+     * @notice Mark positions as matured (batch operation)
+     * @dev Allows operators to mark matured positions for reporting/tracking
+     * @param positionIds Array of position IDs to mature
+     * @return maturedCount Number of positions successfully matured
+     */
+    function batchMaturePositions(
+        uint256[] calldata positionIds
+    ) external onlyRole(accessManager.OPERATOR_ROLE()) returns (uint256 maturedCount) {
+        for (uint256 i = 0; i < positionIds.length; i++) {
+            ILockedPoolTypes.UserPosition storage position = positions[positionIds[i]];
+            
+            // Skip if not eligible for maturation
+            if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE) continue;
+            if (block.timestamp < position.lockEnd) continue;
+            
+            position.status = ILockedPoolTypes.PositionStatus.MATURED;
+            maturedCount++;
+            
+            emit PositionMatured(position.poolAddress, position.user, positionIds[i], position.lockEnd);
+        }
+        
+        return maturedCount;
+    }
+
+    /**
+     * @notice Check if a position can be matured
+     * @param positionId Position to check
+     * @return canMature Whether position is eligible for maturation
+     * @return reason Explanation if cannot mature
+     */
+    function canMaturePosition(uint256 positionId) external view returns (bool canMature, string memory reason) {
+        ILockedPoolTypes.UserPosition storage position = positions[positionId];
+        
+        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE) {
+            return (false, "Position not active");
+        }
+        if (block.timestamp < position.lockEnd) {
+            return (false, "Lock period not ended");
+        }
+        
+        return (true, "Ready for maturation");
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////// AUTO-ROLLOVER /////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * @notice Set auto-rollover preference for a position
+     * @param positionId Position to configure
+     * @param enabled Whether to enable auto-rollover
+     * @param caller User setting the preference (passed by Pool)
+     */
+    function setAutoRollover(
+        uint256 positionId,
+        bool enabled,
+        address caller
+    ) external override {
+        ILockedPoolTypes.UserPosition storage position = positions[positionId];
+        
+        require(msg.sender == position.poolAddress, "LockedPoolManager/only pool");
+        require(position.user == caller, "LockedPoolManager/not owner");
+        require(
+            position.status == ILockedPoolTypes.PositionStatus.ACTIVE ||
+            position.status == ILockedPoolTypes.PositionStatus.MATURED,
+            "LockedPoolManager/invalid status"
+        );
+        
+        position.autoRollover = enabled;
+        
+        emit AutoRolloverSet(positionId, caller, enabled);
+    }
+
+    /**
+     * @notice Execute rollover for a matured position with auto-rollover enabled
+     * @dev For UPFRONT: principal rolls, new interest paid upfront
+     *      For AT_MATURITY: principal + interest compounds
+     * @param positionId Position to rollover
+     * @return newPositionId ID of the new position created
+     */
+    function executeRollover(
+        uint256 positionId
+    ) external override onlyRole(accessManager.OPERATOR_ROLE()) returns (uint256 newPositionId) {
+        ILockedPoolTypes.UserPosition storage position = positions[positionId];
+        
+        require(
+            position.status == ILockedPoolTypes.PositionStatus.ACTIVE ||
+            position.status == ILockedPoolTypes.PositionStatus.MATURED,
+            "LockedPoolManager/invalid status"
+        );
+        require(block.timestamp >= position.lockEnd, "LockedPoolManager/not matured");
+        require(position.autoRollover, "LockedPoolManager/rollover not enabled");
+        
+        address poolAddress = position.poolAddress;
+        ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][position.tierIndex];
+        require(tier.isActive, "LockedPoolManager/tier not active");
+        
+        // Calculate rollover amounts based on interest payment choice
+        uint256 principalToRoll;
+        uint256 interestHandled;
+        
+        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
+            // UPFRONT: Only principal rolls, interest already paid
+            principalToRoll = position.principalDeposited;
+            interestHandled = position.fullInterestAmount; // Already paid at original deposit
+        } else {
+            // AT_MATURITY: Principal + interest compounds
+            principalToRoll = position.principalDeposited + position.fullInterestAmount;
+            interestHandled = position.fullInterestAmount; // Compounded into new principal
+            position.interestEarned = position.fullInterestAmount;
+        }
+        
+        // Mark old position as rolled over
+        position.status = ILockedPoolTypes.PositionStatus.ROLLED_OVER;
+        position.actualPayout = 0; // No payout, funds rolled
+        
+        // Update metrics for old position closure
+        ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
+        metrics.activePositions--;
+        metrics.totalPrincipalLocked -= position.principalDeposited;
+        metrics.totalExpectedMaturityPayout -= position.expectedMaturityPayout;
+        
+        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.AT_MATURITY) {
+            metrics.totalInterestPendingMaturity -= position.fullInterestAmount;
+        }
+        
+        // Create new position (reuses existing deposit logic path)
+        newPositionId = _createRolloverPosition(
+            poolAddress,
+            position.user,
+            principalToRoll,
+            position.tierIndex,
+            position.paymentChoice,
+            positionId
+        );
+        
+        emit PositionRolledOver(
+            poolAddress,
+            position.user,
+            positionId,
+            newPositionId,
+            principalToRoll,
+            interestHandled
+        );
+        
+        return newPositionId;
+    }
+
+    /**
+     * @notice Batch execute rollovers for multiple positions
+     * @param positionIds Array of position IDs to rollover
+     * @return newPositionIds Array of new position IDs created
+     */
+    function batchExecuteRollovers(
+        uint256[] calldata positionIds
+    ) external override onlyRole(accessManager.OPERATOR_ROLE()) returns (uint256[] memory newPositionIds) {
+        newPositionIds = new uint256[](positionIds.length);
+        
+        for (uint256 i = 0; i < positionIds.length; i++) {
+            ILockedPoolTypes.UserPosition storage position = positions[positionIds[i]];
+            
+            // Skip positions that can't be rolled over
+            if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE &&
+                position.status != ILockedPoolTypes.PositionStatus.MATURED) {
+                continue;
+            }
+            if (block.timestamp < position.lockEnd) continue;
+            if (!position.autoRollover) continue;
+            
+            ILockedPoolTypes.LockTier storage tier = poolTiers[position.poolAddress][position.tierIndex];
+            if (!tier.isActive) continue;
+            
+            // Execute individual rollover (inline for gas efficiency)
+            newPositionIds[i] = _executeRolloverInternal(positionIds[i], position);
+        }
+        
+        return newPositionIds;
+    }
+
+    /**
+     * @dev Internal function to create a new position from rollover
+     */
+    function _createRolloverPosition(
+        address poolAddress,
+        address user,
+        uint256 principal,
+        uint8 tierIndex,
+        ILockedPoolTypes.InterestPayment paymentChoice,
+        uint256 rolledFromId
+    ) internal returns (uint256 newPositionId) {
+        ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][tierIndex];
+        
+        uint256 interestAmount = LockedPoolLibrary.calculateInterest(
+            principal,
+            tier.apyBps,
+            tier.durationDays
+        );
+        
+        uint256 investedAmount = LockedPoolLibrary.calculateInvestedAmount(
+            principal,
+            interestAmount,
+            paymentChoice
+        );
+        
+        uint256 expectedPayout = LockedPoolLibrary.calculateExpectedMaturityPayout(
+            principal,
+            interestAmount,
+            paymentChoice
+        );
+        
+        newPositionId = nextPositionId++;
+        
+        positions[newPositionId] = ILockedPoolTypes.UserPosition({
+            positionId: newPositionId,
+            user: user,
+            poolAddress: poolAddress,
+            principalDeposited: principal,
+            fullInterestAmount: interestAmount,
+            apyBpsAtDeposit: tier.apyBps,
+            paymentChoice: paymentChoice,
+            interestPaid: false,
+            investedAmount: investedAmount,
+            expectedMaturityPayout: expectedPayout,
+            lockStart: block.timestamp,
+            lockEnd: block.timestamp + (tier.durationDays * 1 days),
+            tierIndex: tierIndex,
+            status: ILockedPoolTypes.PositionStatus.ACTIVE,
+            actualPayout: 0,
+            penaltyPaid: 0,
+            interestEarned: 0,
+            autoRollover: true, // Inherit rollover preference
+            rolledFromPositionId: rolledFromId
+        });
+        
+        userPositionIds[poolAddress][user].push(newPositionId);
+        
+        // Update metrics for new position
+        ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
+        metrics.totalPrincipalLocked += principal;
+        metrics.totalInterestCommitted += interestAmount;
+        metrics.totalInvestedAmount += investedAmount;
+        metrics.totalExpectedMaturityPayout += expectedPayout;
+        metrics.activePositions++;
+        metrics.totalPositions++;
+        
+        // Handle interest payment for new position
+        if (paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
+            LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
+            escrow.payInterest(user, interestAmount);
+            positions[newPositionId].interestPaid = true;
+            positions[newPositionId].interestEarned = interestAmount;
+            metrics.totalInterestPaidUpfront += interestAmount;
+            
+            emit InterestPaidUpfront(poolAddress, user, newPositionId, interestAmount);
+        } else {
+            metrics.totalInterestPendingMaturity += interestAmount;
+        }
+        
+        emit PositionCreated(
+            poolAddress,
+            user,
+            newPositionId,
+            principal,
+            interestAmount,
+            paymentChoice,
+            positions[newPositionId].lockEnd
+        );
+        
+        return newPositionId;
+    }
+
+    /**
+     * @dev Internal rollover execution for batch operations
+     */
+    function _executeRolloverInternal(
+        uint256 positionId,
+        ILockedPoolTypes.UserPosition storage position
+    ) internal returns (uint256 newPositionId) {
+        address poolAddress = position.poolAddress;
+        
+        uint256 principalToRoll;
+        uint256 interestHandled;
+        
+        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
+            principalToRoll = position.principalDeposited;
+            interestHandled = position.fullInterestAmount;
+        } else {
+            principalToRoll = position.principalDeposited + position.fullInterestAmount;
+            interestHandled = position.fullInterestAmount;
+            position.interestEarned = position.fullInterestAmount;
+        }
+        
+        position.status = ILockedPoolTypes.PositionStatus.ROLLED_OVER;
+        position.actualPayout = 0;
+        
+        ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
+        metrics.activePositions--;
+        metrics.totalPrincipalLocked -= position.principalDeposited;
+        metrics.totalExpectedMaturityPayout -= position.expectedMaturityPayout;
+        
+        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.AT_MATURITY) {
+            metrics.totalInterestPendingMaturity -= position.fullInterestAmount;
+        }
+        
+        newPositionId = _createRolloverPosition(
+            poolAddress,
+            position.user,
+            principalToRoll,
+            position.tierIndex,
+            position.paymentChoice,
+            positionId
+        );
+        
+        emit PositionRolledOver(
+            poolAddress,
+            position.user,
+            positionId,
+            newPositionId,
+            principalToRoll,
+            interestHandled
+        );
+        
+        return newPositionId;
     }
 
     /**
@@ -421,7 +760,7 @@ contract LockedPoolManager is
     ) internal view {
         require(position.user == caller, "LockedPoolManager/not owner");
         require(position.status == ILockedPoolTypes.PositionStatus.ACTIVE, "LockedPoolManager/not active");
-        require(block.timestamp < position.lockEnd, "LockedPoolManager/already matured");
+        require(block.timestamp < position.lockEnd, "LockedPoolManager/use redeem for matured");
     }
 
     function _calculateEarlyExit(

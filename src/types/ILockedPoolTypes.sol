@@ -21,7 +21,8 @@ interface ILockedPoolTypes {
         ACTIVE,         // Position is locked
         MATURED,        // Lock period ended, can redeem
         REDEEMED,       // Principal returned to user
-        EARLY_EXIT      // User exited before maturity with penalty
+        EARLY_EXIT,     // User exited before maturity with penalty
+        ROLLED_OVER     // Position rolled into a new one
     }
 
     enum AllocationStatus {
@@ -51,7 +52,7 @@ interface ILockedPoolTypes {
         uint256 amount;
         uint256 returnedAmount;
         uint256 createdAt;
-        AllocationStatus status;
+        AllocationStatus status; 
     }
 
     /**
@@ -89,6 +90,8 @@ interface ILockedPoolTypes {
      * @param actualPayout Amount actually paid out
      * @param penaltyPaid Penalty amount if early exit
      * @param interestEarned Interest actually earned (pro-rata if early)
+     * @param autoRollover Whether to auto-rollover at maturity
+     * @param rolledFromPositionId Previous position if this is a rollover (0 if original)
      */
     struct UserPosition {
         uint256 positionId;
@@ -108,6 +111,8 @@ interface ILockedPoolTypes {
         uint256 actualPayout;
         uint256 penaltyPaid;
         uint256 interestEarned;
+        bool autoRollover;
+        uint256 rolledFromPositionId;
     }
 
     /**

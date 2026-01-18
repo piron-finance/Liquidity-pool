@@ -122,7 +122,7 @@ library LockedPoolLibrary {
         if (paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
             return principal - interestAmount;
         }
-        return principal;
+        return principal; 
     }
 
     /**

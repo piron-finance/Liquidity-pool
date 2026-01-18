@@ -23,6 +23,10 @@ library PoolLifecycleLibrary {
     event PoolFullyWithdrawn(address indexed pool, uint256 timestamp);
     event EmergencyStateChanged(address indexed poolAddress, string trigger, uint256 totalAmount, uint256 totalShares, uint256 timestamp);
     
+    // Soft validation events for audit trail
+    event MaturityShortfall(address indexed pool, uint256 expected, uint256 actual, uint256 shortfall);
+    event MaturityOverage(address indexed pool, uint256 expected, uint256 actual);
+    
     /**
      * @notice Handle when pool reaches target raise amount
      * @param pools Storage mapping of pool data
@@ -218,6 +222,16 @@ library PoolLifecycleLibrary {
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         require(IERC20(poolInfo.asset).balanceOf(msg.sender) >= finalAmount, "PoolLifecycle/insufficient spv balance");
         
+        // Soft validation: emit events if return is unexpected
+        uint256 expectedReturn = _calculateExpectedReturn(poolData);
+        if (finalAmount < expectedReturn) {
+            // Loss scenario - partial return
+            emit MaturityShortfall(liquidityPool, expectedReturn, finalAmount, expectedReturn - finalAmount);
+        } else if (finalAmount > expectedReturn * 120 / 100) {
+            // Unexpectedly high return (>20% above expected) - flag for review
+            emit MaturityOverage(liquidityPool, expectedReturn, finalAmount);
+        }
+        
         IERC20(poolInfo.asset).transferFrom(msg.sender, poolInfo.escrow, finalAmount);
         
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
@@ -228,6 +242,19 @@ library PoolLifecycleLibrary {
         
         emit MaturityProcessed(finalAmount);
         emit SPVFundsReturned(liquidityPool, finalAmount);
+    }
+    
+    /**
+     * @dev Calculate expected return based on instrument type
+     */
+    function _calculateExpectedReturn(IPoolTypes.PoolData storage poolData) internal view returns (uint256) {
+        if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
+            // Expected: face value
+            return poolData.config.faceValue;
+        } else {
+            // Expected: principal (returns are via coupons)
+            return poolData.actualInvested;
+        }
     }
     
     /**

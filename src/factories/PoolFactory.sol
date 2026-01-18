@@ -155,7 +155,7 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         }));
         
         IPoolManager(manager).initializePool(pool, IPoolTypes.PoolConfig({
-            instrumentType: config.instrumentType,
+            instrumentType: config.instrumentType, 
             faceValue: 0, 
             purchasePrice: config.targetRaise,
             targetRaise: config.targetRaise,
@@ -163,9 +163,10 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
             maturityDate: config.maturityDate,
             couponDates: config.couponDates,
             couponRates: config.couponRates,
-            refundGasFee: 0,
             discountRate: config.discountRate,
-            minimumFundingThreshold: config.minimumFundingThreshold
+            minimumFundingThreshold: config.minimumFundingThreshold,
+            withdrawalFeeBps: config.withdrawalFeeBps,
+            minInvestment: config.minInvestment
         }));
         
         emit PoolCreated(pool, manager, config.asset, config.instrumentName, config.targetRaise, config.maturityDate);
@@ -200,7 +201,7 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
      * @param newPoolImpl New LiquidityPool implementation address
      * @dev Only affects NEW pools created after this update
      */
-    function updatePoolImplementation(address newPoolImpl) external onlyRole(accessManager.EXECUTOR_ROLE()) {
+    function updatePoolImplementation(address newPoolImpl) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
         require(newPoolImpl != address(0), "Invalid implementation");
         require(IPoolRegistry(registry).isApprovedImplementation(newPoolImpl), "Implementation not approved");
         
@@ -215,7 +216,7 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
      * @param newEscrowImpl New PoolEscrow implementation address
      * @dev Only affects NEW pools created after this update
      */
-    function updateEscrowImplementation(address newEscrowImpl) external onlyRole(accessManager.EXECUTOR_ROLE()) {
+    function updateEscrowImplementation(address newEscrowImpl) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
         require(newEscrowImpl != address(0), "Invalid implementation");
         require(IPoolRegistry(registry).isApprovedImplementation(newEscrowImpl), "Implementation not approved");
         

@@ -171,14 +171,13 @@ library CalculationLibrary {
     /**
      * @dev Process coupon payment from SPV
      * @param poolData Storage reference to pool data
-     * @param poolUsers Storage mapping of user pool data
      * @param poolRegistry Pool registry contract
      * @param liquidityPool Pool address
      * @param amount Coupon amount received
      */
     function processCouponPayment(
         IPoolTypes.PoolData storage poolData,
-        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
+        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage /* poolUsers - unused but kept for interface compatibility */,
         IPoolRegistry poolRegistry,
         address liquidityPool,
         uint256 amount

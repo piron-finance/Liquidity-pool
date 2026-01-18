@@ -14,7 +14,7 @@ import "./interfaces/IPoolRegistry.sol";
 import "./escrows/StableYieldEscrow.sol"; 
 import "./types/IStableYieldTypes.sol";
 import "./libraries/StableYieldNAVLibrary.sol";
-import "./libraries/StableYieldInstrumentLibrary.sol";
+
 
 /**
  * @title StableYieldManager
@@ -785,11 +785,32 @@ contract StableYieldManager is
         uint256 instrumentId,
         uint256 couponAmount
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
-        StableYieldInstrumentLibrary.recordCouponPayment(
-            pools[poolAddress],
-            poolInstruments[poolAddress],
+
+        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
+        IStableYieldTypes.InstrumentHolding[] storage instruments =  poolInstruments[poolAddress];
+        
+        require(instrumentId < instruments.length, "InstrumentLib/invalid instrument");
+        
+        IStableYieldTypes.InstrumentHolding storage instrument = instruments[instrumentId];
+        require(instrument.isActive, "InstrumentLib/instrument not active");
+        require(
+            instrument.instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING,
+            "InstrumentLib/not interest bearing"
+        );
+        require(block.timestamp >= instrument.nextCouponDueDate, "InstrumentLib/coupon not due");
+
+        instrument.couponsPaid++;
+        
+        if (block.timestamp < instrument.maturityDate) {
+            uint256 couponPeriodSeconds = (365 days) / instrument.couponFrequency;
+            instrument.nextCouponDueDate += couponPeriodSeconds;
+        }
+        
+        emit CouponPaymentReceived(
+            poolData.poolAddress,
             instrumentId,
-            couponAmount
+            couponAmount,
+            instrument.couponsPaid
         );
         
         _triggerNAVUpdate(poolAddress, "coupon_received");

@@ -12,10 +12,12 @@ import "../src/factories/ManagedPoolFactory.sol";
 import "../src/StableYieldManager.sol";
 import "../src/managed/StableYieldPool.sol";
 import "../src/escrows/StableYieldEscrow.sol";
+import "../src/LockedPoolManager.sol";
+import "../src/managed/LockedPool.sol";
+import "../src/escrows/LockedPoolEscrow.sol";
 import "../src/AccessManager.sol";
 import "../src/governance/TimelockController.sol" as PironTimelock;
 import "../src/governance/UpgradeGuardian.sol";
-import "../src/FeeManager.sol";
 import "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 /**
@@ -65,7 +67,12 @@ contract DeployUpgradeable is Script {
         address stableYieldPoolImpl;        // Implementation
         address stableYieldEscrowImpl;      // Implementation
         
-        address feeManager;         // Immutable
+        // Locked Pool Components
+        address lockedPoolManagerImpl;      // Implementation
+        address lockedPoolManagerProxy;     // Proxy
+        address lockedPoolImpl;             // Implementation
+        address lockedPoolEscrowImpl;       // Implementation
+        
         address baseToken;          // Token
     }
     
@@ -81,7 +88,7 @@ contract DeployUpgradeable is Script {
         
         DeployedContracts memory contracts = _deployContracts(config);
         
-        _configureSystem(contracts, config);
+        _configureSystem(contracts);
         
         _verifyDeployment(contracts, config);
         
@@ -190,10 +197,11 @@ contract DeployUpgradeable is Script {
         emit ContractDeployed("ManagerImpl", contracts.managerImpl);
         
         bytes memory managerInitData = abi.encodeWithSignature(
-            "initialize(address,address,address)",
+            "initialize(address,address,address,address)",
             contracts.poolRegistryProxy,
             contracts.accessManager,
-            contracts.timelockController
+            contracts.timelockController,
+            config.treasury
         );
         
         contracts.managerProxy = address(new ERC1967Proxy(
@@ -234,25 +242,17 @@ contract DeployUpgradeable is Script {
         console.log("PoolFactory proxy deployed at: %s", contracts.poolFactoryProxy);
         emit ProxyDeployed("PoolFactory", contracts.poolFactoryProxy, contracts.poolFactoryImpl);
         
-        // 8. Deploy FeeManager (immutable first, needed by StableYieldManager)
-        contracts.feeManager = address(new FeeManager(
-            contracts.accessManager,
-            config.treasury
-        ));
-        console.log("FeeManager deployed at: %s", contracts.feeManager);
-        emit ContractDeployed("FeeManager", contracts.feeManager);
-        
-        // 9. Deploy StableYieldManager implementation and proxy
+        // 8. Deploy StableYieldManager implementation and proxy
         contracts.stableYieldManagerImpl = address(new StableYieldManager());
         console.log("StableYieldManager implementation deployed at: %s", contracts.stableYieldManagerImpl);
         emit ContractDeployed("StableYieldManagerImpl", contracts.stableYieldManagerImpl);
         
         bytes memory stableYieldManagerInitData = abi.encodeWithSignature(
-            "initialize(address,address,address,address)",
+            "initialize(address,address,address,uint256)",
             contracts.accessManager,
             contracts.poolRegistryProxy,
             contracts.timelockController,
-            contracts.feeManager
+            uint256(300)  // 3% default fee
         );
         
         contracts.stableYieldManagerProxy = address(new ERC1967Proxy(
@@ -262,7 +262,7 @@ contract DeployUpgradeable is Script {
         console.log("StableYieldManager proxy deployed at: %s", contracts.stableYieldManagerProxy);
         emit ProxyDeployed("StableYieldManager", contracts.stableYieldManagerProxy, contracts.stableYieldManagerImpl);
         
-        // 10. Deploy StableYieldPool and StableYieldEscrow implementations
+        // 9. Deploy StableYieldPool and StableYieldEscrow implementations
         contracts.stableYieldPoolImpl = address(new StableYieldPool());
         console.log("StableYieldPool implementation deployed at: %s", contracts.stableYieldPoolImpl);
         emit ContractDeployed("StableYieldPoolImpl", contracts.stableYieldPoolImpl);
@@ -271,7 +271,7 @@ contract DeployUpgradeable is Script {
         console.log("StableYieldEscrow implementation deployed at: %s", contracts.stableYieldEscrowImpl);
         emit ContractDeployed("StableYieldEscrowImpl", contracts.stableYieldEscrowImpl);
         
-        // 11. Deploy ManagedPoolFactory implementation and proxy
+        // 10. Deploy ManagedPoolFactory implementation and proxy
         contracts.managedPoolFactoryImpl = address(new ManagedPoolFactory());
         console.log("ManagedPoolFactory implementation deployed at: %s", contracts.managedPoolFactoryImpl);
         emit ContractDeployed("ManagedPoolFactoryImpl", contracts.managedPoolFactoryImpl);
@@ -292,9 +292,37 @@ contract DeployUpgradeable is Script {
         ));
         console.log("ManagedPoolFactory proxy deployed at: %s", contracts.managedPoolFactoryProxy);
         emit ProxyDeployed("ManagedPoolFactory", contracts.managedPoolFactoryProxy, contracts.managedPoolFactoryImpl);
+        
+        // 11. Deploy LockedPoolManager implementation and proxy
+        contracts.lockedPoolManagerImpl = address(new LockedPoolManager());
+        console.log("LockedPoolManager implementation deployed at: %s", contracts.lockedPoolManagerImpl);
+        emit ContractDeployed("LockedPoolManagerImpl", contracts.lockedPoolManagerImpl);
+        
+        bytes memory lockedPoolManagerInitData = abi.encodeWithSignature(
+            "initialize(address,address,address)",
+            contracts.accessManager,
+            contracts.poolRegistryProxy,
+            contracts.timelockController
+        );
+        
+        contracts.lockedPoolManagerProxy = address(new ERC1967Proxy(
+            contracts.lockedPoolManagerImpl,
+            lockedPoolManagerInitData
+        ));
+        console.log("LockedPoolManager proxy deployed at: %s", contracts.lockedPoolManagerProxy);
+        emit ProxyDeployed("LockedPoolManager", contracts.lockedPoolManagerProxy, contracts.lockedPoolManagerImpl);
+        
+        // 12. Deploy LockedPool and LockedPoolEscrow implementations
+        contracts.lockedPoolImpl = address(new LockedPool());
+        console.log("LockedPool implementation deployed at: %s", contracts.lockedPoolImpl);
+        emit ContractDeployed("LockedPoolImpl", contracts.lockedPoolImpl);
+        
+        contracts.lockedPoolEscrowImpl = address(new LockedPoolEscrow());
+        console.log("LockedPoolEscrow implementation deployed at: %s", contracts.lockedPoolEscrowImpl);
+        emit ContractDeployed("LockedPoolEscrowImpl", contracts.lockedPoolEscrowImpl);
     }
     
-    function _configureSystem(DeployedContracts memory contracts, DeploymentConfig memory config) internal {
+    function _configureSystem(DeployedContracts memory contracts) internal {
         console.log("=== CONFIGURING UPGRADEABLE SYSTEM ===");
         
         PoolRegistry registry = PoolRegistry(contracts.poolRegistryProxy);
@@ -305,6 +333,10 @@ contract DeployUpgradeable is Script {
         accessMgr.grantFactoryRoleDuringDeployment(contracts.managedPoolFactoryProxy);
         console.log("FACTORY_ROLE granted to ManagedPoolFactory");
         
+        // Grant POOL_CREATOR_ROLE to ManagedPoolFactory so it can register pools in PoolRegistry
+        accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.managedPoolFactoryProxy);
+        console.log("POOL_CREATOR_ROLE granted to ManagedPoolFactory");
+        
         // Grant POOL_CREATOR_ROLE to StableYieldManager so it can register pools in PoolRegistry
         accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy);
         console.log("POOL_CREATOR_ROLE granted to StableYieldManager");
@@ -312,6 +344,14 @@ contract DeployUpgradeable is Script {
         // Grant OPERATOR_ROLE to StableYieldManager for escrow operations (allocateToSPV, receiveSPVLiquidity, collectMonthlyFees)
         accessMgr.grantRoleDuringDeployment(accessMgr.OPERATOR_ROLE(), contracts.stableYieldManagerProxy);
         console.log("OPERATOR_ROLE granted to StableYieldManager");
+        
+        // Grant POOL_CREATOR_ROLE to LockedPoolManager for pool registration
+        accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.lockedPoolManagerProxy);
+        console.log("POOL_CREATOR_ROLE granted to LockedPoolManager");
+        
+        // Grant OPERATOR_ROLE to LockedPoolManager for escrow operations
+        accessMgr.grantRoleDuringDeployment(accessMgr.OPERATOR_ROLE(), contracts.lockedPoolManagerProxy);
+        console.log("OPERATOR_ROLE granted to LockedPoolManager");
         
         // Finalize deployment to prevent further immediate role grants
         accessMgr.finalizeDeployment();
@@ -321,26 +361,30 @@ contract DeployUpgradeable is Script {
         registry.setFactory(contracts.poolFactoryProxy);
         console.log("PoolFactory registered in PoolRegistry");
         
-        // Grant POOL_CREATOR_ROLE to StableYieldManager on PoolRegistry (for registerStableYieldPool)
-        registry.grantRole(accessMgr.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy);
-        console.log("POOL_CREATOR_ROLE granted to StableYieldManager on PoolRegistry");
         
         // Set ManagedPoolFactory in StableYieldManager
         StableYieldManager(contracts.stableYieldManagerProxy).setManagedPoolFactory(contracts.managedPoolFactoryProxy);
         console.log("ManagedPoolFactory registered in StableYieldManager");
         
-        // Note: SPV_ROLE and OPERATOR_ROLE for StableYieldManager operations are granted 
-        // via the shared AccessManager, not on StableYieldManager itself
+        // Configure LockedPoolManager with ManagedPoolFactory (for tier configuration)
+        LockedPoolManager(contracts.lockedPoolManagerProxy).setManagedPoolFactory(contracts.managedPoolFactoryProxy);
+        console.log("ManagedPoolFactory registered in LockedPoolManager");
+        
+        // Configure ManagedPoolFactory with LockedPool components
+        ManagedPoolFactory managedFactory = ManagedPoolFactory(contracts.managedPoolFactoryProxy);
+        managedFactory.setLockedPoolManager(contracts.lockedPoolManagerProxy);
+        console.log("LockedPoolManager registered in ManagedPoolFactory");
+        
+        managedFactory.updateLockedPoolImplementation(contracts.lockedPoolImpl);
+        console.log("LockedPool implementation set in ManagedPoolFactory");
+        
+        managedFactory.updateLockedPoolEscrowImplementation(contracts.lockedPoolEscrowImpl);
+        console.log("LockedPoolEscrow implementation set in ManagedPoolFactory");
+        
+        // Note: SPV_ROLE and OPERATOR_ROLE for manager operations are granted 
+        // via the shared AccessManager, not on individual managers
         // These roles were already granted to admin during AccessManager setup
         console.log("SPV and OPERATOR roles available via AccessManager");
-        
-        // Set managers in FeeManager
-        FeeManager(contracts.feeManager).setManagers(
-            contracts.managerProxy,
-            contracts.stableYieldManagerProxy,
-            contracts.poolRegistryProxy
-        );
-        console.log("Managers registered in FeeManager");
         
         // Note: All critical roles (SPV, OPERATOR, EMERGENCY, POOL_CREATOR, ASSET_MANAGER) 
         // are granted to admin in AccessManager constructor with no delay
@@ -351,8 +395,6 @@ contract DeployUpgradeable is Script {
             contracts.baseToken,
             "Mock USDC",
             "USDC",
-            "US",
-            "Americas",
             true
         );
         console.log("USDC approved as valid asset");
@@ -362,8 +404,6 @@ contract DeployUpgradeable is Script {
             0x929A08903C22440182646Bb450a67178Be402f7f,
             "Canza Nigerian Naira",
             "cNGN",
-            "NG",
-            "Africa",
             true
         );
         console.log("cNGN approved as valid asset");
@@ -371,18 +411,9 @@ contract DeployUpgradeable is Script {
         // TODO: Add USDT address when available for this network
         console.log("NOTE: Add USDT approval before mainnet deployment");
         
-        // Configure fee manager (transaction-only fee model)
-        FeeManager feeManager = FeeManager(contracts.feeManager);
-        IFeeManager.FeeConfig memory feeConfig = IFeeManager.FeeConfig({
-            protocolFee: 200,        // 2.0% protocol fee (transaction fee on deposits/withdrawals)
-            spvFee: 100,             // 1.0% SPV fee
-            performanceFee: 100,     // 1.0% performance fee (10% of profits)
-            earlyWithdrawalFee: 100, // 1.0% early withdrawal fee
-            refundGasFee: 10,        // 0.1% refund gas fee
-            isActive: true
-        });
-        feeManager.setDefaultFeeConfig(feeConfig);
-        console.log("Default fee configuration set (transaction-only model)");
+        // Note: Fees are now handled per-pool via withdrawalFeeBps in PoolConfig
+        // or via defaultTransactionFeeBps in StableYieldManager
+        console.log("Fee configuration: withdrawal fees set per-pool");
         
         console.log("Upgradeable system configuration complete!");
     }
@@ -396,10 +427,12 @@ contract DeployUpgradeable is Script {
         require(PoolFactory(contracts.poolFactoryProxy).version() == 1, "PoolFactory version mismatch");
         require(StableYieldManager(contracts.stableYieldManagerProxy).version() == 1, "StableYieldManager version mismatch");
         require(ManagedPoolFactory(contracts.managedPoolFactoryProxy).version() == 1, "ManagedPoolFactory version mismatch");
+        require(LockedPoolManager(contracts.lockedPoolManagerProxy).version() == 1, "LockedPoolManager version mismatch");
         
         // Verify manager proxies
         require(Manager(contracts.managerProxy).timelockController() == contracts.timelockController, "Manager timelock mismatch");
         require(StableYieldManager(contracts.stableYieldManagerProxy).timelockController() == contracts.timelockController, "StableYieldManager timelock mismatch");
+        require(LockedPoolManager(contracts.lockedPoolManagerProxy).timelockController() == contracts.timelockController, "LockedPoolManager timelock mismatch");
         
         // Verify access control (roles granted in AccessManager constructor)
         AccessManager accessManager = AccessManager(contracts.accessManager);
@@ -408,9 +441,11 @@ contract DeployUpgradeable is Script {
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), config.operator), "Operator role not granted");
         require(accessManager.hasRole(accessManager.EMERGENCY_ROLE(), config.emergency), "Emergency role not granted");
         require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), config.admin), "Pool creator role not granted to admin");
-        require(accessManager.hasRole(accessManager.ASSET_MANAGER_ROLE(), config.admin), "Asset manager role not granted to admin");
         require(accessManager.hasRole(accessManager.FACTORY_ROLE(), contracts.managedPoolFactoryProxy), "Factory role not granted to ManagedPoolFactory");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.managedPoolFactoryProxy), "Pool creator role not granted to ManagedPoolFactory");
         require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy), "Pool creator role not granted to StableYieldManager");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.lockedPoolManagerProxy), "Pool creator role not granted to LockedPoolManager");
+        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), contracts.lockedPoolManagerProxy), "Operator role not granted to LockedPoolManager");
         require(accessManager.deploymentComplete(), "Deployment not finalized");
         console.log("AccessManager roles verified (admin, factories, and managers)");
         
@@ -449,14 +484,19 @@ contract DeployUpgradeable is Script {
         console.log("ManagedPoolFactory Proxy: %s", contracts.managedPoolFactoryProxy);
         console.log("ManagedPoolFactory Implementation: %s", contracts.managedPoolFactoryImpl);
         console.log("");
+        console.log("=== LOCKED POOL CONTRACTS (UPGRADEABLE) ===");
+        console.log("LockedPoolManager Proxy: %s", contracts.lockedPoolManagerProxy);
+        console.log("LockedPoolManager Implementation: %s", contracts.lockedPoolManagerImpl);
+        console.log("");
         console.log("=== POOL IMPLEMENTATIONS ===");
         console.log("LiquidityPool Implementation: %s", contracts.liquidityPoolImpl);
         console.log("PoolEscrow Implementation: %s", contracts.poolEscrowImpl);
         console.log("StableYieldPool Implementation: %s", contracts.stableYieldPoolImpl);
         console.log("StableYieldEscrow Implementation: %s", contracts.stableYieldEscrowImpl);
+        console.log("LockedPool Implementation: %s", contracts.lockedPoolImpl);
+        console.log("LockedPoolEscrow Implementation: %s", contracts.lockedPoolEscrowImpl);
         console.log("");
         console.log("=== SUPPORTING CONTRACTS ===");
-        console.log("FeeManager: %s", contracts.feeManager);
         console.log("Base Token: %s", contracts.baseToken);
         console.log("");
         console.log("=== DEPLOYMENT COMPLETE ===");
