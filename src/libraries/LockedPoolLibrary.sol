@@ -221,5 +221,183 @@ library LockedPoolLibrary {
         
         return summary;
     }
+
+    /**
+     * @notice Validate tier configuration
+     * @param tier Lock tier to validate
+     * @return isValid True if tier is valid
+     */
+    function validateTier(
+        ILockedPoolTypes.LockTier memory tier
+    ) public pure returns (bool isValid) {
+        if (tier.durationDays == 0) return false;
+        if (tier.apyBps > 5000) return false;
+        if (tier.earlyExitPenaltyBps > 5000) return false;
+        return true;
+    }
+
+    /**
+     * @notice Validate deposit parameters
+     * @param amount Deposit amount
+     * @param tierIndex Tier index
+     * @param tier Lock tier
+     * @param tierCount Total tiers configured
+     * @return isValid True if deposit is valid
+     * @return errorMsg Error message if invalid
+     */
+    function validateDeposit(
+        uint256 amount,
+        uint256 tierIndex,
+        ILockedPoolTypes.LockTier memory tier,
+        uint256 tierCount
+    ) public pure returns (bool isValid, string memory errorMsg) {
+        if (amount == 0) return (false, "zero amount");
+        if (tierIndex >= tierCount) return (false, "invalid tier");
+        if (!tier.isActive) return (false, "tier inactive");
+        if (amount < tier.minDeposit) return (false, "below minimum");
+        return (true, "");
+    }
+
+    /**
+     * @notice Build new position struct
+     * @param positionId Position ID
+     * @param user User address
+     * @param poolAddress Pool address
+     * @param principal Principal amount
+     * @param tier Lock tier
+     * @param tierIndex Tier index
+     * @param paymentChoice Interest payment choice
+     * @param currentTime Current timestamp
+     * @return position New position struct
+     */
+    function buildPosition(
+        uint256 positionId,
+        address user,
+        address poolAddress,
+        uint256 principal,
+        ILockedPoolTypes.LockTier memory tier,
+        uint8 tierIndex,
+        ILockedPoolTypes.InterestPayment paymentChoice,
+        uint256 currentTime
+    ) public pure returns (ILockedPoolTypes.UserPosition memory position) {
+        uint256 interest = calculateInterest(principal, tier.apyBps, tier.durationDays);
+        uint256 lockEnd = currentTime + (tier.durationDays * 1 days);
+        
+        uint256 investedAmount = calculateInvestedAmount(principal, interest, paymentChoice);
+        uint256 expectedPayout = calculateExpectedMaturityPayout(principal, interest, paymentChoice);
+        bool paid = paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT;
+        
+        position = ILockedPoolTypes.UserPosition({
+            positionId: positionId,
+            user: user,
+            poolAddress: poolAddress,
+            principalDeposited: principal,
+            fullInterestAmount: interest,
+            apyBpsAtDeposit: tier.apyBps,
+            paymentChoice: paymentChoice,
+            interestPaid: paid,
+            investedAmount: investedAmount,
+            expectedMaturityPayout: expectedPayout,
+            lockStart: currentTime,
+            lockEnd: lockEnd,
+            tierIndex: tierIndex,
+            status: ILockedPoolTypes.PositionStatus.ACTIVE,
+            actualPayout: 0,
+            penaltyPaid: 0,
+            interestEarned: paid ? interest : 0,
+            autoRollover: false,
+            rolledFromPositionId: 0
+        });
+        
+        return position;
+    }
+
+    /**
+     * @notice Calculate early exit result
+     * @param position User position
+     * @param tier Lock tier
+     * @param currentTime Current timestamp
+     * @return result Early exit calculation
+     */
+    function calculateEarlyExit(
+        ILockedPoolTypes.UserPosition memory position,
+        ILockedPoolTypes.LockTier memory tier,
+        uint256 currentTime
+    ) public pure returns (ILockedPoolTypes.EarlyExitCalculation memory result) {
+        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
+            return calculateEarlyExitUpfront(position, tier);
+        } else {
+            return calculateEarlyExitMaturity(position, tier, currentTime);
+        }
+    }
+
+    /**
+     * @notice Generate position ID
+     * @param pool Pool address
+     * @param user User address
+     * @param nonce Nonce value
+     * @param timestamp Current timestamp
+     * @return positionId Unique position ID
+     */
+    function generatePositionId(
+        address pool,
+        address user,
+        uint256 nonce,
+        uint256 timestamp
+    ) public pure returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(pool, user, nonce, timestamp)));
+    }
+
+    /**
+     * @notice Calculate shares to mint for deposit
+     * @param principal Principal deposited
+     * @return shares Shares to mint (1:1 with principal)
+     */
+    function calculateShares(uint256 principal) public pure returns (uint256) {
+        return principal;
+    }
+
+    /**
+     * @notice Check if position is in valid state for redemption
+     * @param position Position to check
+     * @param caller Caller address
+     * @param currentTime Current timestamp
+     * @return isValid True if can redeem
+     * @return errorMsg Error message if invalid
+     */
+    function validateRedemption(
+        ILockedPoolTypes.UserPosition memory position,
+        address caller,
+        uint256 currentTime
+    ) public pure returns (bool isValid, string memory errorMsg) {
+        if (position.user != caller) return (false, "not owner");
+        if (position.status == ILockedPoolTypes.PositionStatus.REDEEMED) return (false, "already redeemed");
+        if (position.status == ILockedPoolTypes.PositionStatus.EARLY_EXIT) return (false, "already exited");
+        if (currentTime < position.lockEnd) return (false, "not matured");
+        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE && 
+            position.status != ILockedPoolTypes.PositionStatus.MATURED) return (false, "not redeemable");
+        return (true, "");
+    }
+
+    /**
+     * @notice Check if position is in valid state for early exit
+     * @param position Position to check
+     * @param caller Caller address
+     * @param currentTime Current timestamp
+     * @return isValid True if can early exit
+     * @return errorMsg Error message if invalid
+     */
+    function validateEarlyExit(
+        ILockedPoolTypes.UserPosition memory position,
+        address caller,
+        uint256 currentTime
+    ) public pure returns (bool isValid, string memory errorMsg) {
+        if (position.user != caller) return (false, "not owner");
+        if (position.status == ILockedPoolTypes.PositionStatus.REDEEMED) return (false, "already redeemed");
+        if (position.status == ILockedPoolTypes.PositionStatus.EARLY_EXIT) return (false, "already exited");
+        if (currentTime >= position.lockEnd) return (false, "already matured");
+        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE) return (false, "not active");
+        return (true, "");
+    }
 }
 

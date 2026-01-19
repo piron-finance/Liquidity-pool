@@ -28,7 +28,37 @@ contract LockedPoolManager is
     ReentrancyGuardUpgradeable,
     ILockedPoolManager
 {
-   
+    error Unauthorized();
+    error PoolNotFound();
+    error PoolNotActive();
+    error InvalidAddress();
+    error InvalidAmount();
+    error InvalidTier();
+    error InvalidAPY();
+    error InvalidPenalty();
+    error InvalidDuration();
+    error TierNotActive();
+    error BelowMinimum();
+    error NotOwner();
+    error NotMatured();
+    error AlreadyMatured();
+    error AlreadyRedeemed();
+    error AlreadyExited();
+    error InvalidStatus();
+    error InsufficientFunds();
+    error InsufficientReserve();
+    error AllocationNotFound();
+    error AllocationExists();
+    error OnlyPool();
+    error OnlyTimelock();
+    error OnlyFactory();
+    error FactoryAlreadySet();
+    error PoolAlreadyExists();
+    error InvalidDecimals();
+    error AssetNotApproved();
+    error RolloverNotEnabled();
+    error InvalidPosition();
+    error NoYieldReserve();
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// STATE VARIABLES //////////////////////////////
@@ -72,18 +102,30 @@ contract LockedPoolManager is
     ////////////////////////////////////////////////////////////////////////////////
 
     modifier onlyRole(bytes32 role) {
-        require(accessManager.hasRole(role, msg.sender), "LockedPoolManager/access denied");
+        _checkRole(role);
         _;
     }
 
     modifier poolExists(address poolAddress) {
-        require(poolConfigs[poolAddress].createdAt > 0, "LockedPoolManager/pool not found");
+        _checkPoolExists(poolAddress);
         _;
     }
 
     modifier activePool(address poolAddress) {
-        require(poolConfigs[poolAddress].isActive, "LockedPoolManager/pool not active");
+        _checkActivePool(poolAddress);
         _;
+    }
+
+    function _checkRole(bytes32 role) internal view {
+        if (!accessManager.hasRole(role, msg.sender)) revert Unauthorized();
+    }
+
+    function _checkPoolExists(address poolAddress) internal view {
+        if (poolConfigs[poolAddress].createdAt == 0) revert PoolNotFound();
+    }
+
+    function _checkActivePool(address poolAddress) internal view {
+        if (!poolConfigs[poolAddress].isActive) revert PoolNotActive();
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -109,9 +151,9 @@ contract LockedPoolManager is
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
 
-        require(accessManager_ != address(0), "LockedPoolManager/invalid access manager");
-        require(registry_ != address(0), "LockedPoolManager/invalid registry");
-        require(timelockController_ != address(0), "LockedPoolManager/invalid timelock");
+        if (accessManager_ == address(0)) revert InvalidAddress();
+        if (registry_ == address(0)) revert InvalidAddress();
+        if (timelockController_ == address(0)) revert InvalidAddress();
 
         accessManager = AccessManager(accessManager_);
         registry = IPoolRegistry(registry_);
@@ -121,8 +163,8 @@ contract LockedPoolManager is
     }
 
     function _authorizeUpgrade(address newImplementation) internal override {
-        require(msg.sender == timelockController, "LockedPoolManager/only timelock");
-        require(newImplementation != address(0), "LockedPoolManager/invalid implementation");
+        if (msg.sender != timelockController) revert OnlyTimelock();
+        if (newImplementation == address(0)) revert InvalidAddress();
         version += 1;
     }
 
@@ -140,16 +182,16 @@ contract LockedPoolManager is
         string memory name,
         uint256 minInvestment
     ) external override nonReentrant {
-        require(msg.sender == managedPoolFactory, "LockedPoolManager/only factory");
-        require(poolAddress != address(0), "LockedPoolManager/invalid pool");
-        require(escrowAddress != address(0), "LockedPoolManager/invalid escrow");
-        require(asset != address(0), "LockedPoolManager/invalid asset");
-        require(minInvestment > 0, "LockedPoolManager/invalid min investment");
-        require(poolConfigs[poolAddress].createdAt == 0, "LockedPoolManager/pool exists");
+        if (msg.sender != managedPoolFactory) revert OnlyFactory();
+        if (poolAddress == address(0)) revert InvalidAddress();
+        if (escrowAddress == address(0)) revert InvalidAddress();
+        if (asset == address(0)) revert InvalidAddress();
+        if (minInvestment == 0) revert InvalidAmount();
+        if (poolConfigs[poolAddress].createdAt != 0) revert PoolAlreadyExists();
         
         uint8 assetDecimals = IERC20Metadata(asset).decimals();
-        require(assetDecimals == 6 || assetDecimals == 18, "LockedPoolManager/invalid decimals");
-        require(registry.isApprovedAsset(asset), "LockedPoolManager/asset not approved");
+        if (assetDecimals != 6 && assetDecimals != 18) revert InvalidDecimals();
+        if (!registry.isApprovedAsset(asset)) revert AssetNotApproved();
         
         poolConfigs[poolAddress] = ILockedPoolTypes.PoolConfig({
             asset: asset,
@@ -168,8 +210,8 @@ contract LockedPoolManager is
      * @notice Set the ManagedPoolFactory address
      */
     function setManagedPoolFactory(address _factory) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
-        require(_factory != address(0), "LockedPoolManager/invalid factory");
-        require(managedPoolFactory == address(0), "LockedPoolManager/factory already set");
+        if (_factory == address(0)) revert InvalidAddress();
+        if (managedPoolFactory != address(0)) revert FactoryAlreadySet();
         managedPoolFactory = _factory;
     }
 
@@ -186,15 +228,13 @@ contract LockedPoolManager is
         uint8 tierIndex,
         ILockedPoolTypes.LockTier memory tier
     ) external override poolExists(poolAddress) {
-        require(
-            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) || 
-            msg.sender == managedPoolFactory,
-            "LockedPoolManager/not authorized"
-        );
-        require(tierIndex < MAX_TIERS, "LockedPoolManager/invalid tier index");
-        require(tier.durationDays > 0, "LockedPoolManager/invalid duration");
-        require(tier.apyBps > 0 && tier.apyBps <= 5000, "LockedPoolManager/invalid apy");
-        require(tier.earlyExitPenaltyBps <= 5000, "LockedPoolManager/invalid penalty");
+        if (!accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) && msg.sender != managedPoolFactory) {
+            revert Unauthorized();
+        }
+        if (tierIndex >= MAX_TIERS) revert InvalidTier();
+        if (tier.durationDays == 0) revert InvalidDuration();
+        if (tier.apyBps == 0 || tier.apyBps > 5000) revert InvalidAPY();
+        if (tier.earlyExitPenaltyBps > 5000) revert InvalidPenalty();
         
         ILockedPoolTypes.LockTier[] storage tiers = poolTiers[poolAddress];
         
@@ -203,7 +243,7 @@ contract LockedPoolManager is
         } else if (tierIndex == tiers.length) {
             tiers.push(tier);
         } else {
-            revert("LockedPoolManager/configure tiers sequentially");
+            revert InvalidTier();
         }
         
         emit LockTierConfigured(
@@ -223,7 +263,7 @@ contract LockedPoolManager is
         uint8 tierIndex,
         bool isActive
     ) external override onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) {
-        require(tierIndex < poolTiers[poolAddress].length, "LockedPoolManager/tier not found");
+        if (tierIndex >= poolTiers[poolAddress].length) revert InvalidTier();
         poolTiers[poolAddress][tierIndex].isActive = isActive;
     }
 
@@ -235,8 +275,8 @@ contract LockedPoolManager is
         uint8 tierIndex,
         uint256 newApyBps
     ) external override onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) {
-        require(tierIndex < poolTiers[poolAddress].length, "LockedPoolManager/tier not found");
-        require(newApyBps > 0 && newApyBps <= 5000, "LockedPoolManager/invalid apy");
+        if (tierIndex >= poolTiers[poolAddress].length) revert InvalidTier();
+        if (newApyBps == 0 || newApyBps > 5000) revert InvalidAPY();
         poolTiers[poolAddress][tierIndex].apyBps = newApyBps;
     }
 
@@ -255,92 +295,62 @@ contract LockedPoolManager is
         uint8 tierIndex,
         ILockedPoolTypes.InterestPayment paymentChoice
     ) external override poolExists(poolAddress) activePool(poolAddress) nonReentrant returns (uint256 positionId, uint256 shares) {
-        require(msg.sender == poolAddress, "LockedPoolManager/only pool");
-        require(depositor != address(0), "LockedPoolManager/invalid depositor");
+        if (msg.sender != poolAddress) revert OnlyPool();
+        if (depositor == address(0)) revert InvalidAddress();
         
         ILockedPoolTypes.PoolConfig storage config = poolConfigs[poolAddress];
-        require(amount >= config.minInvestment, "LockedPoolManager/below minimum");
+        if (amount < config.minInvestment) revert BelowMinimum();
         
         ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][tierIndex];
-        require(tier.isActive, "LockedPoolManager/tier not active");
-        require(amount >= tier.minDeposit, "LockedPoolManager/below tier minimum");
-        
-        uint256 interestAmount = LockedPoolLibrary.calculateInterest(
-            amount,
-            tier.apyBps,
-            tier.durationDays
-        );
-        
-        uint256 investedAmount = LockedPoolLibrary.calculateInvestedAmount(
-            amount,
-            interestAmount,
-            paymentChoice
-        );
-        
-        uint256 expectedPayout = LockedPoolLibrary.calculateExpectedMaturityPayout(
-            amount,
-            interestAmount,
-            paymentChoice
-        );
+        if (!tier.isActive) revert TierNotActive();
+        if (amount < tier.minDeposit) revert BelowMinimum();
         
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
         escrow.recordDeposit(amount);
         
         positionId = nextPositionId++;
         
-        positions[positionId] = ILockedPoolTypes.UserPosition({
-            positionId: positionId,
-            user: depositor,
-            poolAddress: poolAddress,
-            principalDeposited: amount,
-            fullInterestAmount: interestAmount,
-            apyBpsAtDeposit: tier.apyBps,
-            paymentChoice: paymentChoice,
-            interestPaid: false,
-            investedAmount: investedAmount,
-            expectedMaturityPayout: expectedPayout,
-            lockStart: block.timestamp,
-            lockEnd: block.timestamp + (tier.durationDays * 1 days),
-            tierIndex: tierIndex,
-            status: ILockedPoolTypes.PositionStatus.ACTIVE,
-            actualPayout: 0,
-            penaltyPaid: 0,
-            interestEarned: 0,
-            autoRollover: false,
-            rolledFromPositionId: 0
-        });
+        ILockedPoolTypes.LockTier memory tierMem = tier;
+        positions[positionId] = LockedPoolLibrary.buildPosition(
+            positionId,
+            depositor,
+            poolAddress,
+            amount,
+            tierMem,
+            tierIndex,
+            paymentChoice,
+            block.timestamp
+        );
         
         userPositionIds[poolAddress][depositor].push(positionId);
         
+        ILockedPoolTypes.UserPosition storage pos = positions[positionId];
         ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
         metrics.totalPrincipalLocked += amount;
-        metrics.totalInterestCommitted += interestAmount;
-        metrics.totalInvestedAmount += investedAmount;
-        metrics.totalExpectedMaturityPayout += expectedPayout;
+        metrics.totalInterestCommitted += pos.fullInterestAmount;
+        metrics.totalInvestedAmount += pos.investedAmount;
+        metrics.totalExpectedMaturityPayout += pos.expectedMaturityPayout;
         metrics.activePositions++;
         metrics.totalPositions++;
         
         if (paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
-            escrow.payInterest(depositor, interestAmount);
-            positions[positionId].interestPaid = true;
-            positions[positionId].interestEarned = interestAmount;
-            metrics.totalInterestPaidUpfront += interestAmount;
-            
-            emit InterestPaidUpfront(poolAddress, depositor, positionId, interestAmount);
+            escrow.payInterest(depositor, pos.fullInterestAmount);
+            metrics.totalInterestPaidUpfront += pos.fullInterestAmount;
+            emit InterestPaidUpfront(poolAddress, depositor, positionId, pos.fullInterestAmount);
         } else {
-            metrics.totalInterestPendingMaturity += interestAmount;
+            metrics.totalInterestPendingMaturity += pos.fullInterestAmount;
         }
         
-        shares = investedAmount;
+        shares = pos.investedAmount;
         
         emit PositionCreated(
             poolAddress,
             depositor,
             positionId,
             amount,
-            interestAmount,
+            pos.fullInterestAmount,
             paymentChoice,
-            positions[positionId].lockEnd
+            pos.lockEnd
         );
         
         return (positionId, shares);
@@ -357,17 +367,14 @@ contract LockedPoolManager is
         uint256 positionId,
         address caller
     ) external override poolExists(poolAddress) nonReentrant returns (uint256 payout) {
-        require(msg.sender == poolAddress, "LockedPoolManager/only pool");
+        if (msg.sender != poolAddress) revert OnlyPool();
         
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
         
-        require(position.user == caller, "LockedPoolManager/not owner");
-        require(
-            position.status == ILockedPoolTypes.PositionStatus.ACTIVE || 
-            position.status == ILockedPoolTypes.PositionStatus.MATURED,
-            "LockedPoolManager/invalid status"
-        );
-        require(block.timestamp >= position.lockEnd, "LockedPoolManager/not matured");
+        if (position.user != caller) revert NotOwner();
+        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE && 
+            position.status != ILockedPoolTypes.PositionStatus.MATURED) revert InvalidStatus();
+        if (block.timestamp < position.lockEnd) revert NotMatured();
         
         payout = position.expectedMaturityPayout;
         
@@ -425,19 +432,11 @@ contract LockedPoolManager is
      * @notice Check if a position can be matured
      * @param positionId Position to check
      * @return canMature Whether position is eligible for maturation
-     * @return reason Explanation if cannot mature
      */
-    function canMaturePosition(uint256 positionId) external view returns (bool canMature, string memory reason) {
+    function canMaturePosition(uint256 positionId) external view returns (bool canMature) {
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
-        
-        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE) {
-            return (false, "Position not active");
-        }
-        if (block.timestamp < position.lockEnd) {
-            return (false, "Lock period not ended");
-        }
-        
-        return (true, "Ready for maturation");
+        return position.status == ILockedPoolTypes.PositionStatus.ACTIVE && 
+               block.timestamp >= position.lockEnd;
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -457,13 +456,10 @@ contract LockedPoolManager is
     ) external override {
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
         
-        require(msg.sender == position.poolAddress, "LockedPoolManager/only pool");
-        require(position.user == caller, "LockedPoolManager/not owner");
-        require(
-            position.status == ILockedPoolTypes.PositionStatus.ACTIVE ||
-            position.status == ILockedPoolTypes.PositionStatus.MATURED,
-            "LockedPoolManager/invalid status"
-        );
+        if (msg.sender != position.poolAddress) revert OnlyPool();
+        if (position.user != caller) revert NotOwner();
+        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE && 
+            position.status != ILockedPoolTypes.PositionStatus.MATURED) revert InvalidStatus();
         
         position.autoRollover = enabled;
         
@@ -482,17 +478,14 @@ contract LockedPoolManager is
     ) external override onlyRole(accessManager.OPERATOR_ROLE()) returns (uint256 newPositionId) {
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
         
-        require(
-            position.status == ILockedPoolTypes.PositionStatus.ACTIVE ||
-            position.status == ILockedPoolTypes.PositionStatus.MATURED,
-            "LockedPoolManager/invalid status"
-        );
-        require(block.timestamp >= position.lockEnd, "LockedPoolManager/not matured");
-        require(position.autoRollover, "LockedPoolManager/rollover not enabled");
+        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE && 
+            position.status != ILockedPoolTypes.PositionStatus.MATURED) revert InvalidStatus();
+        if (block.timestamp < position.lockEnd) revert NotMatured();
+        if (!position.autoRollover) revert RolloverNotEnabled();
         
         address poolAddress = position.poolAddress;
         ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][position.tierIndex];
-        require(tier.isActive, "LockedPoolManager/tier not active");
+        if (!tier.isActive) revert TierNotActive();
         
         // Calculate rollover amounts based on interest payment choice
         uint256 principalToRoll;
@@ -589,80 +582,39 @@ contract LockedPoolManager is
     ) internal returns (uint256 newPositionId) {
         ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][tierIndex];
         
-        uint256 interestAmount = LockedPoolLibrary.calculateInterest(
-            principal,
-            tier.apyBps,
-            tier.durationDays
-        );
-        
-        uint256 investedAmount = LockedPoolLibrary.calculateInvestedAmount(
-            principal,
-            interestAmount,
-            paymentChoice
-        );
-        
-        uint256 expectedPayout = LockedPoolLibrary.calculateExpectedMaturityPayout(
-            principal,
-            interestAmount,
-            paymentChoice
-        );
-        
         newPositionId = nextPositionId++;
         
-        positions[newPositionId] = ILockedPoolTypes.UserPosition({
-            positionId: newPositionId,
-            user: user,
-            poolAddress: poolAddress,
-            principalDeposited: principal,
-            fullInterestAmount: interestAmount,
-            apyBpsAtDeposit: tier.apyBps,
-            paymentChoice: paymentChoice,
-            interestPaid: false,
-            investedAmount: investedAmount,
-            expectedMaturityPayout: expectedPayout,
-            lockStart: block.timestamp,
-            lockEnd: block.timestamp + (tier.durationDays * 1 days),
-            tierIndex: tierIndex,
-            status: ILockedPoolTypes.PositionStatus.ACTIVE,
-            actualPayout: 0,
-            penaltyPaid: 0,
-            interestEarned: 0,
-            autoRollover: true, // Inherit rollover preference
-            rolledFromPositionId: rolledFromId
-        });
+        ILockedPoolTypes.LockTier memory tierMem = tier;
+        positions[newPositionId] = LockedPoolLibrary.buildPosition(
+            newPositionId, user, poolAddress, principal,
+            tierMem, tierIndex, paymentChoice, block.timestamp
+        );
+        positions[newPositionId].autoRollover = true;
+        positions[newPositionId].rolledFromPositionId = rolledFromId;
         
         userPositionIds[poolAddress][user].push(newPositionId);
         
-        // Update metrics for new position
+        ILockedPoolTypes.UserPosition storage pos = positions[newPositionId];
         ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
         metrics.totalPrincipalLocked += principal;
-        metrics.totalInterestCommitted += interestAmount;
-        metrics.totalInvestedAmount += investedAmount;
-        metrics.totalExpectedMaturityPayout += expectedPayout;
+        metrics.totalInterestCommitted += pos.fullInterestAmount;
+        metrics.totalInvestedAmount += pos.investedAmount;
+        metrics.totalExpectedMaturityPayout += pos.expectedMaturityPayout;
         metrics.activePositions++;
         metrics.totalPositions++;
         
-        // Handle interest payment for new position
         if (paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
             LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
-            escrow.payInterest(user, interestAmount);
-            positions[newPositionId].interestPaid = true;
-            positions[newPositionId].interestEarned = interestAmount;
-            metrics.totalInterestPaidUpfront += interestAmount;
-            
-            emit InterestPaidUpfront(poolAddress, user, newPositionId, interestAmount);
+            escrow.payInterest(user, pos.fullInterestAmount);
+            metrics.totalInterestPaidUpfront += pos.fullInterestAmount;
+            emit InterestPaidUpfront(poolAddress, user, newPositionId, pos.fullInterestAmount);
         } else {
-            metrics.totalInterestPendingMaturity += interestAmount;
+            metrics.totalInterestPendingMaturity += pos.fullInterestAmount;
         }
         
         emit PositionCreated(
-            poolAddress,
-            user,
-            newPositionId,
-            principal,
-            interestAmount,
-            paymentChoice,
-            positions[newPositionId].lockEnd
+            poolAddress, user, newPositionId, principal,
+            pos.fullInterestAmount, paymentChoice, pos.lockEnd
         );
         
         return newPositionId;
@@ -734,7 +686,7 @@ contract LockedPoolManager is
         uint256 positionId,
         address caller
     ) external override poolExists(poolAddress) nonReentrant returns (uint256 payout, uint256 penalty) {
-        require(msg.sender == poolAddress, "LockedPoolManager/only pool");
+        if (msg.sender != poolAddress) revert OnlyPool();
         
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
         _validateEarlyExit(position, caller);
@@ -758,9 +710,9 @@ contract LockedPoolManager is
         ILockedPoolTypes.UserPosition storage position,
         address caller
     ) internal view {
-        require(position.user == caller, "LockedPoolManager/not owner");
-        require(position.status == ILockedPoolTypes.PositionStatus.ACTIVE, "LockedPoolManager/not active");
-        require(block.timestamp < position.lockEnd, "LockedPoolManager/use redeem for matured");
+        if (position.user != caller) revert NotOwner();
+        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE) revert InvalidStatus();
+        if (block.timestamp >= position.lockEnd) revert AlreadyMatured();
     }
 
     function _calculateEarlyExit(
@@ -835,11 +787,11 @@ contract LockedPoolManager is
         uint256 escrowAvailable,
         uint256 penalty
     ) internal {
-        require(yieldReserve != address(0), "LockedPoolManager/no yield reserve");
+        if (yieldReserve == address(0)) revert NoYieldReserve();
         
         uint256 reserveLoan = payout - escrowAvailable;
         YieldReserveEscrow reserve = YieldReserveEscrow(yieldReserve);
-        require(reserve.getAvailableBalance() >= reserveLoan, "LockedPoolManager/insufficient reserve");
+        if (reserve.getAvailableBalance() < reserveLoan) revert InsufficientReserve();
         
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
         if (escrowAvailable > 0) {
@@ -875,11 +827,11 @@ contract LockedPoolManager is
         address spvAddress,
         uint256 amount
     ) external override onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) nonReentrant returns (bytes32 allocationId) {
-        require(spvAddress != address(0), "LockedPoolManager/invalid SPV");
-        require(amount > 0, "LockedPoolManager/invalid amount");
+        if (spvAddress == address(0)) revert InvalidAddress();
+        if (amount == 0) revert InvalidAmount();
         
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
-        require(escrow.getPrincipalHeld() >= amount, "LockedPoolManager/insufficient funds");
+        if (escrow.getPrincipalHeld() < amount) revert InsufficientFunds();
         
         allocationId = keccak256(abi.encodePacked(
             poolAddress,
@@ -889,7 +841,7 @@ contract LockedPoolManager is
             nextPositionId
         ));
         
-        require(spvAllocations[allocationId].createdAt == 0, "LockedPoolManager/allocation exists");
+        if (spvAllocations[allocationId].createdAt != 0) revert AllocationExists();
         
         spvAllocations[allocationId] = ILockedPoolTypes.SPVAllocation({
             poolAddress: poolAddress,
@@ -922,13 +874,10 @@ contract LockedPoolManager is
         uint256 returnedAmount
     ) external override onlyRole(accessManager.SPV_ROLE()) nonReentrant {
         ILockedPoolTypes.SPVAllocation storage allocation = spvAllocations[allocationId];
-        require(allocation.createdAt > 0, "LockedPoolManager/allocation not found");
-        require(
-            allocation.status == ILockedPoolTypes.AllocationStatus.INVESTED ||
-            allocation.status == ILockedPoolTypes.AllocationStatus.RETURNED,
-            "LockedPoolManager/invalid status"
-        );
-        require(returnedAmount > 0, "LockedPoolManager/invalid amount");
+        if (allocation.createdAt == 0) revert AllocationNotFound();
+        if (allocation.status != ILockedPoolTypes.AllocationStatus.INVESTED && 
+            allocation.status != ILockedPoolTypes.AllocationStatus.RETURNED) revert InvalidStatus();
+        if (returnedAmount == 0) revert InvalidAmount();
         
         address poolAddress = allocation.poolAddress;
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
@@ -973,7 +922,7 @@ contract LockedPoolManager is
         address poolAddress,
         uint256 amount
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
-        require(amount > 0, "LockedPoolManager/invalid amount");
+        if (amount == 0) revert InvalidAmount();
         
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
         
@@ -999,7 +948,7 @@ contract LockedPoolManager is
         uint256 returnedAmount
     ) external onlyRole(accessManager.SPV_ROLE()) nonReentrant returns (ILockedPoolTypes.SPVSettlement memory settlement) {
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
-        require(position.positionId == positionId, "LockedPoolManager/position not found");
+        if (position.positionId != positionId) revert InvalidPosition();
         
         address poolAddress = position.poolAddress;
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
@@ -1106,7 +1055,7 @@ contract LockedPoolManager is
      * @param reserve_ Yield reserve escrow address
      */
     function setYieldReserve(address reserve_) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
-        require(reserve_ != address(0), "LockedPoolManager/invalid reserve");
+        if (reserve_ == address(0)) revert InvalidAddress();
         yieldReserve = reserve_;
     }
 
@@ -1157,7 +1106,7 @@ contract LockedPoolManager is
      */
     function calculateEarlyExitPayout(uint256 positionId) external view override returns (ILockedPoolTypes.EarlyExitCalculation memory) {
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
-        require(position.poolAddress != address(0), "LockedPoolManager/invalid position");
+        if (position.poolAddress == address(0)) revert InvalidPosition();
         
         ILockedPoolTypes.LockTier storage tier = poolTiers[position.poolAddress][position.tierIndex];
         
@@ -1175,7 +1124,7 @@ contract LockedPoolManager is
         address poolAddress,
         uint8 tierIndex
     ) external view override returns (ILockedPoolTypes.LockTier memory) {
-        require(tierIndex < poolTiers[poolAddress].length, "LockedPoolManager/tier not found");
+        if (tierIndex >= poolTiers[poolAddress].length) revert InvalidTier();
         return poolTiers[poolAddress][tierIndex];
     }
 

@@ -26,6 +26,26 @@ contract StableYieldManager is
     UUPSUpgradeable,
     ReentrancyGuardUpgradeable
 {
+    error Unauthorized();
+    error PoolNotFound();
+    error PoolExists();
+    error InvalidAddress();
+    error InvalidAmount();
+    error InvalidMaturity();
+    error InvalidFaceValue();
+    error InstrumentNotFound();
+    error AllocationNotFound();
+    error AllocationExpired();
+    error AllocationNotPending();
+    error AllocationMismatch();
+    error InsufficientFunds();
+    error InsufficientReserve();
+    error ExceedsAllocation();
+    error NotAllocationSPV();
+    error InvalidStatus();
+    error HoldingPeriod();
+    error NotReady();
+
     using SafeERC20 for IERC20;
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -107,24 +127,39 @@ contract StableYieldManager is
     ////////////////////////////////////////////////////////////////////////////////
 
     modifier onlyRegisteredPool() {
-        require(registry.isManagedPool(msg.sender), "StableYieldManager/not registered pool");
-        _;
-    }
-    
-    modifier poolExists(address poolAddress) {
-        require(registry.isManagedPool(poolAddress), "StableYieldManager/pool not found");
+        _checkRegisteredPool();
         _;
     }
 
-     modifier ActivePool (address poolAddress) {
-        require(pools[poolAddress].isActive, "PoolManager/pool not active");
+    modifier poolExists(address poolAddress) {
+        _checkPoolExists(poolAddress);
+        _;
+    }
+
+    modifier ActivePool(address poolAddress) {
+        _checkActivePool(poolAddress);
         _;
     }
 
     modifier onlyRole(bytes32 role) {
-        require(accessManager.hasRole(role, msg.sender), "Access Denied");
-
+        _checkRole(role);
         _;
+    }
+
+    function _checkRegisteredPool() internal view {
+        if (!registry.isManagedPool(msg.sender)) revert PoolNotFound();
+    }
+
+    function _checkPoolExists(address poolAddress) internal view {
+        if (!registry.isManagedPool(poolAddress)) revert PoolNotFound();
+    }
+
+    function _checkActivePool(address poolAddress) internal view {
+        if (!pools[poolAddress].isActive) revert InvalidStatus();
+    }
+
+    function _checkRole(bytes32 role) internal view {
+        if (!accessManager.hasRole(role, msg.sender)) revert Unauthorized();
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -512,8 +547,8 @@ contract StableYieldManager is
         address spvAddress,
         uint256 amount
     ) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) nonReentrant returns (bytes32 allocationId) {
-        require(spvAddress != address(0), "StableYieldManager/invalid SPV");
-        require(amount > 0, "StableYieldManager/invalid amount");
+        if (spvAddress == address(0)) revert InvalidAddress();
+        if (amount == 0) revert InvalidAmount();
         
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
@@ -567,9 +602,9 @@ contract StableYieldManager is
     ) external onlyRole(accessManager.OPERATOR_ROLE()) nonReentrant {
         IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
         
-        require(allocation.createdAt > 0, "StableYieldManager/allocation not found");
-        require(allocation.status == IStableYieldTypes.AllocationStatus.PENDING, "StableYieldManager/not pending");
-        require(block.timestamp >= allocation.expiresAt, "StableYieldManager/not expired");
+        if (allocation.createdAt == 0) revert AllocationNotFound();
+        if (allocation.status != IStableYieldTypes.AllocationStatus.PENDING) revert AllocationNotPending();
+        if (block.timestamp < allocation.expiresAt) revert NotReady();
         
         allocation.status = IStableYieldTypes.AllocationStatus.CANCELLED;
         
@@ -608,12 +643,12 @@ contract StableYieldManager is
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
         IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
         
-        require(allocation.createdAt > 0, "StableYieldManager/allocation not found");
-        require(allocation.pool == poolAddress, "StableYieldManager/pool mismatch");
-        require(allocation.spv == msg.sender, "StableYieldManager/not allocation SPV");
-        require(allocation.status == IStableYieldTypes.AllocationStatus.PENDING, "StableYieldManager/not pending");
-        require(block.timestamp < allocation.expiresAt, "StableYieldManager/allocation expired");
-        require(purchasePrice <= allocation.amount, "StableYieldManager/exceeds allocation");
+        if (allocation.createdAt == 0) revert AllocationNotFound();
+        if (allocation.pool != poolAddress) revert AllocationMismatch();
+        if (allocation.spv != msg.sender) revert NotAllocationSPV();
+        if (allocation.status != IStableYieldTypes.AllocationStatus.PENDING) revert AllocationNotPending();
+        if (block.timestamp >= allocation.expiresAt) revert AllocationExpired();
+        if (purchasePrice > allocation.amount) revert ExceedsAllocation();
         
         _addInstrumentWithAllocation(
             poolAddress,
@@ -639,8 +674,8 @@ contract StableYieldManager is
     ) internal {
         IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
         
-        require(maturityDate > block.timestamp, "StableYieldManager/invalid maturity");
-        require(faceValue >= purchasePrice, "StableYieldManager/invalid face value");
+        if (maturityDate <= block.timestamp) revert InvalidMaturity();
+        if (faceValue < purchasePrice) revert InvalidFaceValue();
         
         uint256 instrumentId = poolInstrumentCount[poolAddress];
         
@@ -735,14 +770,14 @@ contract StableYieldManager is
     ) external onlyRole(accessManager.SPV_ROLE()) nonReentrant {
         IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
         
-        require(allocation.createdAt > 0, "StableYieldManager/allocation not found");
-        require(allocation.spv == msg.sender, "StableYieldManager/not allocation SPV");
+        if (allocation.createdAt == 0) revert AllocationNotFound();
+        if (allocation.spv != msg.sender) revert NotAllocationSPV();
         require(
             allocation.status == IStableYieldTypes.AllocationStatus.PENDING ||
             allocation.status == IStableYieldTypes.AllocationStatus.INVESTED,
             "StableYieldManager/invalid status"
         );
-        require(returnAmount > 0, "StableYieldManager/invalid amount");
+        if (returnAmount == 0) revert InvalidAmount();
         
         // Ensure SPV doesn't return more than remaining (amount - usedAmount - alreadyReturned)
         uint256 maxReturnable = allocation.amount - allocation.usedAmount - allocation.returnedAmount;
