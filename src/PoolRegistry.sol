@@ -48,8 +48,7 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
         bool isApproved;           // Asset approved for use
         string name;               // "Nigerian Naira"
         string symbol;             // "CNGN, USDC"
-        address tokenAddress;      // CNGN token contract
-        uint8 decimals;           // 18
+        uint8 decimals;           // 18 (fetched from token or default)
         bool isStablecoin;        // true
         uint256 approvedAt;       // Approval timestamp
     }
@@ -235,7 +234,6 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
             isApproved: true,
             name: name,
             symbol: symbol,
-            tokenAddress: asset,
             decimals: decimals,
             isStablecoin: isStablecoin,
             approvedAt: block.timestamp
@@ -328,11 +326,11 @@ contract PoolRegistry is Initializable, UUPSUpgradeable, IPoolRegistry {
     }
     
     function isRegisteredPool(address pool) external view override returns (bool) {
-        return poolInfos[pool].createdAt != 0;
+        return poolInfos[pool].createdAt != 0 || isStableYieldPool[pool] || isLockedPool[pool];
     } 
 
     function isManagedPool(address pool) external view override returns (bool) {
-        return isStableYieldPool[pool];
+        return isStableYieldPool[pool] || isLockedPool[pool];
     }
     
     function isManagedLockedPool(address pool) external view override returns (bool) {

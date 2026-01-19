@@ -29,6 +29,8 @@ interface IPoolFactory {
         uint256[] couponDates;
         uint256[] couponRates;
         uint256 minimumFundingThreshold;
+        uint256 minInvestment;   
+        uint256 withdrawalFeeBps;
     }
     
     function createPool(PoolConfig memory config) external returns (address pool, address escrow);

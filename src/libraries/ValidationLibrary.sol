@@ -38,6 +38,8 @@ library ValidationLibrary {
         require(receiver != address(0), "ValidationLibrary/invalid receiver");
         require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
         
+        // Check minimum investment
+        require(assets >= poolData.config.minInvestment, "ValidationLibrary/below minimum investment");
 
         require(poolData.status == IPoolTypes.PoolStatus.FUNDING, "ValidationLibrary/not funding phase");
         
@@ -258,7 +260,7 @@ library ValidationLibrary {
      * @dev Calculates proportional returns including principal + returns
      */
     function handleMaturedWithdrawal(
-        mapping(address => IPoolTypes.PoolData) storage pools,
+        mapping(address => IPoolTypes.PoolData) storage /* pools */,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
         IPoolRegistry registry,
         address poolAddress,

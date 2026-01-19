@@ -50,6 +50,7 @@ contract LockedPool is
     );
     event PositionRedeemed(address indexed user, uint256 indexed positionId, uint256 payout);
     event EarlyExit(address indexed user, uint256 indexed positionId, uint256 payout, uint256 penalty);
+    event AutoRolloverUpdated(address indexed user, uint256 indexed positionId, bool enabled);
 
     ////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////// INITIALIZATION /////////////////////////////
@@ -176,6 +177,20 @@ contract LockedPool is
         emit EarlyExit(msg.sender, positionId, payout, penalty);
         
         return (payout, penalty);
+    }
+
+    /**
+     * @notice Enable or disable auto-rollover for a position
+     * @dev When enabled, position will auto-renew at maturity if operator executes rollover
+     *      - UPFRONT positions: principal rolls, new interest paid upfront
+     *      - AT_MATURITY positions: principal + interest compounds
+     * @param positionId Position to configure
+     * @param enabled Whether to enable auto-rollover
+     */
+    function setAutoRollover(uint256 positionId, bool enabled) external whenNotPaused {
+        lockedPoolManager.setAutoRollover(positionId, enabled, msg.sender);
+        
+        emit AutoRolloverUpdated(msg.sender, positionId, enabled);
     }
 
     ////////////////////////////////////////////////////////////////////////////////
