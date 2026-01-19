@@ -28,14 +28,15 @@ import "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 contract DeployUpgradeable is Script {
     
     struct DeploymentConfig {
-        address admin;           // Multi-sig admin wallet
+        address admin;           // Default admin wallet
+        address multisigAdmin;   // Multi-sig admin wallet (must differ from admin)
         address proposer;        // Multi-sig proposer wallet (4/7)
         address executor;        // Multi-sig executor wallet (4/7)  
         address canceller;       // Multi-sig canceller wallet (3/5)
         address guardian;        // Emergency guardian (3/5)
         address spv;            // SPV address
         address operator;       // Operator address
-        address emergency;      // Emergency address
+        address emergency;      // Emergency address (must differ from admin)
         address treasury;       // Treasury address
         address baseToken;      // Base token (USDC)
         bool deployMockToken;   // Whether to deploy mock token
@@ -102,26 +103,30 @@ contract DeployUpgradeable is Script {
     function _loadConfig() internal view returns (DeploymentConfig memory config) {
         // Load from environment variables with defaults
         config.admin = vm.envOr("ADMIN_ADDRESS", msg.sender);
+        config.multisigAdmin = vm.envOr("MULTISIG_ADMIN_ADDRESS", address(0));
         config.proposer = vm.envOr("PROPOSER_ADDRESS", msg.sender);
         config.executor = vm.envOr("EXECUTOR_ADDRESS", msg.sender);
         config.canceller = vm.envOr("CANCELLER_ADDRESS", msg.sender);
         config.guardian = vm.envOr("GUARDIAN_ADDRESS", msg.sender);
         config.spv = vm.envOr("SPV_ADDRESS", msg.sender);
         config.operator = vm.envOr("OPERATOR_ADDRESS", msg.sender);
-        config.emergency = vm.envOr("EMERGENCY_ADDRESS", msg.sender);
+        config.emergency = vm.envOr("EMERGENCY_ADDRESS", address(0));
         config.treasury = vm.envOr("TREASURY_ADDRESS", msg.sender);
         config.baseToken = vm.envOr("BASE_TOKEN_ADDRESS", address(0));
         config.deployMockToken = vm.envOr("DEPLOY_MOCK_TOKEN", true);
         config.roleDelay = vm.envOr("ROLE_DELAY", uint256(24 hours));
         
         require(config.admin != address(0), "Invalid admin address");
+        require(config.multisigAdmin != address(0), "MULTISIG_ADMIN_ADDRESS env var required");
+        require(config.multisigAdmin != config.admin, "Multisig admin must differ from admin");
         require(config.proposer != address(0), "Invalid proposer address");
         require(config.executor != address(0), "Invalid executor address");
         require(config.canceller != address(0), "Invalid canceller address");
         require(config.guardian != address(0), "Invalid guardian address");
         require(config.spv != address(0), "Invalid SPV address");
         require(config.operator != address(0), "Invalid operator address");
-        require(config.emergency != address(0), "Invalid emergency address");
+        require(config.emergency != address(0), "EMERGENCY_ADDRESS env var required");
+        require(config.emergency != config.admin, "Emergency must differ from admin");
         require(config.treasury != address(0), "Invalid treasury address");
     }
     
@@ -144,7 +149,7 @@ contract DeployUpgradeable is Script {
             config.spv,
             config.operator,
             config.emergency,
-            config.admin  // TODO: Replace with multi-sig wallet address for production deployment
+            config.multisigAdmin
         ));
         console.log("AccessManager deployed at: %s", contracts.accessManager);
         emit ContractDeployed("AccessManager", contracts.accessManager);
