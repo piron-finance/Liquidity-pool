@@ -251,7 +251,7 @@ contract LockedPoolTest is BaseTest {
         
         // Pool starts with 3 tiers (0, 1, 2). Try to add tier at index 4, skipping index 3
         vm.prank(operator);
-        vm.expectRevert("LockedPoolManager/configure tiers sequentially");
+        vm.expectRevert(LockedPoolManager.InvalidTier.selector);
         lockedPoolManager.configureLockTier(
             poolAddress,
             4, // Skipping index 3
@@ -659,7 +659,7 @@ contract LockedPoolTest is BaseTest {
         
         // User2 cannot set user1's rollover preference
         vm.prank(user2);
-        vm.expectRevert("LockedPoolManager/not owner");
+        vm.expectRevert(LockedPoolManager.NotOwner.selector);
         LockedPool(poolAddress).setAutoRollover(positionId, true);
     }
     
@@ -767,7 +767,7 @@ contract LockedPoolTest is BaseTest {
         skipTime(30 days);
         
         vm.prank(operator);
-        vm.expectRevert("LockedPoolManager/not matured");
+        vm.expectRevert(LockedPoolManager.NotMatured.selector);
         lockedPoolManager.executeRollover(positionId);
     }
     
@@ -781,7 +781,7 @@ contract LockedPoolTest is BaseTest {
         skipTime(TIER_3M_DAYS * 1 days + 1);
         
         vm.prank(operator);
-        vm.expectRevert("LockedPoolManager/rollover not enabled");
+        vm.expectRevert(LockedPoolManager.RolloverNotEnabled.selector);
         lockedPoolManager.executeRollover(positionId);
     }
     
@@ -886,7 +886,7 @@ contract LockedPoolTest is BaseTest {
         
         // Should fail because tier is deactivated
         vm.prank(operator);
-        vm.expectRevert("LockedPoolManager/tier not active");
+        vm.expectRevert(LockedPoolManager.TierNotActive.selector);
         lockedPoolManager.executeRollover(positionId);
     }
     
@@ -927,7 +927,7 @@ contract LockedPoolTest is BaseTest {
         
         // Cannot set rollover on redeemed position
         vm.prank(user1);
-        vm.expectRevert("LockedPoolManager/invalid status");
+        vm.expectRevert(LockedPoolManager.InvalidStatus.selector);
         LockedPool(poolAddress).setAutoRollover(positionId, true);
     }
 }

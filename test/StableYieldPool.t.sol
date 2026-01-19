@@ -498,7 +498,7 @@ contract StableYieldPoolTest is BaseTest {
         
         // Try to add instrument - should fail
         vm.prank(spv);
-        vm.expectRevert("StableYieldManager/allocation expired");
+        vm.expectRevert(StableYieldManager.AllocationExpired.selector);
         stableYieldManager.addInstrument(
             poolAddress,
             allocationId,
