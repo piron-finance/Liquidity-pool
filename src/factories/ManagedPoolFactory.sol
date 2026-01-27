@@ -52,14 +52,14 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
     /////////////////////////////// STRUCTS ////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////
 
-    struct PoolDeploymentConfig {
+    struct PoolDeploymentConfig { // delete unused props
         address asset;              // CNGN, KES, USDT, USDC, etc.
         string poolName;            // "Piron Nigeria Treasury Pool"
         string poolSymbol;          // "pCNGN-TREAS"
         address spvAddress;         // SPV for this pool
         uint256[] supportedTenors;  // Optional: [90, 180, 270, 360] days (empty for flexible-only pools)
         uint256 minInvestment;      // 1000 * 10^decimals
-        address[] underlyingPools;  // Optional: existing T-bill pools to aggregate
+        address[] underlyingPools;  // Optional: existing T-bill pools to aggregate . mark to delete
     }
 
     struct LockedPoolDeploymentConfig {

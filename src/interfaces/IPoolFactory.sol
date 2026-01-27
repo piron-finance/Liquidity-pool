@@ -7,7 +7,7 @@ import "../types/IPoolTypes.sol";
 interface IPoolFactory {
     event PoolCreated(
         address indexed pool,
-        address indexed manager,
+        address indexed manager, 
         address indexed asset,
         string instrumentName,
         uint256 targetRaise,
