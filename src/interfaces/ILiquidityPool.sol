@@ -3,7 +3,12 @@ pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
+/// @title ILiquidityPool
+/// @dev Interface for Single-Asset (deal) pool vaults: deposit, withdraw, coupons, refunds, and emergency.
 interface ILiquidityPool is IERC4626 {
+
+    // ==================== EVENTS ====================
+
     event RefundSet(address indexed user, uint256 amount);
     event DiscountAccrued(address indexed user, uint256 amount);
     event RefundClaimed(address indexed user, uint256 amount);
@@ -11,13 +16,11 @@ interface ILiquidityPool is IERC4626 {
     event ManagerUpdated(address oldManager, address newManager);
     event CouponClaimed(address indexed user, uint256 amount);
 
-    
     function pendingRefunds(address user) external view returns (uint256);
     function discountedBillsAccrued(address user) external view returns (uint256);
     function totalPendingRefunds() external view returns (uint256);
     function totalDiscountAccrued() external view returns (uint256);
     
-    // Coupon claiming
     function claimCoupon() external returns (uint256);
     function getUserCouponAmount(address user) external view returns (uint256);
     

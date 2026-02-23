@@ -9,22 +9,23 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "../AccessManager.sol";
+import "../interfaces/IFeeManager.sol";
+import "../interfaces/IYieldReserveEscrow.sol";
 
 /**
  * @title StableYieldEscrow
- * @dev Secure custody for StableYieldPool instances with flexible stablecoin support
- * @notice Handles asset custody and SPV coordination for stable yield pools
+ * @dev Secure custody for a single StableYieldPool. Holds user deposits, tracks
+ *      reserves, processes deposit/withdrawal fees, manages SPV allocations,
+ *      and routes protocol capital from YieldReserveEscrow.
  */
 contract StableYieldEscrow is 
     Initializable, 
     UUPSUpgradeable, 
     ReentrancyGuardUpgradeable 
 {
-    using SafeERC20 for IERC20;
+    // ==================== STATE ====================
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STATE VARIABLES //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    using SafeERC20 for IERC20;
 
     IERC20 public asset;
 
@@ -38,26 +39,25 @@ contract StableYieldEscrow is
     string public poolName;
 
     uint256 public poolReserves;
-
-    struct FeeAccounting {
-        uint256 accrued;
-        uint256 total;
-    }
-
-    FeeAccounting private fees;
-
+    uint256 public depositFeesCollected;
+    uint256 public withdrawalFeesCollected;
 
     bool public emergencyWithdrawalEnabled;
 
     mapping(address => uint256) public spvAllocations;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    uint256 public protocolFundsFromReserve; 
+    uint256 public protocolFundsDirectDeposit; 
+    
+    address public feeManager;
+    address public yieldReserve;
+
+    // ==================== EVENTS ====================
 
     event FundsDeposited(address indexed from, uint256 amount, uint256 newCashBuffer);
     event FundsWithdrawn(address indexed to, uint256 amount, uint256 remainingCashBuffer);
-    event FundsAllocated(uint256 reserveAmount, uint256 transactionFee);
+    event FundsAllocated(uint256 reserveAmount, uint256 depositFee);
+    event WithdrawalFeeAllocated(uint256 withdrawalFee);
     event FeesCollected(uint256 transactionFees, address treasury);
     event EmergencyWithdrawalToggled(bool enabled);
     event PoolNameUpdated(string newPoolName);
@@ -65,10 +65,16 @@ contract StableYieldEscrow is
     event SPVLiquidityRequested(address indexed spv, uint256 amount, uint256 timestamp);
     event SPVLiquidityReceived(address indexed spv, uint256 amount, uint256 newCashBuffer);
     event PoolLinked(address indexed stableYieldPool);
+    
+    event ProtocolFundsReceived(address indexed from, uint256 amount);
+    event ProtocolFundsReleased(address indexed to, uint256 amount);
+    event DustSwept(address indexed feeManager, uint256 amount);
+    event DepositFeeCollected(uint256 amount);
+    event WithdrawalFeeCollected(uint256 amount);
+    event FeeManagerUpdated(address indexed feeManager);
+    event YieldReserveUpdated(address indexed yieldReserve);
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// MODIFIERS ///////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== MODIFIERS ====================
 
     modifier onlyStableYieldPool() {
         require(msg.sender == stableYieldPool, "StableYieldEscrow/only stable yield pool");
@@ -77,7 +83,7 @@ contract StableYieldEscrow is
 
     modifier onlyStableYieldPoolOrManager() {
         require(
-            msg.sender == stableYieldPool || 
+            msg.sender == stableYieldPool ||  
             msg.sender == stableYieldManager ||
             accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), 
             "StableYieldEscrow/only pool or manager"
@@ -106,21 +112,11 @@ contract StableYieldEscrow is
         _;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INITIALIZATION /////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /**
-     * @notice Initialize the StableYieldEscrow
-     * @param asset_ Underlying stablecoin asset
-     * @param accessManager_ Access manager address
-     * @param poolName_ Pool name for identification
-     */
     function initialize(
         address asset_,
         address accessManager_,
@@ -141,11 +137,6 @@ contract StableYieldEscrow is
 
     }
 
-    /**
-     * @notice Set the stable yield pool address (one-time only)
-     * @dev Can only be called once to link escrow to pool after deployment
-     * @param pool_ The stable yield pool address
-     */
     function setStableYieldPool(address pool_) external onlyFactory {
         require(stableYieldPool == address(0), "StableYieldEscrow/pool already set");
         require(pool_ != address(0), "StableYieldEscrow/invalid pool");
@@ -153,11 +144,6 @@ contract StableYieldEscrow is
         emit PoolLinked(pool_);
     }
     
-    /**
-     * @notice Set the stable yield manager address (one-time only)
-     * @dev Can only be called once to link escrow to manager after deployment
-     * @param manager_ The stable yield manager address
-     */
     function setStableYieldManager(address manager_) external onlyFactory {
         require(manager_ != address(0), "StableYieldEscrow/invalid manager");
         require(stableYieldManager == address(0), "StableYieldEscrow/manager already set");
@@ -165,70 +151,71 @@ contract StableYieldEscrow is
         stableYieldManager = manager_;
     }
 
-    /**
-     * @notice Disable upgrades for security
-     * @dev Escrows should never be upgraded once deployed with user funds
-     */
+    function setFeeManager(address feeManager_) external onlyFactory {
+        require(feeManager_ != address(0), "StableYieldEscrow/invalid fee manager");
+        feeManager = feeManager_;
+        emit FeeManagerUpdated(feeManager_);
+    }
+
+    function setYieldReserve(address yieldReserve_) external onlyFactory {
+        require(yieldReserve_ != address(0), "StableYieldEscrow/invalid yield reserve");
+        yieldReserve = yieldReserve_;
+        emit YieldReserveUpdated(yieldReserve_);
+    }
+
     function _authorizeUpgrade(address) internal pure override {
         revert("StableYieldEscrow/upgrades disabled for security");
     }
 
-    /**
-     * @notice Get version number
-     */
     function getVersion() external view returns (uint256) {
         return version;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// DEPOSIT & WITHDRAWAL ///////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-
-    /**
-     * @notice Allocate deposited funds between pool reserves and transaction fees
-     * @dev Called by StableYieldManager after deposit validation
-     * @param totalAmount Total amount deposited
-     * @param reserveAmount Amount allocated to pool reserves
-     * @param transactionFee Amount allocated to transaction fees
-     */
-    function allocateDeposit(
-        uint256 totalAmount,
-        uint256 reserveAmount, 
-        uint256 transactionFee
-    ) external onlyStableYieldPoolOrManager {
-        require(totalAmount == reserveAmount + transactionFee, "StableYieldEscrow/allocation mismatch");
+    function processDeposit(uint256 amount, uint256 feeBps) external onlyStableYieldPoolOrManager nonReentrant returns (uint256 netAmount, uint256 fee) {
+        require(amount > 0, "StableYieldEscrow/invalid amount");
         
         uint256 currentBalance = asset.balanceOf(address(this));
-        uint256 expectedTotal = poolReserves + fees.accrued + totalAmount;
-        require(currentBalance >= expectedTotal, "StableYieldEscrow/insufficient balance");
+        require(currentBalance >= poolReserves + amount, "StableYieldEscrow/insufficient balance");
         
-        poolReserves += reserveAmount;
-        fees.accrued += transactionFee;
-        fees.total += transactionFee;
+        fee = (feeBps > 0 && feeManager != address(0)) ? (amount * feeBps) / 10000 : 0;
+        netAmount = amount - fee;
         
-        emit FundsAllocated(reserveAmount, transactionFee);
+        poolReserves += netAmount;
+        
+        if (fee > 0) {
+            depositFeesCollected += fee;
+            asset.safeTransfer(feeManager, fee);
+            IFeeManager(feeManager).recordFeeOnly(
+                stableYieldPool,
+                address(asset),
+                fee,
+                IFeeManager.FeeType.DEPOSIT_FEE
+            );
+            emit DepositFeeCollected(fee);
+        }
+        
+        emit FundsAllocated(netAmount, fee);
     }
 
-    /**
-     * @notice Allocate withdrawal transaction fee from reserves to fee bucket
-     * @dev Called by StableYieldManager during withdrawal processing
-     * @param transactionFee Amount to move from reserves to transaction fees
-     */
-    function allocateWithdrawalFee(uint256 transactionFee) external onlyStableYieldPoolOrManager {
-        require(transactionFee > 0, "StableYieldEscrow/invalid fee amount");
-        require(poolReserves >= transactionFee, "StableYieldEscrow/insufficient reserves");
+    function collectWithdrawalFee(uint256 amount) external onlyStableYieldPoolOrManager nonReentrant {
+        require(feeManager != address(0), "StableYieldEscrow/fee manager not set");
+        require(amount > 0, "StableYieldEscrow/invalid fee amount");
+        require(poolReserves >= amount, "StableYieldEscrow/insufficient reserves");
         
-        poolReserves -= transactionFee;
-        fees.accrued += transactionFee;
-        fees.total += transactionFee;
+        poolReserves -= amount;
+        withdrawalFeesCollected += amount;
+        
+        asset.safeTransfer(feeManager, amount);
+        IFeeManager(feeManager).recordFeeOnly(
+            stableYieldPool,
+            address(asset),
+            amount,
+            IFeeManager.FeeType.WITHDRAWAL_FEE
+        );
+        
+        emit WithdrawalFeeCollected(amount);
     }
 
-    /**
-     * @notice Withdraw funds to user (for processed withdrawal requests)
-     * @param to Recipient address
-     * @param amount Amount to withdraw
-     */
     function withdraw( 
         address to,
         uint256 amount
@@ -240,35 +227,113 @@ contract StableYieldEscrow is
         poolReserves -= amount;
         asset.safeTransfer(to, amount);
 
-        emit FundsWithdrawn(to, amount, getCashBuffer());
+        emit FundsWithdrawn(to, amount, poolReserves);
     }
 
-
-    /**
-     * @notice Transfer collected transaction fees to treasury
-     * @param treasury Treasury address
-     */
-    function transferFeesToTreasury(address treasury) external onlyOperator nonReentrant {
-        require(treasury != address(0), "StableYieldEscrow/invalid treasury");
-        require(fees.accrued > 0, "StableYieldEscrow/no fees to transfer");
+    function receiveProtocolFundsFromAdmin(uint256 amount) external onlyAdmin nonReentrant {
+        require(amount > 0, "StableYieldEscrow/invalid amount");
         
-        uint256 feeAmount = fees.accrued;
-        fees.accrued = 0;
+        asset.safeTransferFrom(msg.sender, address(this), amount);
+        protocolFundsDirectDeposit += amount;
         
-        asset.safeTransfer(treasury, feeAmount);
+        if (yieldReserve != address(0)) {
+            IYieldReserveEscrow(yieldReserve).recordDirectDeposit(stableYieldPool, amount);
+        }
         
-        emit FeesCollected(feeAmount, treasury);
+        emit ProtocolFundsReceived(msg.sender, amount);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// SPV COORDINATION ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    /**
-     * @notice Allocate funds to SPV for instrument purchases
-     * @param spvAddress SPV address
-     * @param amount Amount to allocate
-     */
+    function recordProtocolFundsFromReserve(uint256 amount) external {
+        require(
+            msg.sender == yieldReserve || 
+            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender),
+            "StableYieldEscrow/unauthorized"
+        );
+        require(amount > 0, "StableYieldEscrow/invalid amount");
+        
+        protocolFundsFromReserve += amount;
+        poolReserves += amount;
+        
+        emit ProtocolFundsReceived(msg.sender, amount);
+    }
+
+    function returnProtocolFundsToReserve(uint256 amount) external nonReentrant {
+        require(
+            msg.sender == stableYieldManager ||
+            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender),
+            "StableYieldEscrow/unauthorized"
+        );
+        require(yieldReserve != address(0), "StableYieldEscrow/yield reserve not set");
+        require(amount > 0, "StableYieldEscrow/invalid amount");
+        require(protocolFundsFromReserve >= amount, "StableYieldEscrow/exceeds reserve funds");
+        
+        protocolFundsFromReserve -= amount;
+        if (poolReserves >= amount) {
+            poolReserves -= amount;
+        } else {
+            poolReserves = 0;
+        }
+        
+        asset.forceApprove(yieldReserve, amount);
+        IYieldReserveEscrow(yieldReserve).receiveRecalledFunds(stableYieldPool, amount);
+        
+        emit ProtocolFundsReleased(yieldReserve, amount);
+    }
+
+    function releaseDirectDepositFunds(address to, uint256 amount) external onlyAdmin nonReentrant {
+        require(to != address(0), "StableYieldEscrow/invalid recipient");
+        require(amount > 0, "StableYieldEscrow/invalid amount");
+        require(protocolFundsDirectDeposit >= amount, "StableYieldEscrow/exceeds direct deposits");
+        
+        protocolFundsDirectDeposit -= amount;
+        
+        asset.safeTransfer(to, amount);
+        
+        if (yieldReserve != address(0)) {
+            IYieldReserveEscrow(yieldReserve).recordDirectDepositWithdrawn(stableYieldPool, amount);
+        }
+        
+        emit ProtocolFundsReleased(to, amount);
+    }
+
+    function getProtocolFundsHeld() external view returns (uint256) {
+        return protocolFundsFromReserve + protocolFundsDirectDeposit;
+    }
+
+    function sweepDust() external onlyOperator nonReentrant {
+        require(feeManager != address(0), "StableYieldEscrow/fee manager not set");
+        
+        uint256 actualBalance = asset.balanceOf(address(this));
+        uint256 expectedBalance = poolReserves + protocolFundsDirectDeposit;
+        
+        require(actualBalance > expectedBalance, "StableYieldEscrow/no dust to sweep");
+        
+        uint256 dust = actualBalance - expectedBalance;
+        
+        uint256 minThreshold = IFeeManager(feeManager).getMinSweepThreshold();
+        require(dust >= minThreshold, "StableYieldEscrow/dust below threshold");
+        
+        asset.safeTransfer(feeManager, dust);
+        IFeeManager(feeManager).recordFeeOnly(
+            stableYieldPool,
+            address(asset),
+            dust,
+            IFeeManager.FeeType.OTHER
+        );
+        
+        emit DustSwept(feeManager, dust);
+    }
+
+    function getSweepableDust() external view returns (uint256 dust) {
+        uint256 actualBalance = asset.balanceOf(address(this));
+        uint256 expectedBalance = poolReserves + protocolFundsDirectDeposit;
+        
+        if (actualBalance > expectedBalance) {
+            return actualBalance - expectedBalance;
+        }
+        return 0;
+    }
+
     function allocateToSPV(address spvAddress, uint256 amount) external onlyOperator nonReentrant {
         require(spvAddress != address(0), "StableYieldEscrow/invalid SPV");
         require(amount > 0, "StableYieldEscrow/invalid amount");
@@ -279,88 +344,59 @@ contract StableYieldEscrow is
         
         asset.safeTransfer(spvAddress, amount);
         
-        emit SPVAllocation(spvAddress, amount, getCashBuffer());
+        emit SPVAllocation(spvAddress, amount, poolReserves);
     }
     
-
-    /**
-     * @notice Record liquidity received from SPV
-     * @dev Called by StableYieldManager after transferring funds to escrow
-     * @param amount Amount received
-     */
     function recordReceivedLiquidity(uint256 amount) external {
         require(msg.sender == stableYieldManager, "StableYieldEscrow/only manager");
         require(amount > 0, "StableYieldEscrow/invalid amount");
         
         poolReserves += amount;
         
-        emit SPVLiquidityReceived(msg.sender, amount, getCashBuffer());
+        emit SPVLiquidityReceived(msg.sender, amount, poolReserves);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Get current cash buffer amount (derived value)
-     * @dev Cash buffer = poolReserves + transactionFees
-     *      This is a computed value, not stored state
-     */
-    function getCashBuffer() public view returns (uint256) {
-        return poolReserves + fees.accrued;
-    }
-
-    /**
-     * @notice Get pool reserves available for investing
-     */
     function getPoolReserves() external view returns (uint256) {
         return poolReserves;
     }
 
-    /**
-     * @notice Get collected transaction fees
-     */
-    function getAccruedFees() external view returns (uint256) {
-        return fees.accrued;
+    function getDepositFeesCollected() external view returns (uint256) {
+        return depositFeesCollected;
     }
 
-    /**
-     * @notice Get total collected fees 
-     */
+    function getWithdrawalFeesCollected() external view returns (uint256) {
+        return withdrawalFeesCollected;
+    }
+
     function getTotalFeesCollected() external view returns (uint256) {
-        return fees.total;
+        return depositFeesCollected + withdrawalFeesCollected;
     }
 
-    /**
-     * @notice Get total balance (cash buffer)
-     */
+    function getProtocolFundsFromReserve() external view returns (uint256) {
+        return protocolFundsFromReserve;
+    }
+
+    function getProtocolFundsDirectDeposit() external view returns (uint256) {
+        return protocolFundsDirectDeposit;
+    }
+
     function getTotalBalance() external view returns (uint256) {
         return asset.balanceOf(address(this));
     }
 
-    /**
-     * @notice Get SPV allocation amount
-     */
+    function getExpectedBalance() external view returns (uint256) {
+        return poolReserves + protocolFundsDirectDeposit;
+    }
+
     function getSPVAllocation(address spvAddress) external view returns (uint256) {
         return spvAllocations[spvAddress];
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ADMIN FUNCTIONS ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-
-    /**
-     * @notice Toggle emergency withdrawal capability
-     */
     function toggleEmergencyWithdrawal(bool enabled) external onlyAdmin {
         emergencyWithdrawalEnabled = enabled;
         emit EmergencyWithdrawalToggled(enabled);
     }
 
-    /**
-     * @notice Emergency withdraw (admin only, when enabled)
-     */
     function emergencyWithdraw(
         address to,
         uint256 amount
@@ -371,20 +407,13 @@ contract StableYieldEscrow is
 
         asset.safeTransfer(to, amount);
         
-        // Adjust accounting - prioritize reducing poolReserves first
         if (poolReserves >= amount) {
             poolReserves -= amount;
         } else {
-            uint256 remaining = amount - poolReserves;
             poolReserves = 0;
-            if (fees.accrued >= remaining) {
-                fees.accrued -= remaining;
-            } else {
-                fees.accrued = 0;
-            }
         }
 
-        emit FundsWithdrawn(to, amount, getCashBuffer());
+        emit FundsWithdrawn(to, amount, poolReserves);
     }
 
 }

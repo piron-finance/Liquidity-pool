@@ -4,13 +4,8 @@ pragma solidity ^0.8.22;
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/**
- * @title BaseTest
- * @notice Base test contract with common utilities and setup
- */
 contract BaseTest is Test {
     
-    // Common test addresses
     address public admin = makeAddr("admin");
     address public spv = makeAddr("spv");
     address public operator = makeAddr("operator");
@@ -21,15 +16,12 @@ contract BaseTest is Test {
     address public user2 = makeAddr("user2");
     address public user3 = makeAddr("user3");
     
-    // Common constants
-    uint256 public constant INITIAL_BALANCE = 1_000_000e6; // 1M tokens
+    uint256 public constant INITIAL_BALANCE = 1_000_000e6;
     uint256 public constant BASIS_POINTS = 10_000;
     
-    // Common events
     event Transfer(address indexed from, address indexed to, uint256 value);
     
     function setUp() public virtual {
-        // Fund test addresses with ETH
         vm.deal(admin, 100 ether);
         vm.deal(spv, 100 ether);
         vm.deal(operator, 100 ether);
@@ -41,32 +33,19 @@ contract BaseTest is Test {
         vm.deal(user3, 100 ether);
     }
     
-    /**
-     * @dev Helper to calculate percentage of amount in basis points
-     */
     function calculateBps(uint256 amount, uint256 bps) public pure returns (uint256) {
         return (amount * bps) / BASIS_POINTS;
     }
     
-    /**
-     * @dev Helper to skip time
-     */
     function skipTime(uint256 duration) public {
         vm.warp(block.timestamp + duration);
     }
     
-    /**
-     * @dev Helper to skip blocks
-     */
     function skipBlocks(uint256 blocks) public {
         vm.roll(block.number + blocks);
     }
 }
 
-/**
- * @title MockERC20
- * @notice Mock ERC20 token for testing
- */
 contract MockERC20 is ERC20 {
     uint8 private _decimals;
     
@@ -90,4 +69,3 @@ contract MockERC20 is ERC20 {
         return _decimals;
     }
 }
-

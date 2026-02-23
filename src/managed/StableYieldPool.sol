@@ -14,10 +14,10 @@ import "../escrows/StableYieldEscrow.sol";
 import "../AccessManager.sol";
 
 /**
- * @title StableYieldPool - Piron Flexible Pools
- * @dev ERC4626 vault for flexible managed pools with 30-day minimum holding period
- * @notice Flexible stable yield pool supporting cross-border stablecoin investments
- * 
+ * @title StableYieldPool
+ * @dev ERC4626 vault for flexible managed pools. Delegates deposit/withdrawal
+ *      validation to StableYieldManager. Enforces a configurable holding period
+ *      on share transfers and withdrawals.
  */
 contract StableYieldPool is 
     Initializable,
@@ -25,11 +25,7 @@ contract StableYieldPool is
     UUPSUpgradeable,
     PausableUpgradeable
 {
-    
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STATE VARIABLES //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== STATE ====================
 
     using SafeERC20 for IERC20;
     StableYieldManager public stableYieldManager;
@@ -38,35 +34,21 @@ contract StableYieldPool is
     
     uint256 public version;
     
-
-    uint256 public constant MINIMUM_HOLDING_PERIOD = 30 days;
+    uint256 public minimumHoldingPeriod;
+    uint256 public constant MAX_HOLDING_PERIOD = 365 days;
+    uint256 public constant DEFAULT_HOLDING_PERIOD = 30 days;
+    
     mapping(address => uint256) public lastDepositTime;
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
     event PoolInitialized(address indexed asset, address indexed escrow, address indexed manager);
     event WithdrawalRequested(address indexed user, uint256 shares, uint256 estimatedValue);
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INITIALIZATION /////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    event HoldingPeriodUpdated(uint256 oldPeriod, uint256 newPeriod);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /**
-     * @notice Initialize the StableYieldPool
-     * @param asset_ Underlying stablecoin asset
-     * @param name_ Pool token name
-     * @param symbol_ Pool token symbol
-     * @param escrow_ Pool escrow contract
-     * @param stableYieldManager_ StableYieldManager contract
-     * @param accessManager_ AccessManager contract
-     */
     function initialize(
         address asset_,
         string memory name_,
@@ -89,30 +71,15 @@ contract StableYieldPool is
         stableYieldManager = StableYieldManager(stableYieldManager_);
         accessManager = AccessManager(accessManager_);
         version = 1;
+        minimumHoldingPeriod = DEFAULT_HOLDING_PERIOD;
 
         emit PoolInitialized(asset_, escrow_, stableYieldManager_);
     }
 
-    /**
-     * @notice Disable upgrades for security - only factory deploys new versions
-     * @dev Pool contracts should never be upgraded
-     */
     function _authorizeUpgrade(address) internal pure override {
         revert("StableYieldPool/upgrades disabled for security");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ERC4626 OVERRIDES ///////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-
-
-    /**
-     * @notice Deposit assets and mint shares
-     * @param assets Amount of assets to deposit
-     * @param receiver Address to receive shares
-     * @return shares Number of shares minted
-     */
     function deposit(uint256 assets, address receiver) public override whenNotPaused returns (uint256 shares) {
         require(assets > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
@@ -129,13 +96,6 @@ contract StableYieldPool is
         emit Deposit(msg.sender, receiver, assets, shares);
     }
 
-    /**
-     * @notice Mint exact number of shares
-     * @dev  calculates required assets for exact shares
-     * @param shares Number of shares to mint
-     * @param receiver Address to receive shares
-     * @return assets Amount of assets required for the shares
-     */
     function mint(uint256 shares, address receiver) public override whenNotPaused returns (uint256 assets) {
         require(shares > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
@@ -162,15 +122,6 @@ contract StableYieldPool is
         return assets;
     }
 
-  
-    /**
-     * @notice Withdraw exact amount of assets
-     * @dev calculates required shares for exact assets
-     * @param assets Amount of assets to withdraw
-     * @param receiver Address to receive assets
-     * @param owner Address that owns the shares
-     * @return shares Number of shares burned for the assets
-     */
     function withdraw(uint256 assets, address receiver, address owner) public override whenNotPaused returns (uint256 shares) {
         require(assets > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
@@ -202,19 +153,12 @@ contract StableYieldPool is
         return actualShares; 
     }
 
-    /**
-     * @notice Redeem shares for assets
-     * @param shares Number of shares to redeem
-     * @param receiver Address to receive assets
-     * @param owner Address that owns the shares
-     * @return assets Amount of assets received
-     */
     function redeem(uint256 shares, address receiver, address owner) public override whenNotPaused returns (uint256 assets) {
         require(shares > 0, "StableYieldPool/invalid shares");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
         require(owner != address(0), "StableYieldPool/invalid owner");
         
-        _enforceHoldingPeriod(owner);
+        _enforceHoldingPeriod(owner); 
 
         if (msg.sender != owner) {
             _spendAllowance(owner, msg.sender, shares);
@@ -234,118 +178,66 @@ contract StableYieldPool is
         return withdrawalValue;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Get current NAV per share
-     */
     function getNAVPerShare() external view returns (uint256) {
         return stableYieldManager.calculateNAVPerShare(address(this));
     }
 
-    /**
-     * @notice Get pool data from StableYieldManager
-     */
     function getPoolData() external view returns (IStableYieldTypes.PoolData memory) {
         return stableYieldManager.getPoolData(address(this));
     }
 
-    /**
-     * @notice Get pool instruments
-     */
     function getPoolInstruments() external view returns (IStableYieldTypes.InstrumentHolding[] memory) {
         return stableYieldManager.getPoolInstruments(address(this));
     }
 
-    /**
-     * @notice Get withdrawal queue status
-     */
     function getWithdrawalQueueStatus() external view returns (uint256 head, uint256 tail, uint256 pending, uint256 totalPendingValue) {
         return stableYieldManager.getWithdrawalQueueStatus(address(this));
     }
 
-    /**
-     * @notice Get user withdrawal requests
-     */
     function getUserWithdrawalRequests(address user) external view returns (uint256[] memory) {
         return stableYieldManager.getUserWithdrawalRequests(address(this), user);
     }
 
-        /**
-     * @notice Get total assets under management
-     * @dev Delegates to StableYieldManager for NAV calculation
-     */
     function totalAssets() public view override returns (uint256) {
         return stableYieldManager.calculatePoolNAV(address(this));
     }
 
-    /**
-     * @notice Convert assets to shares using current NAV
-     */
     function _convertToShares(uint256 assets, Math.Rounding) internal view override returns (uint256) {
-        return stableYieldManager.calculateSharesView(address(this), assets);
+        return stableYieldManager.calculateShares(address(this), assets);
     }
 
-    /**
-     * @notice Convert shares to assets using current NAV
-     */
     function _convertToAssets(uint256 shares, Math.Rounding) internal view override returns (uint256) {
-        return stableYieldManager.calculateAssetValueView(address(this), shares);
+        return stableYieldManager.calculateAssetValue(address(this), shares);
     }
 
-        /**
-     * @notice Get version
-     */
     function getVersion() external view returns (uint256) {
         return version;
     }
     
-    /**
-     * @notice Check if user can withdraw (holding period satisfied)
-     */
-    function canWithdraw(address user) external view returns (bool) {
-        return block.timestamp >= lastDepositTime[user] + MINIMUM_HOLDING_PERIOD;
+    function canWithdraw(address user) public view returns (bool) {
+        return block.timestamp >= lastDepositTime[user] + minimumHoldingPeriod;
     }
     
-    /**
-     * @notice Get remaining holding period for user
-     */
     function getRemainingHoldingPeriod(address user) external view returns (uint256) {
-        uint256 unlockTime = lastDepositTime[user] + MINIMUM_HOLDING_PERIOD;
+        uint256 unlockTime = lastDepositTime[user] + minimumHoldingPeriod;
         return block.timestamp >= unlockTime ? 0 : unlockTime - block.timestamp;
     }
     
-    /**
-     * @notice Get user's unlock timestamp
-     */
     function getUnlockTime(address user) external view returns (uint256) {
-        return lastDepositTime[user] + MINIMUM_HOLDING_PERIOD;
+        return lastDepositTime[user] + minimumHoldingPeriod;
+    }
+    
+    function getMinimumHoldingPeriod() external view returns (uint256) {
+        return minimumHoldingPeriod;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INTERNAL FUNCTIONS ///////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    /**
-     * @notice Enforce minimum holding period for flexible pools
-     * @param user User attempting to withdraw
-     */
     function _enforceHoldingPeriod(address user) internal view {
-        uint256 unlockTime = lastDepositTime[user] + MINIMUM_HOLDING_PERIOD;
+        uint256 unlockTime = lastDepositTime[user] + minimumHoldingPeriod;
         if (block.timestamp < unlockTime) {
             revert("StableYieldPool/minimum holding period not met");
         }
     }
 
-    /**
-     * @notice Override ERC20 _update to track holding period on transfers
-     * @dev Ensures recipients of transferred shares must also wait 30 days
-     * @param from Sender address
-     * @param to Recipient address
-     * @param value Amount transferred
-     */
     function _update(address from, address to, uint256 value) internal override {
         super._update(from, to, value);
         
@@ -354,34 +246,29 @@ contract StableYieldPool is
         }
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ADMIN FUNCTIONS ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Pause the pool
-     */
     function pause() external {
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
         _pause();
     }
 
-    /**
-     * @notice Unpause the pool
-     */
     function unpause() external {
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
         _unpause();
     }
     
-    /**
-     * @notice Emergency withdrawal bypass (operators only)
-     * @dev Allows operators to process withdrawals without holding period in emergencies
-     * @param shares Number of shares to redeem
-     * @param receiver Address to receive assets
-     * @param owner Address that owns the shares
-     * @return assets Amount of assets received
-     */
+    function setMinimumHoldingPeriod(uint256 newPeriod) external {
+        require(
+            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender),
+            "StableYieldPool/not admin"
+        );
+        require(newPeriod <= MAX_HOLDING_PERIOD, "StableYieldPool/period too long");
+        
+        uint256 oldPeriod = minimumHoldingPeriod;
+        minimumHoldingPeriod = newPeriod;
+        
+        emit HoldingPeriodUpdated(oldPeriod, newPeriod);
+    }
+    
     function emergencyRedeem(uint256 shares, address receiver, address owner) external returns (uint256 assets) {
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
         require(shares > 0, "StableYieldPool/invalid shares");
@@ -401,6 +288,5 @@ contract StableYieldPool is
 
         return withdrawalValue;
     }
-
 
 }

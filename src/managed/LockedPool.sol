@@ -15,8 +15,9 @@ import "../types/ILockedPoolTypes.sol";
 
 /**
  * @title LockedPool
- * @dev ERC4626 vault for locked deposits with fixed tenors
- * @notice Users lock funds for fixed periods (3/6/12 months) and receive interest upfront or at maturity
+ * @dev ERC4626 vault for fixed-term locked deposits. Delegates position logic
+ *      to LockedPoolManager. Shares represent invested principal. Supports
+ *      tiered deposits, early exit, redemption, rollover, and position transfer.
  */
 contract LockedPool is 
     Initializable,
@@ -24,21 +25,15 @@ contract LockedPool is
     UUPSUpgradeable,
     PausableUpgradeable
 {
-    using SafeERC20 for IERC20;
+    // ==================== STATE ====================
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STATE VARIABLES //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    using SafeERC20 for IERC20;
 
     LockedPoolManager public lockedPoolManager;
     LockedPoolEscrow public escrow;
     AccessManager public accessManager;
     
     uint256 public version;
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
     event PoolInitialized(address indexed asset, address indexed escrow, address indexed manager);
     event LockedDeposit(
@@ -51,25 +46,13 @@ contract LockedPool is
     event PositionRedeemed(address indexed user, uint256 indexed positionId, uint256 payout);
     event EarlyExit(address indexed user, uint256 indexed positionId, uint256 payout, uint256 penalty);
     event AutoRolloverUpdated(address indexed user, uint256 indexed positionId, bool enabled);
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INITIALIZATION /////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    event PositionTransferred(address indexed from, address indexed to, uint256 indexed positionId, uint256 shares);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /**
-     * @notice Initialize the LockedPool
-     * @param asset_ Underlying stablecoin asset
-     * @param name_ Pool token name
-     * @param symbol_ Pool token symbol
-     * @param escrow_ Pool escrow contract
-     * @param lockedPoolManager_ LockedPoolManager contract
-     * @param accessManager_ AccessManager contract
-     */
     function initialize(
         address asset_,
         string memory name_,
@@ -100,18 +83,6 @@ contract LockedPool is
         revert("LockedPool/upgrades disabled");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// LOCKED DEPOSIT FUNCTIONS ////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Deposit with lock tier and interest payment choice
-     * @param amount Amount to deposit
-     * @param tierIndex Lock tier (0=3mo, 1=6mo, 2=12mo typically)
-     * @param paymentChoice Upfront or maturity interest
-     * @return positionId Created position ID
-     * @return shares Shares minted (equal to invested amount)
-     */
     function depositLocked(
         uint256 amount,
         uint8 tierIndex,
@@ -136,11 +107,6 @@ contract LockedPool is
         return (positionId, shares);
     }
 
-    /**
-     * @notice Redeem position at maturity
-     * @param positionId Position to redeem
-     * @return payout Amount received
-     */
     function redeemPosition(uint256 positionId) external whenNotPaused returns (uint256 payout) {
         ILockedPoolTypes.UserPosition memory position = lockedPoolManager.getPosition(positionId);
         require(position.user == msg.sender, "LockedPool/not owner");
@@ -157,12 +123,6 @@ contract LockedPool is
         return payout;
     }
 
-    /**
-     * @notice Early exit from position with penalty
-     * @param positionId Position to exit
-     * @return payout Amount received after penalty
-     * @return penalty Penalty deducted
-     */
     function earlyExitPosition(uint256 positionId) external whenNotPaused returns (uint256 payout, uint256 penalty) {
         ILockedPoolTypes.UserPosition memory position = lockedPoolManager.getPosition(positionId);
         require(position.user == msg.sender, "LockedPool/not owner");
@@ -179,115 +139,103 @@ contract LockedPool is
         return (payout, penalty);
     }
 
-    /**
-     * @notice Enable or disable auto-rollover for a position
-     * @dev When enabled, position will auto-renew at maturity if operator executes rollover
-     *      - UPFRONT positions: principal rolls, new interest paid upfront
-     *      - AT_MATURITY positions: principal + interest compounds
-     * @param positionId Position to configure
-     * @param enabled Whether to enable auto-rollover
-     */
     function setAutoRollover(uint256 positionId, bool enabled) external whenNotPaused {
         lockedPoolManager.setAutoRollover(positionId, enabled, msg.sender);
         
         emit AutoRolloverUpdated(msg.sender, positionId, enabled);
     }
+    
+    function transferPosition(uint256 positionId, address newOwner) external whenNotPaused {
+        require(newOwner != address(0), "LockedPool/invalid recipient");
+        require(newOwner != msg.sender, "LockedPool/cannot transfer to self");
+        
+        ILockedPoolTypes.UserPosition memory position = lockedPoolManager.getPosition(positionId);
+        require(position.user == msg.sender, "LockedPool/not owner");
+        require(
+            position.status == ILockedPoolTypes.PositionStatus.ACTIVE ||
+            position.status == ILockedPoolTypes.PositionStatus.MATURED,
+            "LockedPool/position not transferable"
+        );
+        
+        uint256 sharesToTransfer = position.investedAmount;
+        require(balanceOf(msg.sender) >= sharesToTransfer, "LockedPool/insufficient shares");
+        
+        _burn(msg.sender, sharesToTransfer);
+        _mint(newOwner, sharesToTransfer);
+        
+        lockedPoolManager.transferPositionOwnership(positionId, newOwner, msg.sender);
+        
+        emit PositionTransferred(msg.sender, newOwner, positionId, sharesToTransfer);
+    }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ERC4626 OVERRIDES ///////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Standard deposit disabled - use depositLocked
-     */
     function deposit(uint256, address) public pure override returns (uint256) {
         revert("LockedPool/use depositLocked");
     }
 
-    /**
-     * @notice Standard mint disabled - use depositLocked
-     */
     function mint(uint256, address) public pure override returns (uint256) {
         revert("LockedPool/use depositLocked");
     }
 
-    /**
-     * @notice Standard withdraw disabled - use redeemPosition or earlyExitPosition
-     */
     function withdraw(uint256, address, address) public pure override returns (uint256) {
         revert("LockedPool/use redeemPosition");
     }
 
-    /**
-     * @notice Standard redeem disabled - use redeemPosition or earlyExitPosition
-     */
     function redeem(uint256, address, address) public pure override returns (uint256) {
         revert("LockedPool/use redeemPosition");
     }
 
-    /**
-     * @notice Total assets equals principal held in escrow
-     */
     function totalAssets() public view override returns (uint256) {
         return escrow.getPrincipalHeld();
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    function mintRolloverShares(address user, uint256 amount) external {
+        require(msg.sender == address(lockedPoolManager), "LockedPool/only manager");
+        require(amount > 0, "LockedPool/zero amount");
+        _mint(user, amount);
+    }
+    
+    function burnRolloverShares(address user, uint256 amount) external {
+        require(msg.sender == address(lockedPoolManager), "LockedPool/only manager");
+        require(amount > 0, "LockedPool/zero amount");
+        require(balanceOf(user) >= amount, "LockedPool/insufficient shares");
+        _burn(user, amount);
+    }
 
-    /**
-     * @notice Get user's position IDs
-     */
+    function _update(address from, address to, uint256 amount) internal override {
+        if (from != address(0) && to != address(0)) {
+            revert("LockedPool/transfers disabled");
+        }
+        super._update(from, to, amount);
+    }
+
     function getUserPositions(address user) external view returns (uint256[] memory) {
         return lockedPoolManager.getUserPositions(address(this), user);
     }
 
-    /**
-     * @notice Get position details
-     */
     function getPosition(uint256 positionId) external view returns (ILockedPoolTypes.UserPosition memory) {
         return lockedPoolManager.getPosition(positionId);
     }
 
-    /**
-     * @notice Get position summary
-     */
     function getPositionSummary(uint256 positionId) external view returns (ILockedPoolTypes.PositionSummary memory) {
         return lockedPoolManager.getPositionSummary(positionId);
     }
 
-    /**
-     * @notice Calculate early exit payout
-     */
     function calculateEarlyExitPayout(uint256 positionId) external view returns (ILockedPoolTypes.EarlyExitCalculation memory) {
         return lockedPoolManager.calculateEarlyExitPayout(positionId);
     }
 
-    /**
-     * @notice Get available lock tiers
-     */
     function getLockTiers() external view returns (ILockedPoolTypes.LockTier[] memory) {
         return lockedPoolManager.getPoolTiers(address(this));
     }
 
-    /**
-     * @notice Get specific tier
-     */
     function getLockTier(uint8 tierIndex) external view returns (ILockedPoolTypes.LockTier memory) {
         return lockedPoolManager.getLockTier(address(this), tierIndex);
     }
 
-    /**
-     * @notice Get pool metrics
-     */
     function getPoolMetrics() external view returns (ILockedPoolTypes.PoolMetrics memory) {
         return lockedPoolManager.getPoolMetrics(address(this));
     }
 
-    /**
-     * @notice Calculate interest for preview
-     */
     function previewInterest(
         uint256 principal,
         uint8 tierIndex
@@ -297,10 +245,6 @@ contract LockedPool is
         apyBps = tier.apyBps;
         durationDays = tier.durationDays;
     }
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ADMIN FUNCTIONS //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
     function pause() external {
         require(
@@ -320,4 +264,3 @@ contract LockedPool is
         _unpause();
     }
 }
-

@@ -7,6 +7,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 
 import "../src/Manager.sol";
 import "../src/PoolRegistry.sol";
+import "../src/FeeManager.sol";
 import "../src/factories/PoolFactory.sol";
 import "../src/factories/ManagedPoolFactory.sol";
 import "../src/StableYieldManager.sol";
@@ -15,93 +16,92 @@ import "../src/escrows/StableYieldEscrow.sol";
 import "../src/LockedPoolManager.sol";
 import "../src/managed/LockedPool.sol";
 import "../src/escrows/LockedPoolEscrow.sol";
+import "../src/escrows/YieldReserveEscrow.sol";
 import "../src/AccessManager.sol";
 import "../src/governance/TimelockController.sol" as PironTimelock;
 import "../src/governance/UpgradeGuardian.sol";
 import "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
-/**
- * @title DeployUpgradeable
- * @notice Deployment script for upgradeable Piron Pools contracts
- * @dev Deploys all contracts with proxy pattern and security controls
- */
 contract DeployUpgradeable is Script {
-    
+
     struct DeploymentConfig {
-        address admin;           // Default admin wallet
-        address multisigAdmin;   // Multi-sig admin wallet (must differ from admin)
-        address proposer;        // Multi-sig proposer wallet (4/7)
-        address executor;        // Multi-sig executor wallet (4/7)  
-        address canceller;       // Multi-sig canceller wallet (3/5)
-        address guardian;        // Emergency guardian (3/5)
-        address spv;            // SPV address
-        address operator;       // Operator address
-        address emergency;      // Emergency address (must differ from admin)
-        address treasury;       // Treasury address
-        address baseToken;      // Base token (USDC)
-        bool deployMockToken;   // Whether to deploy mock token
-        uint256 roleDelay;      // Role delay (24 hours)
+        address admin;
+        address multisigAdmin;
+        address proposer;
+        address executor;
+        address canceller;
+        address guardian;
+        address spv;
+        address operator;
+        address emergency;
+        address treasury;
+        address opsWallet;
+        address baseToken;
+        bool deployMockToken;
+        uint256 roleDelay;
+        uint256 defaultFeeBps;
+        uint256 treasuryBps;
+        uint256 minReserveFloor;
     }
-    
+
     struct DeployedContracts {
-        address accessManager;      // Immutable
-        address timelockController; // Immutable
-        address upgradeGuardian;    // Immutable
-        
-        address managerImpl;        // Implementation
-        address managerProxy;       // Proxy
-        
-        address poolRegistryImpl;   // Implementation
-        address poolRegistryProxy;  // Proxy
-        
-        address poolFactoryImpl;    // Implementation
-        address poolFactoryProxy;   // Proxy
-        
-        address liquidityPoolImpl;  // Implementation
-        address poolEscrowImpl;     // Implementation
-        
-        // Stable Yield Components
-        address stableYieldManagerImpl;     // Implementation
-        address stableYieldManagerProxy;    // Proxy
-        address managedPoolFactoryImpl;     // Implementation
-        address managedPoolFactoryProxy;    // Proxy
-        address stableYieldPoolImpl;        // Implementation
-        address stableYieldEscrowImpl;      // Implementation
-        
-        // Locked Pool Components
-        address lockedPoolManagerImpl;      // Implementation
-        address lockedPoolManagerProxy;     // Proxy
-        address lockedPoolImpl;             // Implementation
-        address lockedPoolEscrowImpl;       // Implementation
-        
-        address baseToken;          // Token
+        address accessManager;
+        address timelockController;
+        address upgradeGuardian;
+
+        address managerImpl;
+        address managerProxy;
+
+        address poolRegistryImpl;
+        address poolRegistryProxy;
+
+        address poolFactoryImpl;
+        address poolFactoryProxy;
+
+        address liquidityPoolImpl;
+        address poolEscrowImpl;
+
+        address feeManagerImpl;
+        address feeManagerProxy;
+
+        address yieldReserveImpl;
+        address yieldReserveProxy;
+
+        address stableYieldManagerImpl;
+        address stableYieldManagerProxy;
+        address managedPoolFactoryImpl;
+        address managedPoolFactoryProxy;
+        address stableYieldPoolImpl;
+        address stableYieldEscrowImpl;
+
+        address lockedPoolManagerImpl;
+        address lockedPoolManagerProxy;
+        address lockedPoolImpl;
+        address lockedPoolEscrowImpl;
+
+        address baseToken;
     }
-    
+
     event ContractDeployed(string name, address addr);
     event ProxyDeployed(string name, address proxy, address implementation);
     event DeploymentComplete(DeployedContracts contracts);
-    
+
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
-        
+
         DeploymentConfig memory config = _loadConfig();
-        
         DeployedContracts memory contracts = _deployContracts(config);
-        
-        _configureSystem(contracts);
-        
+        _configureSystem(contracts, config);
         _verifyDeployment(contracts, config);
-        
+
         vm.stopBroadcast();
-        
+
         _logDeploymentResults(contracts, config);
-        
         emit DeploymentComplete(contracts);
     }
-    
+
     function _loadConfig() internal view returns (DeploymentConfig memory config) {
-        // Load from environment variables with defaults
         config.admin = vm.envOr("ADMIN_ADDRESS", msg.sender);
         config.multisigAdmin = vm.envOr("MULTISIG_ADMIN_ADDRESS", address(0));
         config.proposer = vm.envOr("PROPOSER_ADDRESS", msg.sender);
@@ -112,10 +112,14 @@ contract DeployUpgradeable is Script {
         config.operator = vm.envOr("OPERATOR_ADDRESS", msg.sender);
         config.emergency = vm.envOr("EMERGENCY_ADDRESS", address(0));
         config.treasury = vm.envOr("TREASURY_ADDRESS", msg.sender);
+        config.opsWallet = vm.envOr("OPS_WALLET_ADDRESS", msg.sender);
         config.baseToken = vm.envOr("BASE_TOKEN_ADDRESS", address(0));
         config.deployMockToken = vm.envOr("DEPLOY_MOCK_TOKEN", true);
         config.roleDelay = vm.envOr("ROLE_DELAY", uint256(24 hours));
-        
+        config.defaultFeeBps = vm.envOr("DEFAULT_FEE_BPS", uint256(300));
+        config.treasuryBps = vm.envOr("TREASURY_BPS", uint256(5000));
+        config.minReserveFloor = vm.envOr("MIN_RESERVE_FLOOR", uint256(100_000e6));
+
         require(config.admin != address(0), "Invalid admin address");
         require(config.multisigAdmin != address(0), "MULTISIG_ADMIN_ADDRESS env var required");
         require(config.multisigAdmin != config.admin, "Multisig admin must differ from admin");
@@ -128,22 +132,22 @@ contract DeployUpgradeable is Script {
         require(config.emergency != address(0), "EMERGENCY_ADDRESS env var required");
         require(config.emergency != config.admin, "Emergency must differ from admin");
         require(config.treasury != address(0), "Invalid treasury address");
+        require(config.opsWallet != address(0), "Invalid ops wallet address");
     }
-    
+
     function _deployContracts(DeploymentConfig memory config) internal returns (DeployedContracts memory contracts) {
         console.log("=== DEPLOYING UPGRADEABLE CONTRACTS ===");
-        
-        // 1. Deploy base token (if needed)
+
         if (config.deployMockToken) {
             contracts.baseToken = address(new ERC20Mock());
             console.log("MockERC20 deployed at: %s", contracts.baseToken);
             emit ContractDeployed("MockERC20", contracts.baseToken);
         } else {
+            require(config.baseToken != address(0), "BASE_TOKEN_ADDRESS required when not deploying mock");
             contracts.baseToken = config.baseToken;
             console.log("Using existing token at: %s", contracts.baseToken);
         }
-        
-        // 2. Deploy immutable contracts first
+
         contracts.accessManager = address(new AccessManager(
             config.admin,
             config.spv,
@@ -153,18 +157,17 @@ contract DeployUpgradeable is Script {
         ));
         console.log("AccessManager deployed at: %s", contracts.accessManager);
         emit ContractDeployed("AccessManager", contracts.accessManager);
-        
-        // 3. Deploy governance contracts
+
         contracts.timelockController = address(new PironTimelock.PironTimelockController(
             config.admin,
             config.proposer,
             config.executor,
             config.canceller,
-            config.admin  // Temporary guardian, will be updated to UpgradeGuardian
+            config.admin
         ));
         console.log("TimelockController deployed at: %s", contracts.timelockController);
         emit ContractDeployed("TimelockController", contracts.timelockController);
-        
+
         contracts.upgradeGuardian = address(new UpgradeGuardian(
             config.admin,
             config.guardian,
@@ -173,34 +176,56 @@ contract DeployUpgradeable is Script {
         ));
         console.log("UpgradeGuardian deployed at: %s", contracts.upgradeGuardian);
         emit ContractDeployed("UpgradeGuardian", contracts.upgradeGuardian);
-        
-        // Update TimelockController guardian to point to UpgradeGuardian contract
+
         PironTimelock.PironTimelockController(contracts.timelockController).updateGuardian(contracts.upgradeGuardian);
-        console.log("TimelockController guardian updated to UpgradeGuardian contract");
-        
-        // 4. Deploy PoolRegistry implementation and proxy
+        console.log("TimelockController guardian updated to UpgradeGuardian");
+
         contracts.poolRegistryImpl = address(new PoolRegistry());
-        console.log("PoolRegistry implementation deployed at: %s", contracts.poolRegistryImpl);
-        emit ContractDeployed("PoolRegistryImpl", contracts.poolRegistryImpl);
-        
         bytes memory poolRegistryInitData = abi.encodeWithSignature(
             "initialize(address,address)",
             contracts.accessManager,
             contracts.timelockController
         );
-        
         contracts.poolRegistryProxy = address(new ERC1967Proxy(
             contracts.poolRegistryImpl,
             poolRegistryInitData
         ));
         console.log("PoolRegistry proxy deployed at: %s", contracts.poolRegistryProxy);
         emit ProxyDeployed("PoolRegistry", contracts.poolRegistryProxy, contracts.poolRegistryImpl);
-        
-        // 5. Deploy Manager implementation and proxy
+
+        contracts.yieldReserveImpl = address(new YieldReserveEscrow());
+        bytes memory yieldReserveInitData = abi.encodeWithSignature(
+            "initialize(address,address,address,uint256,uint256)",
+            contracts.baseToken,
+            contracts.accessManager,
+            config.treasury,
+            config.treasuryBps,
+            config.minReserveFloor
+        );
+        contracts.yieldReserveProxy = address(new ERC1967Proxy(
+            contracts.yieldReserveImpl,
+            yieldReserveInitData
+        ));
+        console.log("YieldReserveEscrow proxy deployed at: %s", contracts.yieldReserveProxy);
+        emit ProxyDeployed("YieldReserveEscrow", contracts.yieldReserveProxy, contracts.yieldReserveImpl);
+
+        contracts.feeManagerImpl = address(new FeeManager());
+        bytes memory feeManagerInitData = abi.encodeWithSignature(
+            "initialize(address,address,address,address,address)",
+            contracts.accessManager,
+            contracts.poolRegistryProxy,
+            contracts.yieldReserveProxy,
+            config.treasury,
+            config.opsWallet
+        );
+        contracts.feeManagerProxy = address(new ERC1967Proxy(
+            contracts.feeManagerImpl,
+            feeManagerInitData
+        ));
+        console.log("FeeManager proxy deployed at: %s", contracts.feeManagerProxy);
+        emit ProxyDeployed("FeeManager", contracts.feeManagerProxy, contracts.feeManagerImpl);
+
         contracts.managerImpl = address(new Manager());
-        console.log("Manager implementation deployed at: %s", contracts.managerImpl);
-        emit ContractDeployed("ManagerImpl", contracts.managerImpl);
-        
         bytes memory managerInitData = abi.encodeWithSignature(
             "initialize(address,address,address,address)",
             contracts.poolRegistryProxy,
@@ -208,28 +233,20 @@ contract DeployUpgradeable is Script {
             contracts.timelockController,
             config.treasury
         );
-        
         contracts.managerProxy = address(new ERC1967Proxy(
             contracts.managerImpl,
             managerInitData
         ));
         console.log("Manager proxy deployed at: %s", contracts.managerProxy);
         emit ProxyDeployed("Manager", contracts.managerProxy, contracts.managerImpl);
-        
-        // 6. Deploy LiquidityPool and PoolEscrow implementations
+
         contracts.liquidityPoolImpl = address(new LiquidityPool());
-        console.log("LiquidityPool implementation deployed at: %s", contracts.liquidityPoolImpl);
         emit ContractDeployed("LiquidityPoolImpl", contracts.liquidityPoolImpl);
-        
+
         contracts.poolEscrowImpl = address(new PoolEscrow());
-        console.log("PoolEscrow implementation deployed at: %s", contracts.poolEscrowImpl);
         emit ContractDeployed("PoolEscrowImpl", contracts.poolEscrowImpl);
-        
-        // 7. Deploy PoolFactory implementation and proxy
+
         contracts.poolFactoryImpl = address(new PoolFactory());
-        console.log("PoolFactory implementation deployed at: %s", contracts.poolFactoryImpl);
-        emit ContractDeployed("PoolFactoryImpl", contracts.poolFactoryImpl);
-        
         bytes memory poolFactoryInitData = abi.encodeWithSignature(
             "initialize(address,address,address,address,address,address)",
             contracts.poolRegistryProxy,
@@ -239,48 +256,35 @@ contract DeployUpgradeable is Script {
             contracts.liquidityPoolImpl,
             contracts.poolEscrowImpl
         );
-        
         contracts.poolFactoryProxy = address(new ERC1967Proxy(
             contracts.poolFactoryImpl,
             poolFactoryInitData
         ));
         console.log("PoolFactory proxy deployed at: %s", contracts.poolFactoryProxy);
         emit ProxyDeployed("PoolFactory", contracts.poolFactoryProxy, contracts.poolFactoryImpl);
-        
-        // 8. Deploy StableYieldManager implementation and proxy
+
         contracts.stableYieldManagerImpl = address(new StableYieldManager());
-        console.log("StableYieldManager implementation deployed at: %s", contracts.stableYieldManagerImpl);
-        emit ContractDeployed("StableYieldManagerImpl", contracts.stableYieldManagerImpl);
-        
         bytes memory stableYieldManagerInitData = abi.encodeWithSignature(
             "initialize(address,address,address,uint256)",
             contracts.accessManager,
             contracts.poolRegistryProxy,
             contracts.timelockController,
-            uint256(300)  // 3% default fee
+            config.defaultFeeBps
         );
-        
         contracts.stableYieldManagerProxy = address(new ERC1967Proxy(
             contracts.stableYieldManagerImpl,
             stableYieldManagerInitData
         ));
         console.log("StableYieldManager proxy deployed at: %s", contracts.stableYieldManagerProxy);
         emit ProxyDeployed("StableYieldManager", contracts.stableYieldManagerProxy, contracts.stableYieldManagerImpl);
-        
-        // 9. Deploy StableYieldPool and StableYieldEscrow implementations
+
         contracts.stableYieldPoolImpl = address(new StableYieldPool());
-        console.log("StableYieldPool implementation deployed at: %s", contracts.stableYieldPoolImpl);
         emit ContractDeployed("StableYieldPoolImpl", contracts.stableYieldPoolImpl);
-        
+
         contracts.stableYieldEscrowImpl = address(new StableYieldEscrow());
-        console.log("StableYieldEscrow implementation deployed at: %s", contracts.stableYieldEscrowImpl);
         emit ContractDeployed("StableYieldEscrowImpl", contracts.stableYieldEscrowImpl);
-        
-        // 10. Deploy ManagedPoolFactory implementation and proxy
+
         contracts.managedPoolFactoryImpl = address(new ManagedPoolFactory());
-        console.log("ManagedPoolFactory implementation deployed at: %s", contracts.managedPoolFactoryImpl);
-        emit ContractDeployed("ManagedPoolFactoryImpl", contracts.managedPoolFactoryImpl);
-        
         bytes memory managedPoolFactoryInitData = abi.encodeWithSignature(
             "initialize(address,address,address,address,address,address)",
             contracts.poolRegistryProxy,
@@ -290,226 +294,166 @@ contract DeployUpgradeable is Script {
             contracts.stableYieldPoolImpl,
             contracts.stableYieldEscrowImpl
         );
-        
         contracts.managedPoolFactoryProxy = address(new ERC1967Proxy(
             contracts.managedPoolFactoryImpl,
             managedPoolFactoryInitData
         ));
         console.log("ManagedPoolFactory proxy deployed at: %s", contracts.managedPoolFactoryProxy);
         emit ProxyDeployed("ManagedPoolFactory", contracts.managedPoolFactoryProxy, contracts.managedPoolFactoryImpl);
-        
-        // 11. Deploy LockedPoolManager implementation and proxy
+
         contracts.lockedPoolManagerImpl = address(new LockedPoolManager());
-        console.log("LockedPoolManager implementation deployed at: %s", contracts.lockedPoolManagerImpl);
-        emit ContractDeployed("LockedPoolManagerImpl", contracts.lockedPoolManagerImpl);
-        
         bytes memory lockedPoolManagerInitData = abi.encodeWithSignature(
             "initialize(address,address,address)",
             contracts.accessManager,
             contracts.poolRegistryProxy,
             contracts.timelockController
         );
-        
         contracts.lockedPoolManagerProxy = address(new ERC1967Proxy(
             contracts.lockedPoolManagerImpl,
             lockedPoolManagerInitData
         ));
         console.log("LockedPoolManager proxy deployed at: %s", contracts.lockedPoolManagerProxy);
         emit ProxyDeployed("LockedPoolManager", contracts.lockedPoolManagerProxy, contracts.lockedPoolManagerImpl);
-        
-        // 12. Deploy LockedPool and LockedPoolEscrow implementations
+
         contracts.lockedPoolImpl = address(new LockedPool());
-        console.log("LockedPool implementation deployed at: %s", contracts.lockedPoolImpl);
         emit ContractDeployed("LockedPoolImpl", contracts.lockedPoolImpl);
-        
+
         contracts.lockedPoolEscrowImpl = address(new LockedPoolEscrow());
-        console.log("LockedPoolEscrow implementation deployed at: %s", contracts.lockedPoolEscrowImpl);
         emit ContractDeployed("LockedPoolEscrowImpl", contracts.lockedPoolEscrowImpl);
     }
-    
-    function _configureSystem(DeployedContracts memory contracts) internal {
-        console.log("=== CONFIGURING UPGRADEABLE SYSTEM ===");
-        
-        PoolRegistry registry = PoolRegistry(contracts.poolRegistryProxy);
-        
+
+    function _configureSystem(DeployedContracts memory contracts, DeploymentConfig memory config) internal {
+        console.log("=== CONFIGURING SYSTEM ===");
+
         AccessManager accessMgr = AccessManager(contracts.accessManager);
-        
-        // Grant FACTORY_ROLE to ManagedPoolFactory so it can call setStableYieldPool on escrows
+
         accessMgr.grantFactoryRoleDuringDeployment(contracts.managedPoolFactoryProxy);
-        console.log("FACTORY_ROLE granted to ManagedPoolFactory");
-        
-        // Grant POOL_CREATOR_ROLE to ManagedPoolFactory so it can register pools in PoolRegistry
         accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.managedPoolFactoryProxy);
-        console.log("POOL_CREATOR_ROLE granted to ManagedPoolFactory");
-        
-        // Grant POOL_CREATOR_ROLE to StableYieldManager so it can register pools in PoolRegistry
         accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy);
-        console.log("POOL_CREATOR_ROLE granted to StableYieldManager");
-        
-        // Grant OPERATOR_ROLE to StableYieldManager for escrow operations (allocateToSPV, receiveSPVLiquidity, collectMonthlyFees)
         accessMgr.grantRoleDuringDeployment(accessMgr.OPERATOR_ROLE(), contracts.stableYieldManagerProxy);
-        console.log("OPERATOR_ROLE granted to StableYieldManager");
-        
-        // Grant POOL_CREATOR_ROLE to LockedPoolManager for pool registration
         accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.lockedPoolManagerProxy);
-        console.log("POOL_CREATOR_ROLE granted to LockedPoolManager");
-        
-        // Grant OPERATOR_ROLE to LockedPoolManager for escrow operations
         accessMgr.grantRoleDuringDeployment(accessMgr.OPERATOR_ROLE(), contracts.lockedPoolManagerProxy);
-        console.log("OPERATOR_ROLE granted to LockedPoolManager");
-        
-        // Finalize deployment to prevent further immediate role grants
         accessMgr.finalizeDeployment();
-        console.log("Deployment finalized - future role grants require 24h timelock");
-        
-        // Set factories in registry
+        console.log("Roles granted and deployment finalized");
+
+        PoolRegistry registry = PoolRegistry(contracts.poolRegistryProxy);
         registry.setFactory(contracts.poolFactoryProxy);
-        console.log("PoolFactory registered in PoolRegistry");
-        
-        
-        // Set ManagedPoolFactory in StableYieldManager
+
+        string memory tokenName = vm.envOr("BASE_TOKEN_NAME", string("USD Coin"));
+        string memory tokenSymbol = vm.envOr("BASE_TOKEN_SYMBOL", string("USDC"));
+        registry.approveAsset(contracts.baseToken, tokenName, tokenSymbol, true);
+        console.log("Base token approved in registry");
+
         StableYieldManager(contracts.stableYieldManagerProxy).setManagedPoolFactory(contracts.managedPoolFactoryProxy);
-        console.log("ManagedPoolFactory registered in StableYieldManager");
-        
-        // Configure LockedPoolManager with ManagedPoolFactory (for tier configuration)
         LockedPoolManager(contracts.lockedPoolManagerProxy).setManagedPoolFactory(contracts.managedPoolFactoryProxy);
-        console.log("ManagedPoolFactory registered in LockedPoolManager");
-        
-        // Configure ManagedPoolFactory with LockedPool components
+
         ManagedPoolFactory managedFactory = ManagedPoolFactory(contracts.managedPoolFactoryProxy);
         managedFactory.setLockedPoolManager(contracts.lockedPoolManagerProxy);
-        console.log("LockedPoolManager registered in ManagedPoolFactory");
-        
         managedFactory.updateLockedPoolImplementation(contracts.lockedPoolImpl);
-        console.log("LockedPool implementation set in ManagedPoolFactory");
-        
         managedFactory.updateLockedPoolEscrowImplementation(contracts.lockedPoolEscrowImpl);
-        console.log("LockedPoolEscrow implementation set in ManagedPoolFactory");
-        
-        // Note: SPV_ROLE and OPERATOR_ROLE for manager operations are granted 
-        // via the shared AccessManager, not on individual managers
-        // These roles were already granted to admin during AccessManager setup
-        console.log("SPV and OPERATOR roles available via AccessManager");
-        
-        // Note: All critical roles (SPV, OPERATOR, EMERGENCY, POOL_CREATOR, ASSET_MANAGER) 
-        // are granted to admin in AccessManager constructor with no delay
-        console.log("Admin roles (POOL_CREATOR, ASSET_MANAGER) granted at deployment");
-        
-        // Approve stablecoin assets
-        registry.approveAsset(
-            contracts.baseToken,
-            "Mock USDC",
-            "USDC",
-            true
-        );
-        console.log("USDC approved as valid asset");
-        
-        // Approve cNGN (Nigerian Naira stablecoin) - Base testnet address
-        registry.approveAsset(
-            0x929A08903C22440182646Bb450a67178Be402f7f,
-            "Canza Nigerian Naira",
-            "cNGN",
-            true
-        );
-        console.log("cNGN approved as valid asset");
-        
-        // TODO: Add USDT address when available for this network
-        console.log("NOTE: Add USDT approval before mainnet deployment");
-        
-        // Note: Fees are now handled per-pool via withdrawalFeeBps in PoolConfig
-        // or via defaultTransactionFeeBps in StableYieldManager
-        console.log("Fee configuration: withdrawal fees set per-pool");
-        
-        console.log("Upgradeable system configuration complete!");
+        managedFactory.setFeeManager(contracts.feeManagerProxy);
+        managedFactory.setYieldReserve(contracts.yieldReserveProxy);
+        console.log("ManagedPoolFactory configured with FeeManager and YieldReserve");
+
+        Manager(contracts.managerProxy).setFeeManager(contracts.feeManagerProxy);
+        console.log("Manager configured with FeeManager");
+
+        YieldReserveEscrow yieldReserve = YieldReserveEscrow(contracts.yieldReserveProxy);
+        yieldReserve.setLockedPoolManager(contracts.lockedPoolManagerProxy);
+        yieldReserve.setStableYieldManager(contracts.stableYieldManagerProxy);
+        console.log("YieldReserveEscrow configured with managers");
+
+        StableYieldManager(contracts.stableYieldManagerProxy).setYieldReserve(contracts.yieldReserveProxy);
+        LockedPoolManager(contracts.lockedPoolManagerProxy).setYieldReserve(contracts.yieldReserveProxy);
+        console.log("Managers configured with YieldReserve");
+
+        console.log("System configuration complete");
     }
-    
+
     function _verifyDeployment(DeployedContracts memory contracts, DeploymentConfig memory config) internal view {
-        console.log("=== VERIFYING UPGRADEABLE DEPLOYMENT ===");
-        
-        // Verify proxy implementations
+        console.log("=== VERIFYING DEPLOYMENT ===");
+
         require(Manager(contracts.managerProxy).version() == 1, "Manager version mismatch");
         require(PoolRegistry(contracts.poolRegistryProxy).version() == 1, "PoolRegistry version mismatch");
         require(PoolFactory(contracts.poolFactoryProxy).version() == 1, "PoolFactory version mismatch");
         require(StableYieldManager(contracts.stableYieldManagerProxy).version() == 1, "StableYieldManager version mismatch");
         require(ManagedPoolFactory(contracts.managedPoolFactoryProxy).version() == 1, "ManagedPoolFactory version mismatch");
         require(LockedPoolManager(contracts.lockedPoolManagerProxy).version() == 1, "LockedPoolManager version mismatch");
-        
-        // Verify manager proxies
+        require(FeeManager(contracts.feeManagerProxy).version() == 1, "FeeManager version mismatch");
+        require(YieldReserveEscrow(contracts.yieldReserveProxy).version() == 1, "YieldReserveEscrow version mismatch");
+
         require(Manager(contracts.managerProxy).timelockController() == contracts.timelockController, "Manager timelock mismatch");
         require(StableYieldManager(contracts.stableYieldManagerProxy).timelockController() == contracts.timelockController, "StableYieldManager timelock mismatch");
         require(LockedPoolManager(contracts.lockedPoolManagerProxy).timelockController() == contracts.timelockController, "LockedPoolManager timelock mismatch");
-        
-        // Verify access control (roles granted in AccessManager constructor)
+
         AccessManager accessManager = AccessManager(contracts.accessManager);
         require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), config.admin), "Admin role not granted");
         require(accessManager.hasRole(accessManager.SPV_ROLE(), config.spv), "SPV role not granted");
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), config.operator), "Operator role not granted");
         require(accessManager.hasRole(accessManager.EMERGENCY_ROLE(), config.emergency), "Emergency role not granted");
         require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), config.admin), "Pool creator role not granted to admin");
-        require(accessManager.hasRole(accessManager.FACTORY_ROLE(), contracts.managedPoolFactoryProxy), "Factory role not granted to ManagedPoolFactory");
-        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.managedPoolFactoryProxy), "Pool creator role not granted to ManagedPoolFactory");
-        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy), "Pool creator role not granted to StableYieldManager");
-        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.lockedPoolManagerProxy), "Pool creator role not granted to LockedPoolManager");
-        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), contracts.lockedPoolManagerProxy), "Operator role not granted to LockedPoolManager");
+        require(accessManager.hasRole(accessManager.FACTORY_ROLE(), contracts.managedPoolFactoryProxy), "Factory role not granted");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.managedPoolFactoryProxy), "Pool creator not granted to factory");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.stableYieldManagerProxy), "Pool creator not granted to SYM");
+        require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.lockedPoolManagerProxy), "Pool creator not granted to LPM");
+        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), contracts.lockedPoolManagerProxy), "Operator not granted to LPM");
         require(accessManager.deploymentComplete(), "Deployment not finalized");
-        console.log("AccessManager roles verified (admin, factories, and managers)");
-        
-        // Verify timelock configuration
+
+        require(FeeManager(contracts.feeManagerProxy).treasury() == config.treasury, "FeeManager treasury mismatch");
+        require(FeeManager(contracts.feeManagerProxy).yieldReserve() == contracts.yieldReserveProxy, "FeeManager yieldReserve mismatch");
+        require(address(FeeManager(contracts.feeManagerProxy).poolRegistry()) == contracts.poolRegistryProxy, "FeeManager registry mismatch");
+
+        require(YieldReserveEscrow(contracts.yieldReserveProxy).lockedPoolManager() == contracts.lockedPoolManagerProxy, "YieldReserve LPM mismatch");
+        require(YieldReserveEscrow(contracts.yieldReserveProxy).stableYieldManager() == contracts.stableYieldManagerProxy, "YieldReserve SYM mismatch");
+
+        require(StableYieldManager(contracts.stableYieldManagerProxy).yieldReserve() == contracts.yieldReserveProxy, "SYM yieldReserve not set");
+        require(LockedPoolManager(contracts.lockedPoolManagerProxy).yieldReserve() == contracts.yieldReserveProxy, "LPM yieldReserve not set");
+
         PironTimelock.PironTimelockController timelock = PironTimelock.PironTimelockController(contracts.timelockController);
         require(timelock.hasRole(timelock.PROPOSER_ROLE(), config.proposer), "Proposer role not granted");
         require(timelock.hasRole(timelock.EXECUTOR_ROLE(), config.executor), "Executor role not granted");
-        
-        console.log("All upgradeable contracts verified successfully!");
+
+        console.log("All contracts verified successfully");
     }
-    
+
     function _logDeploymentResults(DeployedContracts memory contracts, DeploymentConfig memory config) internal pure {
-        console.log("=== UPGRADEABLE DEPLOYMENT SUMMARY ===");
-        console.log("Admin Address: %s", config.admin);
-        console.log("Proposer Address: %s", config.proposer);
-        console.log("Executor Address: %s", config.executor);
-        console.log("Guardian Address: %s", config.guardian);
-        console.log("SPV Address: %s", config.spv);
+        console.log("=== DEPLOYMENT SUMMARY ===");
+        console.log("Admin: %s", config.admin);
+        console.log("Multisig Admin: %s", config.multisigAdmin);
+        console.log("SPV: %s", config.spv);
+        console.log("Operator: %s", config.operator);
+        console.log("Treasury: %s", config.treasury);
         console.log("");
-        console.log("=== GOVERNANCE CONTRACTS ===");
+        console.log("=== GOVERNANCE ===");
         console.log("AccessManager: %s", contracts.accessManager);
         console.log("TimelockController: %s", contracts.timelockController);
         console.log("UpgradeGuardian: %s", contracts.upgradeGuardian);
         console.log("");
-        console.log("=== CORE CONTRACTS (UPGRADEABLE) ===");
+        console.log("=== CORE (UPGRADEABLE) ===");
         console.log("Manager Proxy: %s", contracts.managerProxy);
-        console.log("Manager Implementation: %s", contracts.managerImpl);
         console.log("PoolRegistry Proxy: %s", contracts.poolRegistryProxy);
-        console.log("PoolRegistry Implementation: %s", contracts.poolRegistryImpl);
         console.log("PoolFactory Proxy: %s", contracts.poolFactoryProxy);
-        console.log("PoolFactory Implementation: %s", contracts.poolFactoryImpl);
+        console.log("FeeManager Proxy: %s", contracts.feeManagerProxy);
+        console.log("YieldReserveEscrow Proxy: %s", contracts.yieldReserveProxy);
         console.log("");
-        console.log("=== STABLE YIELD CONTRACTS (UPGRADEABLE) ===");
+        console.log("=== STABLE YIELD (UPGRADEABLE) ===");
         console.log("StableYieldManager Proxy: %s", contracts.stableYieldManagerProxy);
-        console.log("StableYieldManager Implementation: %s", contracts.stableYieldManagerImpl);
         console.log("ManagedPoolFactory Proxy: %s", contracts.managedPoolFactoryProxy);
-        console.log("ManagedPoolFactory Implementation: %s", contracts.managedPoolFactoryImpl);
         console.log("");
-        console.log("=== LOCKED POOL CONTRACTS (UPGRADEABLE) ===");
+        console.log("=== LOCKED POOL (UPGRADEABLE) ===");
         console.log("LockedPoolManager Proxy: %s", contracts.lockedPoolManagerProxy);
-        console.log("LockedPoolManager Implementation: %s", contracts.lockedPoolManagerImpl);
         console.log("");
-        console.log("=== POOL IMPLEMENTATIONS ===");
-        console.log("LiquidityPool Implementation: %s", contracts.liquidityPoolImpl);
-        console.log("PoolEscrow Implementation: %s", contracts.poolEscrowImpl);
-        console.log("StableYieldPool Implementation: %s", contracts.stableYieldPoolImpl);
-        console.log("StableYieldEscrow Implementation: %s", contracts.stableYieldEscrowImpl);
-        console.log("LockedPool Implementation: %s", contracts.lockedPoolImpl);
-        console.log("LockedPoolEscrow Implementation: %s", contracts.lockedPoolEscrowImpl);
+        console.log("=== IMPLEMENTATIONS ===");
+        console.log("LiquidityPool: %s", contracts.liquidityPoolImpl);
+        console.log("PoolEscrow: %s", contracts.poolEscrowImpl);
+        console.log("StableYieldPool: %s", contracts.stableYieldPoolImpl);
+        console.log("StableYieldEscrow: %s", contracts.stableYieldEscrowImpl);
+        console.log("LockedPool: %s", contracts.lockedPoolImpl);
+        console.log("LockedPoolEscrow: %s", contracts.lockedPoolEscrowImpl);
         console.log("");
-        console.log("=== SUPPORTING CONTRACTS ===");
+        console.log("=== TOKEN ===");
         console.log("Base Token: %s", contracts.baseToken);
         console.log("");
         console.log("=== DEPLOYMENT COMPLETE ===");
-        console.log("System is ready for immediate use!");
-        console.log("Admin has all necessary roles to create pools.");
-        console.log("");
-        console.log("Upgrade Delay: 72 hours");
-        console.log("Multi-sig Security: Active");
-        console.log("Emergency Guardian: Active");
     }
 }

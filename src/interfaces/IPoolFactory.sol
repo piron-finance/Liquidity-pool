@@ -4,7 +4,12 @@ pragma solidity ^0.8.22;
 import "./IManager.sol"; 
 import "../types/IPoolTypes.sol";
 
+/// @title IPoolFactory
+/// @dev Interface for the deal-pool factory: creates LiquidityPool + PoolEscrow pairs.
 interface IPoolFactory {
+
+    // ==================== EVENTS ====================
+
     event PoolCreated(
         address indexed pool,
         address indexed manager, 
@@ -17,6 +22,8 @@ interface IPoolFactory {
     event PoolImplementationUpdated(address indexed oldImplementation, address indexed newImplementation);
     event EscrowImplementationUpdated(address indexed oldImplementation, address indexed newImplementation);
     
+    // ==================== STRUCTS ====================
+
     struct PoolConfig {
         address asset;
         IPoolTypes.InstrumentType instrumentType;

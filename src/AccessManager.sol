@@ -4,7 +4,15 @@ pragma solidity ^0.8.22;
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 
+/**
+ * @title AccessManager
+ * @dev Role-based access control with timelocked role grants and emergency pause.
+ *      After deployment is finalized, all new role grants require a 24h proposal
+ *      period followed by multisig execution. renounceRole is permanently disabled.
+ */
 contract AccessManager is AccessControl, Pausable {
+
+    // ==================== STATE ====================
 
     bytes32 public constant SPV_ROLE = keccak256("SPV_ROLE");
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
@@ -16,10 +24,6 @@ contract AccessManager is AccessControl, Pausable {
     uint256 public constant ROLE_DELAY = 24 hours;
     bool public deploymentComplete;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STRUCT & MAPPING ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
     struct RoleProposal {
         bytes32 role;
         address account;
@@ -28,26 +32,28 @@ contract AccessManager is AccessControl, Pausable {
         bool cancelled;
     }
     
-    /// @notice This mapping is not used for validation or access control. 
     mapping(address => bool) public emergencyPausers; 
-    /// @notice non admin addresses should only have single roles
-    /// (hence we are checking by address not roles)
     mapping(address => uint256) public roleGrantTime;
     mapping(bytes32 => RoleProposal) public roleProposals;
-    
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== EVENTS ====================
 
     event EmergencyPause(address indexed pauser, uint256 timestamp);
     event EmergencyUnpause(address indexed unpauser, uint256 timestamp);
     event RoleProposed(bytes32 indexed proposalId, bytes32 indexed role, address indexed account, uint256 timestamp);
     event RoleProposalExecuted(bytes32 indexed proposalId, bytes32 indexed role, address indexed account);
     event RoleProposalCancelled(bytes32 indexed proposalId);
-    
 
-    
+    // ==================== CONSTRUCTOR ====================
+
+    /**
+     * @dev Bootstraps roles for admin, spv, operator, emergency, and multisig.
+     * @param admin Default admin address (receives DEFAULT_ADMIN_ROLE, OPERATOR_ROLE, POOL_CREATOR_ROLE)
+     * @param spv SPV wallet (receives SPV_ROLE)
+     * @param operator Operator wallet (receives OPERATOR_ROLE)
+     * @param emergency Emergency wallet (receives EMERGENCY_ROLE, must differ from admin)
+     * @param multisigAdmin Multisig wallet (receives MULTISIG_ADMIN_ROLE, must differ from admin)
+     */
     constructor(
         address admin,
         address spv,
@@ -83,15 +89,11 @@ contract AccessManager is AccessControl, Pausable {
         
         deploymentComplete = false;
     }
-    
 
-    
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// DEPLOYMENT HELPER FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== DEPLOYMENT SETUP ====================
+
     /**
-     * @notice Grant FACTORY_ROLE to factory contracts during initial deployment
-     * @dev Can only be called once by admin, immediately after deployment
+     * @dev Grant FACTORY_ROLE to a factory contract before deployment is finalized.
      * @param factory Address of the factory contract
      */
     function grantFactoryRoleDuringDeployment(address factory) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -102,10 +104,9 @@ contract AccessManager is AccessControl, Pausable {
     }
     
     /**
-     * @notice Grant any role during initial deployment (bypass timelock)
-     * @dev Can only be called by admin before deployment is finalized
-     * @param role Role to grant
-     * @param account Address to receive the role
+     * @dev Grant any role before deployment is finalized (bypasses timelock).
+     * @param role Role identifier to grant
+     * @param account Recipient address
      */
     function grantRoleDuringDeployment(bytes32 role, address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(!deploymentComplete, "AccessManager: deployment already complete");
@@ -115,24 +116,28 @@ contract AccessManager is AccessControl, Pausable {
     }
     
     /**
-     * @notice Mark deployment as complete, preventing further immediate role grants
-     * @dev Can only be called once by admin
+     * @dev Permanently locks immediate role grants. All future grants go through proposeRoleGrant.
      */
     function finalizeDeployment() external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(!deploymentComplete, "AccessManager: already finalized");
         deploymentComplete = true;
     }
 
+    // ==================== ROLE MANAGEMENT ====================
 
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ROLE MGMT FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
+    /**
+     * @dev Overridden to block direct grantRole calls. Use proposeRoleGrant instead.
+     */
     function grantRole(bytes32, address) public virtual override {
         revert("AccessManager: use proposeRoleGrant for all role grants");
     }
     
+    /**
+     * @dev Propose a new role grant. Must wait ROLE_DELAY before execution by multisig.
+     * @param role Role to grant
+     * @param account Recipient address
+     * @return proposalId Unique identifier for the proposal
+     */
     function proposeRoleGrant(bytes32 role, address account) external onlyRole(DEFAULT_ADMIN_ROLE) returns (bytes32 proposalId) {
         require(account != address(0), "AccessManager: invalid account");
         require(!hasRole(role, account), "AccessManager: account already has role");
@@ -152,6 +157,10 @@ contract AccessManager is AccessControl, Pausable {
         return proposalId;
     }
     
+    /**
+     * @dev Execute a pending role proposal after the delay period. Requires MULTISIG_ADMIN_ROLE.
+     * @param proposalId The proposal to execute
+     */
     function executeRoleGrant(bytes32 proposalId) external onlyRole(MULTISIG_ADMIN_ROLE) {
         RoleProposal storage proposal = roleProposals[proposalId];
         
@@ -167,6 +176,10 @@ contract AccessManager is AccessControl, Pausable {
         emit RoleProposalExecuted(proposalId, proposal.role, proposal.account);
     }
     
+    /**
+     * @dev Cancel a pending role proposal.
+     * @param proposalId The proposal to cancel
+     */
     function cancelRoleProposal(bytes32 proposalId) external onlyRole(DEFAULT_ADMIN_ROLE) {
         RoleProposal storage proposal = roleProposals[proposalId];
         
@@ -178,6 +191,11 @@ contract AccessManager is AccessControl, Pausable {
         emit RoleProposalCancelled(proposalId);
     }
     
+    /**
+     * @dev Revoke a role. Only callable by MULTISIG_ADMIN_ROLE.
+     * @param role Role to revoke
+     * @param account Address to revoke from
+     */
     function revokeRole(bytes32 role, address account) public virtual onlyRole(MULTISIG_ADMIN_ROLE) override {
         super.revokeRole(role, account);
         delete roleGrantTime[account];
@@ -188,34 +206,35 @@ contract AccessManager is AccessControl, Pausable {
 
     }
     
-    function renounceRole() public virtual {
-        revert("Access Manager: renouncing roles is disabld");
+    /**
+     * @dev Permanently disabled to prevent accidental role loss.
+     */
+    function renounceRole(bytes32, address) public virtual override {
+        revert("AccessManager: renouncing roles is disabled");
     }
 
+    // ==================== EMERGENCY ====================
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EMERGENCY FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    
+    /**
+     * @dev Pause the protocol. Callable by admin or emergency role.
+     */
     function emergencyPause() external { 
         require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender) || hasRole(EMERGENCY_ROLE, msg.sender), "AccessManager: not authorized");
         _pause();
         emit EmergencyPause(msg.sender, block.timestamp);
     }
     
+    /**
+     * @dev Unpause the protocol. Only callable by admin (not emergency).
+     */
     function emergencyUnpause() external {
-        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender) || hasRole(EMERGENCY_ROLE, msg.sender), "AccessManager: not authorized");
+        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "AccessManager: only admin can unpause");
         _unpause();
         emit EmergencyUnpause(msg.sender, block.timestamp);
     }
-    
-    
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
+    // ==================== VIEW ====================
+
     function isAdmin(address account) external view returns (bool) {
         return hasRole(DEFAULT_ADMIN_ROLE, account);
     }
@@ -228,12 +247,14 @@ contract AccessManager is AccessControl, Pausable {
         return hasRole(OPERATOR_ROLE, account);
     }
     
-    
     function isPoolCreator(address account) external view returns (bool) {
         return hasRole(POOL_CREATOR_ROLE, account);
     }
     
-    
+    /**
+     * @dev Returns full proposal details including whether it can be executed now.
+     * @param proposalId The proposal to query
+     */
     function getProposal(bytes32 proposalId) external view returns (
         bytes32 role,
         address account,

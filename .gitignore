@@ -15,24 +15,15 @@ docs/
 .cursor/rules
 .cursor/
 
-# All txt and md files (development/docs)
+# Dev notes and scratch files
 *.txt
+!remappings.txt
 
-como.txt
-como1.txt
-como2.txt
+# Markdown files (keep only README)
+*.md
+!README.md
 
 # Frontend ABIs and deployment info
 frontend-abis/
 deployed-addresses.txt
 changed-abis/
-
-# Except essential project files
-!README.md
-!CHANGELOG.md
-!DEPLOYMENT_GUIDE.md
-
-
-
-FUTURE_FIXES.md
-STABLE_YIELD_POOL_LIFECYCLE.md

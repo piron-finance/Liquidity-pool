@@ -13,17 +13,22 @@ import "../escrows/PoolEscrow.sol";
 import "../LiquidityPool.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
+/**
+ * @title PoolFactory
+ * @dev Deploys Single-Asset (deal) LiquidityPool + PoolEscrow pairs using ERC1967 proxies.
+ *      Registers the created pool with the PoolRegistry and Manager contracts.
+ */
 contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, ReentrancyGuardUpgradeable {
+
+    // ==================== STATE ====================
     
     bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
     
     address public registry;
     address public manager; 
     uint256 public totalPoolsCreated;
-    
     address public liquidityPoolImplementation;
     address public poolEscrowImplementation;
-    
     AccessManager public accessManager;
     address public timelockController;
     uint256 public version;
@@ -31,6 +36,8 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
     mapping(address => address[]) public poolsByAsset;
     mapping(address => address[]) public poolsByCreator;
     mapping(address => bool) public validPools;
+
+    // ==================== MODIFIERS ====================
     
     modifier onlyRole(bytes32 role) {
         require(accessManager.hasRole(role, msg.sender), "PoolFactory/access-denied");
@@ -45,21 +52,15 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         );
         _;
     }
+
+    // ==================== INITIALIZER ====================
     
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
     
-    /**
-     * @notice Initialize the PoolFactory contract
-     * @param _registry PoolRegistry contract address
-     * @param _manager Manager contract address
-     * @param _accessManager AccessManager contract address
-     * @param _timelockController TimelockController contract address
-     * @param _liquidityPoolImpl LiquidityPool implementation address
-     * @param _poolEscrowImpl PoolEscrow implementation address
-     */
+    /// @dev Sets registry, manager, access manager, timelock, and implementations.
     function initialize(
         address _registry,
         address _manager,
@@ -85,16 +86,17 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         version = 1;
     }
     
-    /**
-     * @notice Authorize contract upgrades
-     * @param newImplementation New implementation contract address
-     */
+    // ==================== UPGRADE ====================
+
     function _authorizeUpgrade(address newImplementation) internal override {
         require(msg.sender == timelockController, "Only timelock can upgrade");
         require(newImplementation != address(0), "Invalid implementation");
         version += 1;
     }
+
+    // ==================== POOL CREATION ====================
     
+    /// @dev Deploys a LiquidityPool + PoolEscrow via ERC1967 proxies and registers them.
     function createPool(
         PoolConfig memory config
     ) external override onlyPoolCreator nonReentrant returns (address pool, address escrow) {
@@ -108,7 +110,6 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         );
         require(config.maturityDate > block.timestamp + config.epochDuration, "Invalid maturity");
         
-        // Deploy PoolEscrow proxy
         bytes memory escrowInitData = abi.encodeWithSignature(
             "initialize(address,address,address)",
             config.asset,
@@ -121,7 +122,6 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
             escrowInitData
         ));
         
-        // Deploy LiquidityPool proxy
         bytes memory poolInitData = abi.encodeWithSignature(
             "initialize(address,string,string,address,address)",
             config.asset,
@@ -174,6 +174,8 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         return (pool, escrow);
     }
     
+    // ==================== VIEW FUNCTIONS ====================
+    
     function getPoolsByAsset(address asset) external view override returns (address[] memory) {
         return poolsByAsset[asset];
     }
@@ -186,6 +188,8 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         return validPools[pool];
     }
     
+    // ==================== ADMIN CONFIGURATION ====================
+    
     function setRegistry(address newRegistry) external override onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
         require(newRegistry != address(0), "Invalid registry");
         registry = newRegistry;
@@ -196,11 +200,9 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         manager = newManager;
     }
 
-    /**
-     * @notice Update pool implementation for new pools
-     * @param newPoolImpl New LiquidityPool implementation address
-     * @dev Only affects NEW pools created after this update
-     */
+    // ==================== IMPLEMENTATION UPGRADES ====================
+
+    /// @dev Updates pool implementation; requires multisig admin and approved implementation.
     function updatePoolImplementation(address newPoolImpl) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
         require(newPoolImpl != address(0), "Invalid implementation");
         require(IPoolRegistry(registry).isApprovedImplementation(newPoolImpl), "Implementation not approved");
@@ -211,11 +213,6 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         emit PoolImplementationUpdated(oldImpl, newPoolImpl);
     }
 
-    /**
-     * @notice Update escrow implementation for new pools  
-     * @param newEscrowImpl New PoolEscrow implementation address
-     * @dev Only affects NEW pools created after this update
-     */
     function updateEscrowImplementation(address newEscrowImpl) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
         require(newEscrowImpl != address(0), "Invalid implementation");
         require(IPoolRegistry(registry).isApprovedImplementation(newEscrowImpl), "Implementation not approved");
@@ -225,6 +222,8 @@ contract PoolFactory is Initializable, UUPSUpgradeable, IPoolFactory, Reentrancy
         
         emit EscrowImplementationUpdated(oldImpl, newEscrowImpl);
     }
+
+    // ==================== INTERNAL HELPERS ====================
 
     function _isContract(address account) internal view returns (bool) {
         return account.code.length > 0;

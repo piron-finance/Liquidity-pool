@@ -2,6 +2,7 @@
 pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../types/IPoolTypes.sol";
 import "../interfaces/IPoolRegistry.sol";
 import "../interfaces/IPoolEscrow.sol";
@@ -10,10 +11,14 @@ import "./ValidationLibrary.sol";
 
 /**
  * @title PoolLifecycleLibrary
- * @dev Library for managing pool lifecycle state transitions and investment processing
- * @notice Handles epoch closing, investment processing, and pool maturity
+ * @dev State machine for Single-Asset (deal) pools: FUNDING → FILLED → PENDING_INVESTMENT →
+ *      INVESTED → MATURED → WITHDRAWN (or EMERGENCY at any point).
+ *      Handles epoch closing, SPV fund transfers, investment confirmation, and maturity processing.
  */
 library PoolLifecycleLibrary {
+    using SafeERC20 for IERC20;
+
+    // ==================== EVENTS ====================
     
     event PoolFilled(address indexed pool, uint256 totalRaised, uint256 timestamp);
     event InvestmentConfirmed(uint256 actualAmount, string proofHash);
@@ -22,17 +27,12 @@ library PoolLifecycleLibrary {
     event SPVFundsReturned(address indexed pool, uint256 amount);
     event PoolFullyWithdrawn(address indexed pool, uint256 timestamp);
     event EmergencyStateChanged(address indexed poolAddress, string trigger, uint256 totalAmount, uint256 totalShares, uint256 timestamp);
-    
-    // Soft validation events for audit trail
     event MaturityShortfall(address indexed pool, uint256 expected, uint256 actual, uint256 shortfall);
     event MaturityOverage(address indexed pool, uint256 expected, uint256 actual);
+
+    // ==================== POOL FILLED ====================
     
-    /**
-     * @notice Handle when pool reaches target raise amount
-     * @param pools Storage mapping of pool data
-     * @param registry Pool registry contract
-     * @param liquidityPool Pool address
-     */
+    /// @dev Transitions pool from FUNDING to FILLED when target raise is met.
     function handlePoolFilled(
         mapping(address => IPoolTypes.PoolData) storage pools,
         IPoolRegistry registry,
@@ -48,13 +48,9 @@ library PoolLifecycleLibrary {
         emit PoolFilled(liquidityPool, poolData.totalRaised, block.timestamp);
     }
     
-    /**
-     * @notice Close epoch and transition to investment phase
-     * @param pools Storage mapping of pool data
-     * @param registry Pool registry contract
-     * @param liquidityPool Pool address
-     * @return newStatus New pool status after closing
-     */
+    // ==================== EPOCH CLOSE ====================
+
+    /// @dev Closes the epoch: transitions to PENDING_INVESTMENT if funded, EMERGENCY otherwise.
     function closeEpoch(
         mapping(address => IPoolTypes.PoolData) storage pools,
         IPoolRegistry registry,
@@ -98,13 +94,7 @@ library PoolLifecycleLibrary {
         }
     }
     
-    /**
-     * @notice Force close epoch (emergency)
-     * @param pools Storage mapping of pool data
-     * @param registry Pool registry contract
-     * @param liquidityPool Pool address
-     * @return newStatus New pool status after force closing
-     */
+    /// @dev Admin force-close: same logic as closeEpoch but skips the epochEndTime check.
     function forceCloseEpoch(
         mapping(address => IPoolTypes.PoolData) storage pools,
         IPoolRegistry registry,
@@ -132,14 +122,9 @@ library PoolLifecycleLibrary {
         }
     }
     
-    /**
-     * @notice SPV withdraws funds from escrow for investment
-     * @param pools Storage mapping of pool data
-     * @param registry Pool registry contract
-     * @param liquidityPool Pool address
-     * @param amount Amount to withdraw
-     * @return transferId Unique transfer identifier
-     */
+    // ==================== SPV FUND TRANSFER ====================
+
+    /// @dev Withdraws funds from escrow for the SPV to invest in the underlying instrument.
     function withdrawFundsForInvestment(
         mapping(address => IPoolTypes.PoolData) storage pools,
         IPoolRegistry registry,
@@ -162,14 +147,9 @@ library PoolLifecycleLibrary {
         return transferId;
     }
     
-    /**
-     * @notice Process SPV investment confirmation
-     * @param pools Storage mapping of pool data
-     * @param registry Pool registry contract
-     * @param liquidityPool Pool address
-     * @param actualAmount Actual amount invested
-     * @param proofHash Proof of investment
-     */
+    // ==================== INVESTMENT CONFIRMATION ====================
+
+    /// @dev Confirms the SPV investment: records actual amount and transitions to INVESTED.
     function processInvestment(
         mapping(address => IPoolTypes.PoolData) storage pools,
         IPoolRegistry registry,
@@ -203,13 +183,9 @@ library PoolLifecycleLibrary {
         emit InvestmentConfirmed(actualAmount, proofHash);
     }
     
-    /**
-     * @notice Process pool maturity
-     * @param pools Storage mapping of pool data
-     * @param registry Pool registry contract
-     * @param liquidityPool Pool address
-     * @param finalAmount Final maturity amount
-     */
+    // ==================== MATURITY ====================
+
+    /// @dev Processes maturity: SPV returns funds to escrow, pool transitions to MATURED.
     function processMaturity(
         mapping(address => IPoolTypes.PoolData) storage pools,
         IPoolRegistry registry,
@@ -222,17 +198,14 @@ library PoolLifecycleLibrary {
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         require(IERC20(poolInfo.asset).balanceOf(msg.sender) >= finalAmount, "PoolLifecycle/insufficient spv balance");
         
-        // Soft validation: emit events if return is unexpected
         uint256 expectedReturn = _calculateExpectedReturn(poolData);
         if (finalAmount < expectedReturn) {
-            // Loss scenario - partial return
             emit MaturityShortfall(liquidityPool, expectedReturn, finalAmount, expectedReturn - finalAmount);
         } else if (finalAmount > expectedReturn * 120 / 100) {
-            // Unexpectedly high return (>20% above expected) - flag for review
             emit MaturityOverage(liquidityPool, expectedReturn, finalAmount);
         }
         
-        IERC20(poolInfo.asset).transferFrom(msg.sender, poolInfo.escrow, finalAmount);
+        IERC20(poolInfo.asset).safeTransferFrom(msg.sender, poolInfo.escrow, finalAmount);
         
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
         escrowContract.trackMaturityReturn(finalAmount);
@@ -244,24 +217,17 @@ library PoolLifecycleLibrary {
         emit SPVFundsReturned(liquidityPool, finalAmount);
     }
     
-    /**
-     * @dev Calculate expected return based on instrument type
-     */
     function _calculateExpectedReturn(IPoolTypes.PoolData storage poolData) internal view returns (uint256) {
         if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
-            // Expected: face value
             return poolData.config.faceValue;
         } else {
-            // Expected: principal (returns are via coupons)
             return poolData.actualInvested;
         }
     }
     
-    /**
-     * @notice Mark pool as fully withdrawn
-     * @param pools Storage mapping of pool data
-     * @param pool Pool address
-     */
+    // ==================== POOL WITHDRAWN ====================
+
+    /// @dev Marks a matured pool as WITHDRAWN once all shares have been redeemed.
     function markPoolWithdrawn(
         mapping(address => IPoolTypes.PoolData) storage pools,
         address pool
@@ -277,4 +243,3 @@ library PoolLifecycleLibrary {
         emit PoolFullyWithdrawn(pool, block.timestamp);
     }
 }
-
