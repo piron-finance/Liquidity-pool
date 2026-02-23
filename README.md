@@ -1,126 +1,23 @@
 # Piron Pools
 
-Tokenized fixed-income platform enabling borderless access to real-world financial instruments through on-chain liquidity pools.
+Institutional-grade on-chain infrastructure for tokenized fixed-income products. Piron Pools connects capital providers with real-world financial instruments — treasury bills, commercial paper, corporate bonds — through permissioned liquidity pools with full lifecycle management.
+
+## Overview
+
+Piron Pools is a modular smart contract protocol built on Ethereum that enables the issuance, management, and settlement of structured fixed-income products entirely on-chain. The system supports multiple pool architectures to accommodate different investment profiles, from single-instrument deals to diversified managed portfolios.
+
+All fund custody is handled through segregated escrow contracts. Capital deployment to Special Purpose Vehicles (SPVs) is tracked end-to-end with on-chain accounting. A protocol-level yield reserve provides liquidity backstopping and shortfall coverage across all pool types.
 
 ## Pool Types
 
-- **Single Asset Pools** — Direct investment in specific instruments with fixed terms, maturity dates, and coupon payments
-- **Stable Yield Pools** — Revolving portfolio with NAV-based pricing and flexible deposit/withdrawal
-- **Locked Pools** — Fixed deposits across multiple tenors (30/60/90/180/360 days) with guaranteed APY
+### Single Asset Pools
+Fixed-term, single-instrument deals. Investors deposit during a funding window; once the target is met, capital is deployed to the designated SPV. Supports both discounted instruments (e.g. T-bills) and interest-bearing instruments with periodic coupon payments. Full principal + yield returned at maturity.
 
-## Prerequisites
+### Stable Yield Pools
+Revolving managed portfolios with NAV-based share pricing. Deposits and withdrawals are available on a rolling basis (subject to a configurable holding period). The manager allocates capital across multiple instruments, and the pool's Net Asset Value adjusts as instruments accrue value, pay coupons, or mature. Withdrawal queues ensure orderly redemptions even when liquidity is deployed.
 
-- [Foundry](https://book.getfoundry.sh/)
-- Git
-
-## Installation
-
-```bash
-git clone https://github.com/piron-finance/piron-pools.git
-cd piron-pools
-forge install
-```
-
-## Build
-
-```bash
-forge build
-```
-
-For production-optimized builds:
-
-```bash
-forge build --profile production
-```
-
-Check contract sizes against EIP-170 limit:
-
-```bash
-forge build --sizes
-```
-
-## Test
-
-```bash
-forge test
-forge test -vvv
-forge test --gas-report
-```
-
-198 tests across 5 suites:
-
-| Suite | Tests | Coverage |
-|-------|-------|----------|
-| SingleAssetPoolTest | 23 | Pool lifecycle, deposits, withdrawals, maturity, coupon payments |
-| StableYieldPoolTest | 37 | NAV, shares, yield, holding periods, fee collection, withdrawal queues |
-| LockedPoolTest | 56 | Multi-tenor deposits, early exit penalties, interest accrual, rollovers |
-| FeeManagerTest | 30 | Fee collection, splits, distribution, YieldReserveEscrow ops |
-| IntegrationTest | 52 | Full lifecycle, stress, access control, cross-pool, reserve wiring |
-
-## Deploy
-
-Required environment variables:
-
-```bash
-export PRIVATE_KEY=<deployer_private_key>
-export RPC_URL=<rpc_endpoint>
-export ADMIN_ADDRESS=<admin_wallet>
-export MULTISIG_ADMIN_ADDRESS=<multisig_wallet>
-export PROPOSER_ADDRESS=<timelock_proposer>
-export EXECUTOR_ADDRESS=<timelock_executor>
-export CANCELLER_ADDRESS=<timelock_canceller>
-export GUARDIAN_ADDRESS=<emergency_guardian>
-export SPV_ADDRESS=<spv_wallet>
-export OPERATOR_ADDRESS=<operator_wallet>
-export EMERGENCY_ADDRESS=<emergency_wallet>
-export TREASURY_ADDRESS=<treasury_wallet>
-export OPS_WALLET_ADDRESS=<ops_wallet>
-```
-
-Optional:
-
-```bash
-export BASE_TOKEN_ADDRESS=<usdc_address>
-export DEPLOY_MOCK_TOKEN=false
-export BASE_TOKEN_NAME="USD Coin"
-export BASE_TOKEN_SYMBOL="USDC"
-export DEFAULT_FEE_BPS=300
-export TREASURY_BPS=5000
-export MIN_RESERVE_FLOOR=100000000000
-```
-
-Run deployment:
-
-```bash
-forge script script/DeployUpgradeable.s.sol --rpc-url $RPC_URL --broadcast --verify
-```
-
-The script deploys all contracts, configures roles, links components, and verifies the entire system in a single transaction batch.
-
-## Upgrade Flow
-
-1. Deploy new implementation:
-
-```bash
-export TIMELOCK_CONTROLLER=<timelock_address>
-export MANAGER_PROXY=<proxy_to_upgrade>
-export PROPOSER_ADDRESS=<proposer_wallet>
-
-forge script script/UpgradeManager.s.sol --rpc-url $RPC_URL --broadcast
-```
-
-2. Wait 72 hours (timelock delay)
-
-3. Execute upgrade:
-
-```bash
-export OPERATION_ID=<scheduled_operation_id>
-export TARGET_PROXY=<proxy_address>
-export NEW_IMPLEMENTATION=<new_impl_address>
-export EXECUTOR_ADDRESS=<executor_wallet>
-
-forge script script/ExecuteUpgrade.s.sol --rpc-url $RPC_URL --broadcast
-```
+### Locked Pools
+Fixed-term deposits across configurable tenors (e.g. 30, 60, 90, 180, 360 days) with guaranteed APY at the time of deposit. Each deposit creates a discrete position with its own maturity schedule. Supports upfront or at-maturity interest payment, auto-rollover, early exit with penalty, and position transfer.
 
 ## Architecture
 
@@ -147,185 +44,139 @@ forge script script/ExecuteUpgrade.s.sol --rpc-url $RPC_URL --broadcast
 └───────────────┘  └───────────────┘  └───────────────┘
 ```
 
-## Project Structure
+**Governance layer** — Role-based access control with time-delayed upgrades and emergency circuit breakers. All contract upgrades require a 72-hour timelock. Role grants require a 24-hour proposal window and multisig execution.
 
-```
-src/
-├── AccessManager.sol
-├── PoolRegistry.sol
-├── FeeManager.sol
-├── Manager.sol
-├── StableYieldManager.sol
-├── LockedPoolManager.sol
-├── LiquidityPool.sol
-├── managed/
-│   ├── StableYieldPool.sol
-│   └── LockedPool.sol
-├── escrows/
-│   ├── PoolEscrow.sol
-│   ├── StableYieldEscrow.sol
-│   ├── LockedPoolEscrow.sol
-│   └── YieldReserveEscrow.sol
-├── factories/
-│   ├── PoolFactory.sol
-│   └── ManagedPoolFactory.sol
-├── governance/
-│   ├── TimelockController.sol
-│   └── UpgradeGuardian.sol
-├── interfaces/
-│   ├── IFeeManager.sol
-│   ├── ILiquidityPool.sol
-│   ├── ILockedPoolManager.sol
-│   ├── IManager.sol
-│   ├── IPoolEscrow.sol
-│   ├── IPoolFactory.sol
-│   ├── IPoolRegistry.sol
-│   └── IYieldReserveEscrow.sol
-├── libraries/
-│   ├── CalculationLibrary.sol
-│   ├── ValidationLibrary.sol
-│   ├── DepositWithdrawalLibrary.sol
-│   ├── PoolLifecycleLibrary.sol
-│   ├── StableYieldNAVLibrary.sol
-│   ├── LockedPoolLibrary.sol
-│   └── LockedPoolManagerLib.sol
-└── types/
-    ├── IPoolTypes.sol
-    ├── IStableYieldTypes.sol
-    └── ILockedPoolTypes.sol
+**Infrastructure layer** — Shared services across all pool types: asset registry, pool factories (CREATE2 deterministic deployment), protocol fee management with configurable splits, and a yield reserve that provides liquidity backstopping, shortfall coverage, and cross-pool capital deployment.
 
-script/
-├── DeployUpgradeable.s.sol
-├── UpgradeManager.s.sol
-└── ExecuteUpgrade.s.sol
+**Pool layer** — Each pool type has three components: a Manager (business logic), a Vault (ERC4626 share token), and an Escrow (segregated fund custody). Managers are upgradeable via UUPS proxy; vaults and escrows are deployed per pool.
 
-test/
-├── SingleAssetPool.t.sol
-├── StableYieldPool.t.sol
-├── LockedPool.t.sol
-├── FeeManager.t.sol
-├── Integration.t.sol
-├── fixtures/BaseTest.sol
-└── mocks/MockContracts.sol
-```
+## Security Model
 
-## Contracts
+| Mechanism | Description |
+|-----------|-------------|
+| UUPS Proxy + Timelock | All upgradeable contracts require a 72-hour delay via TimelockController |
+| Multisig Governance | Role revocation, implementation approval, and upgrade authorization require multisig |
+| Role Separation | Seven distinct roles with least-privilege access; `renounceRole` is disabled system-wide |
+| Emergency Controls | Pause can be triggered by admin or emergency role; unpause is admin-only |
+| Fund Segregation | Each pool's funds are held in a dedicated escrow contract, separate from protocol logic |
+| Reentrancy Protection | All state-changing external functions are guarded |
+| SafeERC20 | All token transfers use OpenZeppelin SafeERC20 |
+| Authorized Escrows | Fee collection and reserve operations require explicit escrow registration |
 
-### Governance
+## Governance Roles
 
-| Contract | Type | Purpose |
-|----------|------|---------|
-| AccessManager | Immutable | Role-based access control with 24h timelock on role grants |
-| TimelockController | Immutable | 72h delay on all contract upgrades |
-| UpgradeGuardian | Immutable | Emergency pause and upgrade veto |
+| Role | Scope |
+|------|-------|
+| Default Admin | System configuration, fee parameters, asset and SPV approval |
+| Multisig Admin | Role revocation, implementation approval, upgrade authorization |
+| Operator | Pool operations, queue processing, maturity management, tier configuration |
+| SPV | Capital deployment execution, fund allocation and return |
+| Pool Creator | Pool deployment (granted to factories and managers) |
+| Factory | Pool creation via factory contracts |
+| Emergency | Emergency pause (cannot unpause) |
 
-### Core (Upgradeable via UUPS)
+## Core Contracts
+
+### Managers (Upgradeable)
 
 | Contract | Purpose |
 |----------|---------|
-| PoolRegistry | Central registry for pools, assets, and SPVs |
-| Manager | Single Asset pool business logic |
-| StableYieldManager | Stable Yield pool business logic and NAV calculation |
-| LockedPoolManager | Locked pool business logic with multi-tenor support |
-| FeeManager | Protocol fee collection, split, and distribution |
-| YieldReserveEscrow | Protocol reserve for yield, loans, and shortfall coverage |
+| Manager | Single Asset pool lifecycle: funding, investment, maturity, coupon distribution |
+| StableYieldManager | Stable Yield pool operations: NAV computation, instrument management, withdrawal queues |
+| LockedPoolManager | Locked pool operations: multi-tenor deposits, rollovers, early exit, SPV allocation |
 
-### Pool Vaults (ERC4626)
+### Vaults (ERC4626)
 
 | Contract | Purpose |
 |----------|---------|
-| LiquidityPool | Single Asset vault |
-| StableYieldPool | Flexible managed vault with NAV pricing |
-| LockedPool | Fixed-term vault with position tracking |
+| LiquidityPool | Single Asset share token with refund and coupon claim support |
+| StableYieldPool | NAV-priced share token with holding period enforcement |
+| LockedPool | Position-tracked share token with transfer restrictions |
 
 ### Escrows
 
 | Contract | Purpose |
 |----------|---------|
-| PoolEscrow | Single Asset fund custody |
-| StableYieldEscrow | Stable Yield fund custody with SPV coordination |
-| LockedPoolEscrow | Locked Pool fund custody with interest payments |
+| PoolEscrow | Single Asset fund custody and SPV disbursement |
+| StableYieldEscrow | Stable Yield fund custody with instrument-level accounting |
+| LockedPoolEscrow | Locked Pool fund custody with interest payment and penalty handling |
+| YieldReserveEscrow | Protocol-level reserve: yield aggregation, loan facility, treasury sweeps |
 
-### Factories
+### Infrastructure
 
 | Contract | Purpose |
 |----------|---------|
-| PoolFactory | Deploys Single Asset pools via CREATE2 |
-| ManagedPoolFactory | Deploys Stable Yield and Locked pools via CREATE2 |
+| AccessManager | Role-based access control with time-delayed role grants |
+| PoolRegistry | Central registry for pools, approved assets, and authorized SPVs |
+| FeeManager | Fee collection, configurable splits (treasury/ops/reserve), per-pool overrides |
+| PoolFactory | Deterministic deployment of Single Asset pools |
+| ManagedPoolFactory | Deterministic deployment of Stable Yield and Locked pools |
+| TimelockController | 72-hour delay on contract upgrades |
+| UpgradeGuardian | Emergency pause and upgrade veto |
 
-### Libraries
+## Development
 
-| Library | Purpose |
-|---------|---------|
-| CalculationLibrary | Share pricing, NAV math, discount/coupon calculations |
-| ValidationLibrary | Input validation for deposits, withdrawals, pool config |
-| DepositWithdrawalLibrary | Deposit/withdrawal processing for Single Asset pools |
-| PoolLifecycleLibrary | Pool state transitions and lifecycle management |
-| StableYieldNAVLibrary | NAV-per-share computation for Stable Yield pools |
-| LockedPoolLibrary | Interest math, early-exit penalties, position building |
-| LockedPoolManagerLib | Extracted LockedPoolManager logic (rollovers, debt settlement, early exit payments) |
+### Prerequisites
 
-## Contract Sizes
+- [Foundry](https://book.getfoundry.sh/)
+- Git
 
-All contracts are within the EIP-170 deployment limit (24,576 bytes):
+### Setup
 
-| Contract | Runtime Size | Margin |
-|----------|-------------|--------|
-| LockedPoolManager | 22,981 B | 1,595 B |
-| StableYieldManager | 24,527 B | 49 B |
-| Manager | 24,020 B | 556 B |
-| PoolRegistry | 16,055 B | 8,521 B |
-| LockedPoolEscrow | 16,406 B | 8,170 B |
-| YieldReserveEscrow | 15,076 B | 9,500 B |
-| FeeManager | 13,154 B | 11,422 B |
-| LockedPool | 13,578 B | 10,998 B |
-| StableYieldPool | 12,930 B | 11,646 B |
-| ManagedPoolFactory | 12,971 B | 11,605 B |
+```bash
+git clone https://github.com/piron-finance/piron-pools.git
+cd piron-pools
+forge install
+forge build
+```
 
-## Roles
+### Testing
 
-| Role | Purpose |
-|------|---------|
-| DEFAULT_ADMIN_ROLE | System configuration, fee management, asset approval |
-| MULTISIG_ADMIN_ROLE | Role revocation, implementation approval, upgrade authorization |
-| OPERATOR_ROLE | Pool operations, queue processing, status management |
-| SPV_ROLE | Investment execution, fund allocation |
-| POOL_CREATOR_ROLE | Pool deployment (granted to factories and managers) |
-| FACTORY_ROLE | Pool creation via factory contracts |
-| EMERGENCY_ROLE | Emergency pause (cannot unpause — admin only) |
+```bash
+forge test
+```
 
-## Security
+198 tests across 5 suites covering pool lifecycle, deposits, withdrawals, maturity, NAV pricing, fee collection, early exits, rollovers, SPV allocation, access control, cross-pool operations, and stress scenarios.
 
-- All upgradeable contracts use UUPS proxy pattern with TimelockController (72h delay)
-- Role grants after deployment require 24h proposal + multisig execution
-- `renounceRole` is disabled across the system
-- Emergency pause can be triggered by admin or emergency role; unpause is admin-only
-- All ERC20 transfers use SafeERC20
-- Reentrancy guards on all state-changing external functions
-- Fee collection requires authorized collector (escrow) registration
+### Deployment
+
+Configure environment variables:
+
+```bash
+export PRIVATE_KEY=<deployer_private_key>
+export RPC_URL=<rpc_endpoint>
+export ADMIN_ADDRESS=<admin_wallet>
+export MULTISIG_ADMIN_ADDRESS=<multisig_wallet>
+export PROPOSER_ADDRESS=<timelock_proposer>
+export EXECUTOR_ADDRESS=<timelock_executor>
+export CANCELLER_ADDRESS=<timelock_canceller>
+export GUARDIAN_ADDRESS=<emergency_guardian>
+export SPV_ADDRESS=<spv_wallet>
+export OPERATOR_ADDRESS=<operator_wallet>
+export EMERGENCY_ADDRESS=<emergency_wallet>
+export TREASURY_ADDRESS=<treasury_wallet>
+export OPS_WALLET_ADDRESS=<ops_wallet>
+```
+
+Deploy:
+
+```bash
+forge script script/DeployUpgradeable.s.sol --rpc-url $RPC_URL --broadcast --verify
+```
+
+The deployment script handles all contract creation, proxy setup, role configuration, factory registration, and cross-contract wiring in a single atomic batch.
+
+### Upgrades
+
+1. Propose new implementation via `UpgradeManager.s.sol`
+2. Wait 72-hour timelock delay
+3. Execute upgrade via `ExecuteUpgrade.s.sol`
 
 ## Dependencies
 
 - [OpenZeppelin Contracts v5](https://github.com/OpenZeppelin/openzeppelin-contracts)
 - [OpenZeppelin Upgradeable v5](https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable)
 - [Forge Std](https://github.com/foundry-rs/forge-std)
-
-## Configuration
-
-`foundry.toml`:
-
-```toml
-[profile.default]
-optimizer = true
-optimizer_runs = 100
-via_ir = true
-evm_version = "shanghai"
-solc_version = "0.8.22"
-
-[profile.production]
-optimizer_runs = 1000
-via_ir = true
-```
 
 ## License
 
