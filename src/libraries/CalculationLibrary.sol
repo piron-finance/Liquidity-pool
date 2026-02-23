@@ -7,21 +7,15 @@ import "../interfaces/IPoolRegistry.sol";
 
 /**
  * @title CalculationLibrary
- * @dev Library for performing financial calculations related to investment pools
- * @notice This library handles calculations for both discounted and interest-bearing instruments
+ * @dev Handles pool value calculations, user return projections, coupon processing,
+ *      coupon distribution, and per-user coupon claims for Single-Asset (deal) pools.
  */
 library CalculationLibrary {
-    /// @dev Basis points constant for percentage calculations (10000 = 100%)
     uint256 constant BASIS_POINTS = 10000;
-    
 
-    /**
-     * @dev Calculates the current value of the pool based on instrument type and status
-     * @param poolData Storage reference to pool data
-     * @return Current pool value in base currency units
-     * @notice For discounted instruments: returns face value at maturity, time-based accrual before
-     * @notice For interest-bearing instruments: returns invested amount plus received coupons
-     */
+    // ==================== POOL VALUE ====================
+    
+    /// @dev Calculates current mark-to-market value of a pool (accrued discount or coupons).
     function calculateCurrentPoolValue(
         IPoolTypes.PoolData storage poolData
     ) internal view returns (uint256) {
@@ -47,18 +41,9 @@ library CalculationLibrary {
         return baseValue;
     }
 
-    /**
-     * @dev Calculates the return amount for a specific user based on their share ownership
-     * @param poolData Storage reference to pool data
-     * @param user Address of the user
-     * @param poolAddress Address of the pool contract (ERC20 token)
-     * @return User's proportional return amount based on their shares
-     * @notice Return calculation varies by pool status:
-     * @notice FUNDING: returns user's deposited amount
-     * @notice INVESTED: returns proportional share of current pool value
-     * @notice MATURED: returns proportional share of total returns
-     * @notice EMERGENCY: returns proportional share of total raised funds
-     */
+    // ==================== USER RETURNS ====================
+
+    /// @dev Calculates a user's return based on shares, pool status, and instrument type.
     function calculateUserReturn(
         IPoolTypes.PoolData storage poolData,
         address user,
@@ -85,14 +70,7 @@ library CalculationLibrary {
         return 0;
     }
 
-    /**
-     * @dev Calculates the expected return for the entire pool
-     * @param poolData Storage reference to pool data
-     * @return Expected total return amount for the pool
-     * @notice For discounted instruments: returns discount earned (face value - invested amount)
-     * @notice For interest-bearing instruments: returns expected coupon payments
-     * @notice During funding phase, uses target raise for estimation
-     */
+    /// @dev Calculates the expected return for a pool at maturity.
     function calculateExpectedReturn(
         IPoolTypes.PoolData storage poolData
     ) external view returns (uint256) {
@@ -111,27 +89,14 @@ library CalculationLibrary {
         }
     }
 
-    /**
-     * @dev Calculates the face value of a discounted instrument
-     * @param actualRaised Actual amount raised/invested
-     * @param discountRate Discount rate in basis points
-     * @return Face value of the instrument
-     * @notice Face value = actualRaised / (1 - discountRate/10000)
-     * @notice Example: $100k raised at 5% discount = $105,263 face value
-     */
+    // ==================== FACE VALUE / DISCOUNT ====================
+
+    /// @dev Derives face value from the raised amount and discount rate (in BPS).
     function calculateFaceValue(uint256 actualRaised, uint256 discountRate) public pure returns (uint256) {
         require(discountRate < BASIS_POINTS, "Invalid discount rate");
         return (actualRaised * BASIS_POINTS) / (BASIS_POINTS - discountRate);
     }
 
-    /**
-     * @dev Calculates the total returns available for distribution to users
-     * @param poolData Storage reference to pool data
-     * @return Total returns amount available for withdrawal
-     * @notice For discounted instruments: returns the full face value
-     * @notice For interest-bearing instruments: returns maturity principal plus undistributed coupons
-     * @notice Used when pool reaches MATURED status
-     */
     function calculateTotalReturns(IPoolTypes.PoolData storage poolData) public view returns (uint256) {
         if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
             return poolData.config.faceValue;
@@ -142,14 +107,6 @@ library CalculationLibrary {
         }
     }
 
-    /**
-     * @dev Calculates the total expected coupon payments for interest-bearing instruments
-     * @param poolData Storage reference to pool data
-     * @return Total expected coupon amount over the instrument's lifetime
-     * @notice Sums all coupon payments based on coupon rates and principal amount
-     * @notice Uses actual invested amount if available, otherwise uses target raise
-     * @notice Returns 0 if no coupon rates are configured
-     */
     function calculateExpectedCoupons(IPoolTypes.PoolData storage poolData) public view returns (uint256) {
         if (poolData.config.couponRates.length == 0) return 0;
 
@@ -164,17 +121,9 @@ library CalculationLibrary {
         return totalExpectedCoupons;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// COUPON MANAGEMENT ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== COUPON PROCESSING ====================
 
-    /**
-     * @dev Process coupon payment from SPV
-     * @param poolData Storage reference to pool data
-     * @param poolRegistry Pool registry contract
-     * @param liquidityPool Pool address
-     * @param amount Coupon amount received
-     */
+    /// @dev Records an incoming coupon payment for an interest-bearing pool.
     function processCouponPayment(
         IPoolTypes.PoolData storage poolData,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage /* poolUsers - unused but kept for interface compatibility */,
@@ -190,12 +139,7 @@ library CalculationLibrary {
         poolData.totalCouponsReceived += amount;
     }
 
-    /**
-     * @dev Distribute coupon payment to make available for claims
-     * @param poolData Storage reference to pool data
-     * @param liquidityPool Pool address (for total shares check)
-     * @return undistributedAmount Amount that was distributed
-     */
+    /// @dev Marks coupons as distributed and returns the undistributed amount.
     function distributeCouponPayment(
         IPoolTypes.PoolData storage poolData,
         address liquidityPool
@@ -214,14 +158,9 @@ library CalculationLibrary {
         return undistributedAmount;
     }
 
-    /**
-     * @dev Calculate and process user coupon claim
-     * @param poolData Storage reference to pool data
-     * @param poolUsers Storage mapping of user pool data
-     * @param liquidityPool Pool address
-     * @param user User address
-     * @return claimableAmount Amount user can claim
-     */
+    // ==================== COUPON CLAIMS ====================
+
+    /// @dev Claims a user's pro-rata share of distributed coupons.
     function claimUserCoupon(
         IPoolTypes.PoolData storage poolData,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
@@ -251,14 +190,9 @@ library CalculationLibrary {
         return claimableAmount;
     }
 
-    /**
-     * @dev Get user's available coupon amount
-     * @param poolData Storage reference to pool data
-     * @param poolUsers Storage mapping of user pool data
-     * @param liquidityPool Pool address
-     * @param user User address
-     * @return Available coupon amount
-     */
+    // ==================== COUPON VIEW HELPERS ====================
+
+    /// @dev Returns the claimable coupon amount for a user without modifying state.
     function getUserAvailableCoupon(
         IPoolTypes.PoolData storage poolData,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
@@ -284,11 +218,6 @@ library CalculationLibrary {
         return userTotalEntitlement > userAlreadyClaimed ? userTotalEntitlement - userAlreadyClaimed : 0;
     }
 
-    /**
-     * @dev Get total unclaimed coupons for a pool
-     * @param poolData Storage reference to pool data
-     * @return Total unclaimed coupon amount
-     */
     function getUnclaimedCoupons(
         IPoolTypes.PoolData storage poolData
     ) external view returns (uint256) {
@@ -298,11 +227,6 @@ library CalculationLibrary {
         return poolData.totalCouponsDistributed - poolData.totalCouponsClaimed;
     }
 
-    /**
-     * @dev Get total undistributed coupons for a pool
-     * @param poolData Storage reference to pool data
-     * @return Total undistributed coupon amount
-     */
     function getUndistributedCoupons(
         IPoolTypes.PoolData storage poolData
     ) external view returns (uint256) {
@@ -312,10 +236,9 @@ library CalculationLibrary {
         return poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
     }
 
-    /**
-     * @notice Checks if current timestamp is within tolerance of a scheduled coupon date
-     * @dev Allows 24-hour window around coupon date for flexibility
-     */
+    // ==================== COUPON DATE VALIDATION ====================
+
+    /// @dev Checks whether the current timestamp falls within a 24-hour window of any scheduled coupon date.
     function isValidCouponDate(
         IPoolTypes.PoolConfig storage poolConfig
     ) internal view returns (bool) {

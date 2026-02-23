@@ -8,22 +8,21 @@ import "../escrows/StableYieldEscrow.sol";
 
 /**
  * @title StableYieldNAVLibrary
- * @dev Library for calculating Net Asset Value (NAV) for stable yield pools
- * @notice Handles NAV calculation including instrument valuations and fee accruals
+ * @dev Net Asset Value calculations for StableYieldPools: gross asset value (discounted +
+ *      interest-bearing instruments), pool reserves, NAV per share, and NAV event triggers.
  */
 library StableYieldNAVLibrary {
     
     uint256 constant SECONDS_PER_YEAR = 365 days;
+
+    // ==================== EVENTS ====================
     
     event NAVCalculated(address indexed poolAddress, uint256 totalNAV, uint256 navPerShare, uint256 totalShares, uint256 timestamp);
     event NAVUpdated(address indexed poolAddress, uint256 totalNAV, uint256 navPerShare, string reason, uint256 timestamp);
+
+    // ==================== NAV CALCULATION ====================
     
-    /**
-     * @notice Calculate pool NAV 
-     * @param poolData Pool data storage
-     * @param instruments Array of instrument holdings
-     * @return totalNAV Current NAV
-     */
+    /// @dev Total NAV = gross asset value (instruments) + pool reserves (escrow balance).
     function calculatePoolNAV(
         IStableYieldTypes.PoolData storage poolData,
         IStableYieldTypes.InstrumentHolding[] storage instruments
@@ -33,16 +32,10 @@ library StableYieldNAVLibrary {
         uint256 grossAssetValue = calculateGrossAssetValue(instruments);
         uint256 poolReserves = escrow.getPoolReserves();
         
-    
         return grossAssetValue + poolReserves;
     }
     
-    /**
-     * @notice Calculate NAV per share
-     * @param poolData Pool data storage
-     * @param instruments Array of instrument holdings
-     * @return navPerShare NAV per share (normalized to 18 decimals)
-     */
+    /// @dev NAV per share in 1e18 precision. Returns 1e18 when no shares exist.
     function calculateNAVPerShare(
         IStableYieldTypes.PoolData storage poolData,
         IStableYieldTypes.InstrumentHolding[] storage instruments
@@ -55,17 +48,12 @@ library StableYieldNAVLibrary {
             return 1e18; 
         }
         
-        // Calculate NAV per share: (totalNAV * 1e18) / totalShares
-        // totalNAV is in asset decimals, totalShares is raw count
-        // Result is normalized to 1e18 precision
         return (totalNAV * 1e18) / totalShares;
     }
     
-    /**
-     * @notice Calculate gross asset value from all instruments
-     * @param instruments Array of instrument holdings
-     * @return grossValue Total value of all instruments
-     */
+    // ==================== GROSS ASSET VALUE ====================
+
+    /// @dev Sums mark-to-market values of all active instrument holdings.
     function calculateGrossAssetValue(
         IStableYieldTypes.InstrumentHolding[] storage instruments
     ) public view returns (uint256 grossValue) {
@@ -89,12 +77,9 @@ library StableYieldNAVLibrary {
         return grossValue;
     }
     
-    /**
-     * @notice Calculate discounted instrument value
-     * @param instrument Instrument data
-     * @param currentTime Current timestamp
-     * @return value Current value of discounted instrument
-     */
+    // ==================== INSTRUMENT VALUATION ====================
+
+    /// @dev Linear accrual from purchasePrice to faceValue over the instrument lifetime.
     function calculateDiscountedValue(
         IStableYieldTypes.InstrumentHolding storage instrument,
         uint256 currentTime
@@ -109,12 +94,7 @@ library StableYieldNAVLibrary {
         return instrument.purchasePrice + ((instrument.faceValue - instrument.purchasePrice) * timeElapsed) / totalTime;
     }
     
-    /**
-     * @notice Calculate interest-bearing instrument value
-     * @param instrument Instrument data
-     * @param currentTime Current timestamp
-     * @return value Current value including accrued interest
-     */
+    /// @dev Face value + accrued interest since the last coupon date.
     function calculateInterestBearingValue(
         IStableYieldTypes.InstrumentHolding storage instrument,
         uint256 currentTime
@@ -126,20 +106,14 @@ library StableYieldNAVLibrary {
         
         uint256 timeSinceLastCoupon = currentTime - lastCouponDate;
         uint256 couponAmount = (instrument.faceValue * instrument.annualCouponRate) / (10000 * instrument.couponFrequency);
-        
-        // Accrued interest = (couponAmount * timeSinceLastCoupon) / couponPeriodSeconds
         uint256 accruedInterest = (couponAmount * timeSinceLastCoupon) / couponPeriodSeconds;
         
         return instrument.faceValue + accruedInterest;
     }
     
-    /**
-     * @notice Trigger NAV update and emit events
-     * @param poolAddress Pool address
-     * @param poolData Pool data storage
-     * @param instruments Array of instrument holdings
-     * @param reason Reason for update
-     */
+    // ==================== NAV UPDATE TRIGGER ====================
+
+    /// @dev Emits NAVUpdated and NAVCalculated events for off-chain indexing.
     function triggerNAVUpdate(
         address poolAddress,
         IStableYieldTypes.PoolData storage poolData,

@@ -11,23 +11,28 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./AccessManager.sol";
 import "./interfaces/IPoolRegistry.sol";
 import "./interfaces/ILockedPoolManager.sol";
+import "./interfaces/IFeeManager.sol";
 import "./escrows/LockedPoolEscrow.sol";
 import "./escrows/YieldReserveEscrow.sol";
 import "./types/ILockedPoolTypes.sol";
 import "./libraries/LockedPoolLibrary.sol";
+import "./libraries/LockedPoolManagerLib.sol";
+import "./managed/LockedPool.sol";
 
 /**
  * @title LockedPoolManager
- * @dev Manages locked pool business logic
- * @notice Handles deposits, redemptions, early exits, and SPV coordination
+ * @dev Manages fixed-term locked pools with tiered APY, lock periods, auto-rollover,
+ *      early exit penalties, SPV allocations, and protocol capital deployment.
+ *      Each deposit creates a discrete UserPosition with its own maturity schedule.
  */
-
 contract LockedPoolManager is 
     Initializable,
     UUPSUpgradeable,
     ReentrancyGuardUpgradeable,
     ILockedPoolManager
 {
+    // ==================== ERRORS ====================
+
     error Unauthorized();
     error PoolNotFound();
     error PoolNotActive();
@@ -49,6 +54,7 @@ contract LockedPoolManager is
     error InsufficientReserve();
     error AllocationNotFound();
     error AllocationExists();
+    error NotAllocationSPV();
     error OnlyPool();
     error OnlyTimelock();
     error OnlyFactory();
@@ -60,9 +66,7 @@ contract LockedPoolManager is
     error InvalidPosition();
     error NoYieldReserve();
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STATE VARIABLES //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== STATE ====================
 
     using SafeERC20 for IERC20;
     AccessManager public accessManager;
@@ -91,15 +95,17 @@ contract LockedPoolManager is
     mapping(bytes32 => ILockedPoolTypes.SPVAllocation) public spvAllocations;
     mapping(address => bytes32[]) public poolAllocationIds;
 
-
-    
     mapping(address => ILockedPoolTypes.PoolProtocolAccounting) public poolAccounting;
     mapping(uint256 => ILockedPoolTypes.DebtPosition) public debtPositions;
     mapping(address => uint256[]) public poolDebtPositionIds;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// MODIFIERS ///////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    address public feeManager;
+    uint256 public defaultDepositFeeBps;
+    mapping(address => uint256) public poolDepositFeeBps;  
+    uint256 public constant MAX_DEPOSIT_FEE = 500;  
+    uint256 public constant BPS = 10000;
+
+    // ==================== MODIFIERS ====================
 
     modifier onlyRole(bytes32 role) {
         _checkRole(role);
@@ -128,9 +134,7 @@ contract LockedPoolManager is
         if (!poolConfigs[poolAddress].isActive) revert PoolNotActive();
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INITIALIZATION /////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== INITIALIZATION ====================
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -138,10 +142,10 @@ contract LockedPoolManager is
     }
 
     /**
-     * @notice Initialize the LockedPoolManager
-     * @param accessManager_ AccessManager contract address
-     * @param registry_ PoolRegistry contract address
-     * @param timelockController_ Timelock controller address
+     * @dev Initialize with access manager, registry, and timelock controller.
+     * @param accessManager_ AccessManager contract
+     * @param registry_ PoolRegistry proxy
+     * @param timelockController_ TimelockController for upgrades
      */
     function initialize(
         address accessManager_,
@@ -168,12 +172,10 @@ contract LockedPoolManager is
         version += 1;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// POOL REGISTRATION ///////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== POOL REGISTRATION ====================
 
     /**
-     * @notice Register a new locked pool
+     * @dev Register a new locked pool. Only callable by ManagedPoolFactory.
      */
     function registerPool(
         address poolAddress,
@@ -206,22 +208,16 @@ contract LockedPoolManager is
         emit PoolRegistered(poolAddress, escrowAddress, asset, name);
     }
 
-    /**
-     * @notice Set the ManagedPoolFactory address
-     */
     function setManagedPoolFactory(address _factory) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
         if (_factory == address(0)) revert InvalidAddress();
         if (managedPoolFactory != address(0)) revert FactoryAlreadySet();
         managedPoolFactory = _factory;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// TIER CONFIGURATION //////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== TIER CONFIGURATION ====================
 
     /**
-     * @notice Configure a lock tier for a pool
-     * @dev Callable by operator or factory (during pool creation)
+     * @dev Configure or add a lock tier for a pool (duration, APY, penalty).
      */
     function configureLockTier(
         address poolAddress,
@@ -255,9 +251,6 @@ contract LockedPoolManager is
         );
     }
 
-    /**
-     * @notice Set tier active status
-     */
     function setTierActive(
         address poolAddress,
         uint8 tierIndex,
@@ -267,9 +260,6 @@ contract LockedPoolManager is
         poolTiers[poolAddress][tierIndex].isActive = isActive;
     }
 
-    /**
-     * @notice Update tier APY for new deposits
-     */
     function updateTierAPY(
         address poolAddress,
         uint8 tierIndex,
@@ -280,13 +270,11 @@ contract LockedPoolManager is
         poolTiers[poolAddress][tierIndex].apyBps = newApyBps;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// USER FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== DEPOSIT ====================
 
     /**
-     * @notice Process deposit and create locked position
-     * @dev Called by LockedPool after transferring funds to escrow
+     * @dev Process a locked deposit: deduct fee, create a UserPosition with computed
+     *      interest, optionally pay interest upfront.
      */
     function processDeposit(
         address poolAddress,
@@ -302,11 +290,19 @@ contract LockedPoolManager is
         if (amount < config.minInvestment) revert BelowMinimum();
         
         ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][tierIndex];
-        if (!tier.isActive) revert TierNotActive();
+        if (!tier.isActive) revert TierNotActive(); 
         if (amount < tier.minDeposit) revert BelowMinimum();
         
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
-        escrow.recordDeposit(amount);
+        
+        uint256 feeBps = poolDepositFeeBps[poolAddress];
+        if (feeBps == 0) feeBps = defaultDepositFeeBps;
+        
+        (uint256 netAmount, uint256 depositFee) = escrow.processDeposit(amount, feeBps);
+        
+        if (depositFee > 0) {
+            emit DepositFeeCollected(poolAddress, depositor, amount, depositFee);
+        }
         
         positionId = nextPositionId++;
         
@@ -315,7 +311,7 @@ contract LockedPoolManager is
             positionId,
             depositor,
             poolAddress,
-            amount,
+            netAmount,
             tierMem,
             tierIndex,
             paymentChoice,
@@ -326,7 +322,7 @@ contract LockedPoolManager is
         
         ILockedPoolTypes.UserPosition storage pos = positions[positionId];
         ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
-        metrics.totalPrincipalLocked += amount;
+        metrics.totalPrincipalLocked += netAmount;
         metrics.totalInterestCommitted += pos.fullInterestAmount;
         metrics.totalInvestedAmount += pos.investedAmount;
         metrics.totalExpectedMaturityPayout += pos.expectedMaturityPayout;
@@ -347,7 +343,7 @@ contract LockedPoolManager is
             poolAddress,
             depositor,
             positionId,
-            amount,
+            netAmount,
             pos.fullInterestAmount,
             paymentChoice,
             pos.lockEnd
@@ -356,11 +352,10 @@ contract LockedPoolManager is
         return (positionId, shares);
     }
 
+// ==================== REDEMPTION ====================
+
     /**
-     * @notice Redeem position at maturity
-     * @param poolAddress Pool address
-     * @param positionId Position to redeem
-     * @param caller Actual user requesting redemption (passed by Pool)
+     * @dev Redeem a matured position. Pays principal + interest (if AT_MATURITY).
      */
     function redeem(
         address poolAddress,
@@ -381,7 +376,6 @@ contract LockedPoolManager is
         position.status = ILockedPoolTypes.PositionStatus.REDEEMED;
         position.actualPayout = payout;
         
-        // Set interestEarned for AT_MATURITY positions (UPFRONT already set at deposit)
         if (position.paymentChoice == ILockedPoolTypes.InterestPayment.AT_MATURITY) {
             position.interestEarned = position.fullInterestAmount;
         }
@@ -403,19 +397,12 @@ contract LockedPoolManager is
         return payout;
     }
 
-    /**
-     * @notice Mark positions as matured (batch operation)
-     * @dev Allows operators to mark matured positions for reporting/tracking
-     * @param positionIds Array of position IDs to mature
-     * @return maturedCount Number of positions successfully matured
-     */
     function batchMaturePositions(
         uint256[] calldata positionIds
     ) external onlyRole(accessManager.OPERATOR_ROLE()) returns (uint256 maturedCount) {
         for (uint256 i = 0; i < positionIds.length; i++) {
             ILockedPoolTypes.UserPosition storage position = positions[positionIds[i]];
             
-            // Skip if not eligible for maturation
             if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE) continue;
             if (block.timestamp < position.lockEnd) continue;
             
@@ -428,26 +415,16 @@ contract LockedPoolManager is
         return maturedCount;
     }
 
-    /**
-     * @notice Check if a position can be matured
-     * @param positionId Position to check
-     * @return canMature Whether position is eligible for maturation
-     */
     function canMaturePosition(uint256 positionId) external view returns (bool canMature) {
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
         return position.status == ILockedPoolTypes.PositionStatus.ACTIVE && 
                block.timestamp >= position.lockEnd;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// AUTO-ROLLOVER /////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== ROLLOVER ====================
 
     /**
-     * @notice Set auto-rollover preference for a position
-     * @param positionId Position to configure
-     * @param enabled Whether to enable auto-rollover
-     * @param caller User setting the preference (passed by Pool)
+     * @dev Toggle auto-rollover for a position. Position owner only.
      */
     function setAutoRollover(
         uint256 positionId,
@@ -465,14 +442,26 @@ contract LockedPoolManager is
         
         emit AutoRolloverSet(positionId, caller, enabled);
     }
+    
+    function transferPositionOwnership(
+        uint256 positionId,
+        address newOwner,
+        address caller
+    ) external {
+        ILockedPoolTypes.UserPosition storage position = positions[positionId];
+        
+        if (msg.sender != position.poolAddress) revert OnlyPool();
+        if (position.user != caller) revert NotOwner();
+        if (newOwner == address(0)) revert InvalidAddress();
+        if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE && 
+            position.status != ILockedPoolTypes.PositionStatus.MATURED) revert InvalidStatus();
+        
+        address oldOwner = position.user;
+        LockedPoolManagerLib.transferPositionOwnership(positions, userPositionIds, positionId, newOwner);
+        
+        emit PositionOwnershipTransferred(positionId, oldOwner, newOwner);
+    }
 
-    /**
-     * @notice Execute rollover for a matured position with auto-rollover enabled
-     * @dev For UPFRONT: principal rolls, new interest paid upfront
-     *      For AT_MATURITY: principal + interest compounds
-     * @param positionId Position to rollover
-     * @return newPositionId ID of the new position created
-     */
     function executeRollover(
         uint256 positionId
     ) external override onlyRole(accessManager.OPERATOR_ROLE()) returns (uint256 newPositionId) {
@@ -483,66 +472,12 @@ contract LockedPoolManager is
         if (block.timestamp < position.lockEnd) revert NotMatured();
         if (!position.autoRollover) revert RolloverNotEnabled();
         
-        address poolAddress = position.poolAddress;
-        ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][position.tierIndex];
+        ILockedPoolTypes.LockTier storage tier = poolTiers[position.poolAddress][position.tierIndex];
         if (!tier.isActive) revert TierNotActive();
         
-        // Calculate rollover amounts based on interest payment choice
-        uint256 principalToRoll;
-        uint256 interestHandled;
-        
-        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
-            // UPFRONT: Only principal rolls, interest already paid
-            principalToRoll = position.principalDeposited;
-            interestHandled = position.fullInterestAmount; // Already paid at original deposit
-        } else {
-            // AT_MATURITY: Principal + interest compounds
-            principalToRoll = position.principalDeposited + position.fullInterestAmount;
-            interestHandled = position.fullInterestAmount; // Compounded into new principal
-            position.interestEarned = position.fullInterestAmount;
-        }
-        
-        // Mark old position as rolled over
-        position.status = ILockedPoolTypes.PositionStatus.ROLLED_OVER;
-        position.actualPayout = 0; // No payout, funds rolled
-        
-        // Update metrics for old position closure
-        ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
-        metrics.activePositions--;
-        metrics.totalPrincipalLocked -= position.principalDeposited;
-        metrics.totalExpectedMaturityPayout -= position.expectedMaturityPayout;
-        
-        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.AT_MATURITY) {
-            metrics.totalInterestPendingMaturity -= position.fullInterestAmount;
-        }
-        
-        // Create new position (reuses existing deposit logic path)
-        newPositionId = _createRolloverPosition(
-            poolAddress,
-            position.user,
-            principalToRoll,
-            position.tierIndex,
-            position.paymentChoice,
-            positionId
-        );
-        
-        emit PositionRolledOver(
-            poolAddress,
-            position.user,
-            positionId,
-            newPositionId,
-            principalToRoll,
-            interestHandled
-        );
-        
-        return newPositionId;
+        return _executeRolloverInternal(positionId);
     }
 
-    /**
-     * @notice Batch execute rollovers for multiple positions
-     * @param positionIds Array of position IDs to rollover
-     * @return newPositionIds Array of new position IDs created
-     */
     function batchExecuteRollovers(
         uint256[] calldata positionIds
     ) external override onlyRole(accessManager.OPERATOR_ROLE()) returns (uint256[] memory newPositionIds) {
@@ -551,7 +486,6 @@ contract LockedPoolManager is
         for (uint256 i = 0; i < positionIds.length; i++) {
             ILockedPoolTypes.UserPosition storage position = positions[positionIds[i]];
             
-            // Skip positions that can't be rolled over
             if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE &&
                 position.status != ILockedPoolTypes.PositionStatus.MATURED) {
                 continue;
@@ -562,124 +496,28 @@ contract LockedPoolManager is
             ILockedPoolTypes.LockTier storage tier = poolTiers[position.poolAddress][position.tierIndex];
             if (!tier.isActive) continue;
             
-            // Execute individual rollover (inline for gas efficiency)
-            newPositionIds[i] = _executeRolloverInternal(positionIds[i], position);
+            newPositionIds[i] = _executeRolloverInternal(positionIds[i]);
         }
         
         return newPositionIds;
     }
 
-    /**
-     * @dev Internal function to create a new position from rollover
-     */
-    function _createRolloverPosition(
-        address poolAddress,
-        address user,
-        uint256 principal,
-        uint8 tierIndex,
-        ILockedPoolTypes.InterestPayment paymentChoice,
-        uint256 rolledFromId
-    ) internal returns (uint256 newPositionId) {
-        ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][tierIndex];
-        
-        newPositionId = nextPositionId++;
-        
-        ILockedPoolTypes.LockTier memory tierMem = tier;
-        positions[newPositionId] = LockedPoolLibrary.buildPosition(
-            newPositionId, user, poolAddress, principal,
-            tierMem, tierIndex, paymentChoice, block.timestamp
-        );
-        positions[newPositionId].autoRollover = true;
-        positions[newPositionId].rolledFromPositionId = rolledFromId;
-        
-        userPositionIds[poolAddress][user].push(newPositionId);
-        
-        ILockedPoolTypes.UserPosition storage pos = positions[newPositionId];
-        ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
-        metrics.totalPrincipalLocked += principal;
-        metrics.totalInterestCommitted += pos.fullInterestAmount;
-        metrics.totalInvestedAmount += pos.investedAmount;
-        metrics.totalExpectedMaturityPayout += pos.expectedMaturityPayout;
-        metrics.activePositions++;
-        metrics.totalPositions++;
-        
-        if (paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
-            LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
-            escrow.payInterest(user, pos.fullInterestAmount);
-            metrics.totalInterestPaidUpfront += pos.fullInterestAmount;
-            emit InterestPaidUpfront(poolAddress, user, newPositionId, pos.fullInterestAmount);
-        } else {
-            metrics.totalInterestPendingMaturity += pos.fullInterestAmount;
-        }
-        
-        emit PositionCreated(
-            poolAddress, user, newPositionId, principal,
-            pos.fullInterestAmount, paymentChoice, pos.lockEnd
-        );
-        
-        return newPositionId;
-    }
-
-    /**
-     * @dev Internal rollover execution for batch operations
-     */
     function _executeRolloverInternal(
-        uint256 positionId,
-        ILockedPoolTypes.UserPosition storage position
+        uint256 positionId
     ) internal returns (uint256 newPositionId) {
-        address poolAddress = position.poolAddress;
-        
-        uint256 principalToRoll;
-        uint256 interestHandled;
-        
-        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.UPFRONT) {
-            principalToRoll = position.principalDeposited;
-            interestHandled = position.fullInterestAmount;
-        } else {
-            principalToRoll = position.principalDeposited + position.fullInterestAmount;
-            interestHandled = position.fullInterestAmount;
-            position.interestEarned = position.fullInterestAmount;
-        }
-        
-        position.status = ILockedPoolTypes.PositionStatus.ROLLED_OVER;
-        position.actualPayout = 0;
-        
-        ILockedPoolTypes.PoolMetrics storage metrics = poolMetrics[poolAddress];
-        metrics.activePositions--;
-        metrics.totalPrincipalLocked -= position.principalDeposited;
-        metrics.totalExpectedMaturityPayout -= position.expectedMaturityPayout;
-        
-        if (position.paymentChoice == ILockedPoolTypes.InterestPayment.AT_MATURITY) {
-            metrics.totalInterestPendingMaturity -= position.fullInterestAmount;
-        }
-        
-        newPositionId = _createRolloverPosition(
-            poolAddress,
-            position.user,
-            principalToRoll,
-            position.tierIndex,
-            position.paymentChoice,
-            positionId
+        newPositionId = nextPositionId++;
+        LockedPoolManagerLib.executeRollover(
+            positions, userPositionIds, poolTiers, poolMetrics, poolEscrows,
+            positionId, newPositionId
         );
-        
-        emit PositionRolledOver(
-            poolAddress,
-            position.user,
-            positionId,
-            newPositionId,
-            principalToRoll,
-            interestHandled
-        );
-        
         return newPositionId;
     }
 
+    // ==================== EARLY EXIT ====================
+
     /**
-     * @notice Early withdrawal with penalty
-     * @dev Uses yield reserve loan if escrow has insufficient funds
-     * @param poolAddress Pool address
-     * @param positionId Position to exit
-     * @param caller Actual user requesting early exit (passed by Pool)
+     * @dev Process early withdrawal with penalty. If escrow lacks funds,
+     *      borrows from YieldReserveEscrow and creates a DebtPosition.
      */
     function earlyWithdraw(
         address poolAddress,
@@ -756,71 +594,16 @@ contract LockedPoolManager is
         uint256 payout,
         uint256 penalty
     ) internal {
-        LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
-        uint256 available = escrow.getPrincipalHeld();
-        
-        if (available >= payout + penalty) {
-            escrow.withdraw(user, payout);
-            if (penalty > 0) {
-                escrow.recordPenalty(penalty);
-            }
-        } else if (available >= payout) {
-            escrow.withdraw(user, payout);
-            uint256 penaltyInEscrow = available - payout;
-            if (penaltyInEscrow > 0) {
-                escrow.recordPenalty(penaltyInEscrow);
-            }
-        } else {
-            _processPaymentWithReserveLoan(poolAddress, positionId, user, payout, available, penalty);
-        }
-        
-        if (penalty > 0) {
-            poolAccounting[poolAddress].totalPenaltiesEarned += penalty;
-        }
+        LockedPoolManagerLib.processEarlyExitPayment(
+            poolEscrows, poolAccounting, debtPositions, poolDebtPositionIds,
+            yieldReserve, poolAddress, positionId, user, payout, penalty
+        );
     }
 
-    function _processPaymentWithReserveLoan(
-        address poolAddress,
-        uint256 positionId,
-        address user,
-        uint256 payout,
-        uint256 escrowAvailable,
-        uint256 penalty
-    ) internal {
-        if (yieldReserve == address(0)) revert NoYieldReserve();
-        
-        uint256 reserveLoan = payout - escrowAvailable;
-        YieldReserveEscrow reserve = YieldReserveEscrow(yieldReserve);
-        if (reserve.getAvailableBalance() < reserveLoan) revert InsufficientReserve();
-        
-        LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
-        if (escrowAvailable > 0) {
-            escrow.withdraw(user, escrowAvailable);
-        }
-        reserve.payUser(user, reserveLoan);
-        
-        if (penalty > 0) {
-            escrow.recordPenalty(penalty);
-        }
-        
-        debtPositions[positionId] = ILockedPoolTypes.DebtPosition({
-            positionId: positionId,
-            user: user,
-            amountOwed: payout,
-            reserveLoan: reserveLoan,
-            exitTime: block.timestamp,
-            settled: false
-        });
-        poolDebtPositionIds[poolAddress].push(positionId);
-        poolAccounting[poolAddress].reserveLoansOutstanding += reserveLoan;
-    }
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// SPV FUNCTIONS ////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== SPV ALLOCATION ====================
 
     /**
-     * @notice Create pending allocation for SPV
+     * @dev Create SPV allocation from pool escrow funds.
      */
     function createPendingAllocation(
         address poolAddress,
@@ -864,10 +647,7 @@ contract LockedPoolManager is
     }
 
     /**
-     * @notice Process matured allocation return
-     * @dev SPV calls this when returning funds for an allocation
-     * @param allocationId ID of the allocation being settled
-     * @param returnedAmount Amount being returned
+     * @dev SPV returns matured allocation funds. Excess yield sent to reserve.
      */
     function matureAllocation(
         bytes32 allocationId,
@@ -875,11 +655,13 @@ contract LockedPoolManager is
     ) external override onlyRole(accessManager.SPV_ROLE()) nonReentrant {
         ILockedPoolTypes.SPVAllocation storage allocation = spvAllocations[allocationId];
         if (allocation.createdAt == 0) revert AllocationNotFound();
+        if (allocation.spvAddress != msg.sender) revert NotAllocationSPV();
         if (allocation.status != ILockedPoolTypes.AllocationStatus.INVESTED && 
             allocation.status != ILockedPoolTypes.AllocationStatus.RETURNED) revert InvalidStatus();
         if (returnedAmount == 0) revert InvalidAmount();
         
         address poolAddress = allocation.poolAddress;
+        address spv = allocation.spvAddress;
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
         
         IERC20(poolConfigs[poolAddress].asset).safeTransferFrom(msg.sender, address(escrow), returnedAmount);
@@ -895,29 +677,23 @@ contract LockedPoolManager is
                 : 0;
             
             if (yield > 0 && yieldReserve != address(0)) {
-                escrow.withdraw(address(this), yield);
-                IERC20 assetToken = IERC20(poolConfigs[poolAddress].asset);
-                assetToken.forceApprove(yieldReserve, yield);
-                YieldReserveEscrow(yieldReserve).receiveYield(yield);
+                escrow.sendYieldToReserve(yield);
                 poolAccounting[poolAddress].totalYieldEarned += yield;
             }
         } else {
             allocation.status = ILockedPoolTypes.AllocationStatus.RETURNED;
         }
         
-        if (totalSPVAllocations[msg.sender] >= returnedAmount) {
-            totalSPVAllocations[msg.sender] -= returnedAmount;
+        if (totalSPVAllocations[spv] >= returnedAmount) {
+            totalSPVAllocations[spv] -= returnedAmount;
         }
-        if (poolToSPVAllocations[poolAddress][msg.sender] >= returnedAmount) {
-            poolToSPVAllocations[poolAddress][msg.sender] -= returnedAmount;
+        if (poolToSPVAllocations[poolAddress][spv] >= returnedAmount) {
+            poolToSPVAllocations[poolAddress][spv] -= returnedAmount;
         }
         
         emit AllocationMatured(poolAddress, allocationId, returnedAmount);
     }
 
-    /**
-     * @notice Receive funds from SPV maturity
-     */
     function receiveSPVMaturity(
         address poolAddress,
         uint256 amount
@@ -937,156 +713,104 @@ contract LockedPoolManager is
         }
     }
 
-    /**
-     * @notice Settle SPV return for a specific position
-     * @dev Handles loan repayment and yield distribution
-     * @param positionId Position being settled
-     * @param returnedAmount Amount returned by SPV
-     */
-    function settleSPVReturn(
-        uint256 positionId,
-        uint256 returnedAmount
-    ) external onlyRole(accessManager.SPV_ROLE()) nonReentrant returns (ILockedPoolTypes.SPVSettlement memory settlement) {
-        ILockedPoolTypes.UserPosition storage position = positions[positionId];
-        if (position.positionId != positionId) revert InvalidPosition();
-        
-        address poolAddress = position.poolAddress;
-        LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
-        ILockedPoolTypes.PoolConfig storage config = poolConfigs[poolAddress];
-        
-        IERC20(config.asset).safeTransferFrom(msg.sender, address(this), returnedAmount);
-        
-        settlement.positionId = positionId;
-        settlement.returnedAmount = returnedAmount;
-        
-        if (position.status == ILockedPoolTypes.PositionStatus.EARLY_EXIT) {
-            ILockedPoolTypes.DebtPosition storage debt = debtPositions[positionId];
-            
-            if (debt.reserveLoan > 0 && !debt.settled) {
-                settlement.loanRepayment = debt.reserveLoan;
-                settlement.userPayout = 0;
-                
-                uint256 protocolGain = returnedAmount > debt.reserveLoan 
-                    ? returnedAmount - debt.reserveLoan 
-                    : 0;
-                settlement.protocolYield = protocolGain;
-                
-                YieldReserveEscrow reserve = YieldReserveEscrow(yieldReserve);
-                IERC20 assetToken = IERC20(config.asset);
-                
-                assetToken.forceApprove(yieldReserve, returnedAmount);
-                
-                if (protocolGain > 0) {
-                    reserve.repayLoan(poolAddress, positionId, debt.reserveLoan);
-                    reserve.receiveYield(protocolGain);
-                    poolAccounting[poolAddress].totalYieldEarned += protocolGain;
-                } else {
-                    reserve.repayLoan(poolAddress, positionId, returnedAmount);
-                    uint256 shortfall = debt.reserveLoan - returnedAmount;
-                    poolAccounting[poolAddress].totalLossesAbsorbed += shortfall;
-                }
-                
-                debt.settled = true;
-                poolAccounting[poolAddress].reserveLoansOutstanding -= debt.reserveLoan;
-            } else {
-                settlement.protocolYield = returnedAmount;
-                if (yieldReserve != address(0)) {
-                    IERC20 assetToken = IERC20(config.asset);
-                    assetToken.forceApprove(yieldReserve, returnedAmount);
-                    YieldReserveEscrow(yieldReserve).receiveYield(returnedAmount);
-                    poolAccounting[poolAddress].totalYieldEarned += returnedAmount;
-                } else {
-                    IERC20(config.asset).safeTransfer(address(escrow), returnedAmount);
-                    escrow.recordReceivedFunds(returnedAmount);
-                }
-            }
-            
-        } else if (position.status == ILockedPoolTypes.PositionStatus.ACTIVE) {
-            settlement.userPayout = position.expectedMaturityPayout;
-            
-            if (returnedAmount >= position.expectedMaturityPayout) {
-                uint256 yield = returnedAmount - position.expectedMaturityPayout;
-                settlement.protocolYield = yield;
-                
-                IERC20(config.asset).safeTransfer(address(escrow), position.expectedMaturityPayout);
-                escrow.recordReceivedFunds(position.expectedMaturityPayout);
-                
-                if (yield > 0 && yieldReserve != address(0)) {
-                    IERC20 assetToken = IERC20(config.asset);
-                    assetToken.forceApprove(yieldReserve, yield);
-                    YieldReserveEscrow(yieldReserve).receiveYield(yield);
-                    poolAccounting[poolAddress].totalYieldEarned += yield;
-                }
-                
-            } else {
-                IERC20(config.asset).safeTransfer(address(escrow), returnedAmount);
-                escrow.recordReceivedFunds(returnedAmount);
-                
-                uint256 shortfall = position.expectedMaturityPayout - returnedAmount;
-                
-                if (yieldReserve != address(0)) {
-                    YieldReserveEscrow reserve = YieldReserveEscrow(yieldReserve);
-                    if (reserve.getAvailableBalance() >= shortfall) {
-                        reserve.coverShortfall(address(escrow), shortfall);
-                        poolAccounting[poolAddress].totalLossesAbsorbed += shortfall;
-                    }
-                }
-            }
-            
-            position.status = ILockedPoolTypes.PositionStatus.MATURED;
-        }
-        
-        if (totalSPVAllocations[msg.sender] >= position.investedAmount) {
-            totalSPVAllocations[msg.sender] -= position.investedAmount;
-        }
-        if (poolToSPVAllocations[poolAddress][msg.sender] >= position.investedAmount) {
-            poolToSPVAllocations[poolAddress][msg.sender] -= position.investedAmount;
-        }
-        
-        return settlement;
-    }
+    // ==================== ADMIN CONFIG ====================
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ADMIN FUNCTIONS //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Set the yield reserve escrow address
-     * @param reserve_ Yield reserve escrow address
-     */
     function setYieldReserve(address reserve_) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
         if (reserve_ == address(0)) revert InvalidAddress();
         yieldReserve = reserve_;
     }
 
-    /**
-     * @notice Deactivate a pool
-     */
     function deactivatePool(address poolAddress) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) {
         poolConfigs[poolAddress].isActive = false;
     }
 
-    /**
-     * @notice Activate a pool
-     */
     function activatePool(address poolAddress) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) {
         poolConfigs[poolAddress].isActive = true;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    function setFeeManager(address feeManager_) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        if (feeManager_ == address(0)) revert InvalidAddress();
+        feeManager = feeManager_;
+        emit FeeManagerUpdated(feeManager_);
+    }
+
+    function setDefaultDepositFee(uint256 feeBps) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) {
+        if (feeBps > MAX_DEPOSIT_FEE) revert InvalidAmount();
+        defaultDepositFeeBps = feeBps;
+        emit DefaultDepositFeeUpdated(feeBps);
+    }
+
+    function setPoolDepositFee(
+        address poolAddress,
+        uint256 feeBps
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) {
+        if (feeBps > MAX_DEPOSIT_FEE) revert InvalidAmount();
+        poolDepositFeeBps[poolAddress] = feeBps;
+        emit PoolDepositFeeUpdated(poolAddress, feeBps);
+    }
+
+    function getEffectiveDepositFee(address poolAddress) external view returns (uint256) {
+        uint256 poolFee = poolDepositFeeBps[poolAddress];
+        return poolFee > 0 ? poolFee : defaultDepositFeeBps;
+    }
+
+    // ==================== PROTOCOL CAPITAL ====================
 
     /**
-     * @notice Get position details
+     * @dev Deploy protocol capital from YieldReserveEscrow into a pool.
      */
+    function deployProtocolCapital(
+        address poolAddress,
+        uint256 amount
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) nonReentrant {
+        if (yieldReserve == address(0)) revert NoYieldReserve();
+        if (amount == 0) revert InvalidAmount();
+        
+        LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
+        
+        YieldReserveEscrow(yieldReserve).deployToPool(poolAddress, address(escrow), amount);
+        escrow.recordProtocolFundsFromReserve(amount);
+        
+        emit ProtocolCapitalDeployed(poolAddress, amount);
+    }
+
+    function recallProtocolCapital(
+        address poolAddress,
+        uint256 amount
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) nonReentrant {
+        if (yieldReserve == address(0)) revert NoYieldReserve();
+        if (amount == 0) revert InvalidAmount();
+        
+        LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
+        escrow.returnProtocolFundsToReserve(amount);
+        
+        emit ProtocolCapitalRecalled(poolAddress, amount);
+    }
+
+    function getAvailableProtocolCapital(address poolAddress) external view poolExists(poolAddress) returns (uint256) {
+        LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
+        return escrow.protocolFundsFromReserve();
+    }
+
+    function getPoolProtocolFunds(address poolAddress) external view poolExists(poolAddress) returns (
+        uint256 fromReserve,
+        uint256 directDeposit
+    ) {
+        LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
+        return (escrow.protocolFundsFromReserve(), escrow.protocolFundsDirectDeposit());
+    }
+
+    event ProtocolCapitalDeployed(address indexed pool, uint256 amount);
+    event ProtocolCapitalRecalled(address indexed pool, uint256 amount);
+    event PositionOwnershipTransferred(uint256 indexed positionId, address indexed from, address indexed to);
+    event DebtSettled(address indexed pool, uint256 indexed positionId, uint256 reserveLoanRepaid, uint256 penaltyRecorded);
+
+    // ==================== VIEW ====================
+
     function getPosition(uint256 positionId) external view override returns (ILockedPoolTypes.UserPosition memory) {
         return positions[positionId];
     }
 
-    /**
-     * @notice Get user's position IDs for a pool
-     */
     function getUserPositions(
         address poolAddress,
         address user
@@ -1094,16 +818,10 @@ contract LockedPoolManager is
         return userPositionIds[poolAddress][user];
     }
 
-    /**
-     * @notice Get position summary
-     */
     function getPositionSummary(uint256 positionId) external view override returns (ILockedPoolTypes.PositionSummary memory) {
         return LockedPoolLibrary.buildPositionSummary(positions[positionId], block.timestamp);
     }
 
-    /**
-     * @notice Calculate early exit payout
-     */
     function calculateEarlyExitPayout(uint256 positionId) external view override returns (ILockedPoolTypes.EarlyExitCalculation memory) {
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
         if (position.poolAddress == address(0)) revert InvalidPosition();
@@ -1117,9 +835,6 @@ contract LockedPoolManager is
         }
     }
 
-    /**
-     * @notice Get lock tier configuration
-     */
     function getLockTier(
         address poolAddress,
         uint8 tierIndex
@@ -1128,30 +843,18 @@ contract LockedPoolManager is
         return poolTiers[poolAddress][tierIndex];
     }
 
-    /**
-     * @notice Get all tiers for a pool
-     */
     function getPoolTiers(address poolAddress) external view returns (ILockedPoolTypes.LockTier[] memory) {
         return poolTiers[poolAddress];
     }
 
-    /**
-     * @notice Get pool metrics
-     */
     function getPoolMetrics(address poolAddress) external view override returns (ILockedPoolTypes.PoolMetrics memory) {
         return poolMetrics[poolAddress];
     }
 
-    /**
-     * @notice Get pool configuration
-     */
     function getPoolConfig(address poolAddress) external view returns (ILockedPoolTypes.PoolConfig memory) {
         return poolConfigs[poolAddress];
     }
 
-    /**
-     * @notice Calculate interest for given parameters
-     */
     function calculateInterest(
         uint256 principal,
         uint256 apyBps,
@@ -1160,46 +863,53 @@ contract LockedPoolManager is
         return LockedPoolLibrary.calculateInterest(principal, apyBps, durationDays);
     }
 
-    /**
-     * @notice Get total SPV allocation
-     */
     function getTotalSPVAllocation(address spvAddress) external view returns (uint256) {
         return totalSPVAllocations[spvAddress];
     }
 
-    /**
-     * @notice Get pool to SPV allocation
-     */
     function getPoolToSPVAllocation(address poolAddress, address spvAddress) external view returns (uint256) {
         return poolToSPVAllocations[poolAddress][spvAddress];
     }
 
-    /**
-     * @notice Get protocol accounting for a pool
-     */
     function getPoolAccounting(address poolAddress) external view returns (ILockedPoolTypes.PoolProtocolAccounting memory) {
         return poolAccounting[poolAddress];
     }
 
-    /**
-     * @notice Get debt position details
-     */
     function getDebtPosition(uint256 positionId) external view returns (ILockedPoolTypes.DebtPosition memory) {
         return debtPositions[positionId];
     }
 
-    /**
-     * @notice Get all debt position IDs for a pool
-     */
     function getPoolDebtPositions(address poolAddress) external view returns (uint256[] memory) {
         return poolDebtPositionIds[poolAddress];
     }
 
-    /**
-     * @notice Get yield reserve address
-     */
     function getYieldReserve() external view returns (address) {
         return yieldReserve;
     }
-}
 
+    // ==================== DEBT SETTLEMENT ====================
+
+    function settlePoolDebt(
+        address poolAddress,
+        uint256[] calldata positionIds
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) nonReentrant {
+        if (yieldReserve == address(0)) revert NoYieldReserve();
+        LockedPoolManagerLib.settlePoolDebt(
+            poolEscrows, poolAccounting, debtPositions,
+            yieldReserve, poolAddress, positionIds
+        );
+    }
+
+    function getSettleableDebt(address poolAddress) external view returns (
+        uint256[] memory positionIds,
+        uint256[] memory loanAmounts,
+        uint256[] memory penaltyAmounts,
+        uint256 totalLoanSettleable,
+        uint256 totalPenaltySettleable,
+        uint256 escrowAvailable
+    ) {
+        return LockedPoolManagerLib.getSettleableDebt(
+            poolEscrows, debtPositions, poolDebtPositionIds[poolAddress], poolAddress
+        );
+    }
+}

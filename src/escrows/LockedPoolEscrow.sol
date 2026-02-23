@@ -8,22 +8,24 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "../AccessManager.sol";
+import "../interfaces/IFeeManager.sol";
+import "../interfaces/IYieldReserveEscrow.sol";
+import "./YieldReserveEscrow.sol";
 
 /**
  * @title LockedPoolEscrow
- * @dev Secure custody for LockedPool funds
- * @notice Handles principal custody, interest payments, and SPV coordination
+ * @dev Secure custody for a single LockedPool. Holds principal deposits, pays
+ *      interest (upfront or at maturity), processes early-exit penalties, manages
+ *      SPV allocations, and routes yield to YieldReserveEscrow.
  */
 contract LockedPoolEscrow is 
     Initializable, 
     UUPSUpgradeable, 
     ReentrancyGuardUpgradeable 
 {
-    using SafeERC20 for IERC20; 
+    // ==================== STATE ====================
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STATE  //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    using SafeERC20 for IERC20; 
 
     IERC20 public asset;
 
@@ -42,9 +44,16 @@ contract LockedPoolEscrow is
    
     mapping(address => uint256) public spvAllocations;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    uint256 public protocolFundsFromReserve;  
+    uint256 public protocolFundsDirectDeposit;
+    
+    address public feeManager;
+    address public yieldReserve;
+
+    uint256 public depositFeesCollected;
+    uint256 public withdrawalFeesCollected;
+
+    // ==================== EVENTS ====================
 
     event FundsDeposited(address indexed from, uint256 amount);
     event FundsWithdrawn(address indexed to, uint256 amount);
@@ -53,10 +62,18 @@ contract LockedPoolEscrow is
     event SPVAllocation(address indexed spv, uint256 amount);
     event SPVReturn(address indexed spv, uint256 amount);
     event PoolLinked(address indexed lockedPool);
+    
+    event ProtocolFundsReceived(address indexed from, uint256 amount);
+    event ProtocolFundsReleased(address indexed to, uint256 amount);
+    event DustSwept(address indexed feeManager, uint256 amount);
+    event PenaltiesSentToFeeManager(uint256 amount);
+    event DepositFeeCollected(uint256 amount);
+    event WithdrawalFeeCollected(uint256 amount);
+    event FeeManagerUpdated(address indexed feeManager);
+    event YieldReserveUpdated(address indexed yieldReserve);
+    event YieldSentToReserve(uint256 amount);
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// MODIFIERS ///////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== MODIFIERS ====================
 
     modifier onlyLockedPool() {
         require(msg.sender == lockedPool, "LockedPoolEscrow/only pool");
@@ -97,21 +114,14 @@ contract LockedPoolEscrow is
         _;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INITIALIZATION /////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+
+    // ==================== MODIFIERS ====================
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /**
-     * @notice Initialize the LockedPoolEscrow
-     * @param asset_ Underlying stablecoin asset
-     * @param accessManager_ Access manager address
-     * @param poolName_ Pool name for identification
-     */
     function initialize(
         address asset_,
         address accessManager_,
@@ -131,10 +141,6 @@ contract LockedPoolEscrow is
         version = 1;
     }
 
-    /**
-     * @notice Set the locked pool address (one-time only)
-     * @param pool_ The locked pool address
-     */
     function setLockedPool(address pool_) external onlyFactory {
         require(lockedPool == address(0), "LockedPoolEscrow/pool already set");
         require(pool_ != address(0), "LockedPoolEscrow/invalid pool");
@@ -142,47 +148,56 @@ contract LockedPoolEscrow is
         emit PoolLinked(pool_);
     }
     
-    /**
-     * @notice Set the locked pool manager address (one-time only)
-     * @param manager_ The locked pool manager address
-     */
     function setLockedPoolManager(address manager_) external onlyFactory {
         require(manager_ != address(0), "LockedPoolEscrow/invalid manager");
         require(lockedPoolManager == address(0), "LockedPoolEscrow/manager already set");
         lockedPoolManager = manager_;
     }
 
-    /**
-     * @notice Disable upgrades for security
-     */
+    function setFeeManager(address feeManager_) external onlyFactory {
+        require(feeManager_ != address(0), "LockedPoolEscrow/invalid fee manager");
+        feeManager = feeManager_;
+        emit FeeManagerUpdated(feeManager_);
+    }
+
+    function setYieldReserve(address yieldReserve_) external onlyFactory {
+        require(yieldReserve_ != address(0), "LockedPoolEscrow/invalid yield reserve");
+        yieldReserve = yieldReserve_;
+        emit YieldReserveUpdated(yieldReserve_);
+    }
+
     function _authorizeUpgrade(address) internal pure override {
         revert("LockedPoolEscrow/upgrades disabled");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// DEPOSIT & WITHDRAWAL ///////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+ // ==================== Deposit & Withdrawal ====================
 
-    /**
-     * @notice Record deposit and update principal
-     * @param amount Amount deposited
-     */
-    function recordDeposit(uint256 amount) external onlyLockedPoolOrManager {
+    function processDeposit(uint256 amount, uint256 feeBps) external onlyLockedPoolOrManager nonReentrant returns (uint256 netAmount, uint256 fee) {
         require(amount > 0, "LockedPoolEscrow/invalid amount");
         
         uint256 currentBalance = asset.balanceOf(address(this));
         require(currentBalance >= principalHeld + amount, "LockedPoolEscrow/insufficient balance");
+
+        fee = (feeBps > 0 && feeManager != address(0)) ? (amount * feeBps) / 10000 : 0;
+        netAmount = amount - fee;
         
-        principalHeld += amount;
+        principalHeld += netAmount;
         
-        emit FundsDeposited(msg.sender, amount);
+        if (fee > 0) {
+            depositFeesCollected += fee;
+            asset.safeTransfer(feeManager, fee);
+            IFeeManager(feeManager).recordFeeOnly(
+                lockedPool,
+                address(asset),
+                fee,
+                IFeeManager.FeeType.DEPOSIT_FEE
+            );
+            emit DepositFeeCollected(fee);
+        }
+        
+        emit FundsDeposited(msg.sender, netAmount);
     }
 
-    /**
-     * @notice Pay upfront interest to user
-     * @param to User receiving interest
-     * @param amount Interest amount
-     */
     function payInterest(address to, uint256 amount) external onlyLockedPoolOrManager nonReentrant {
         require(to != address(0), "LockedPoolEscrow/invalid recipient");
         require(amount > 0, "LockedPoolEscrow/invalid amount");
@@ -196,11 +211,6 @@ contract LockedPoolEscrow is
         emit InterestPaid(to, amount);
     }
 
-    /**
-     * @notice Withdraw principal to user (at maturity or early exit)
-     * @param to Recipient address
-     * @param amount Amount to withdraw
-     */
     function withdraw(address to, uint256 amount) external onlyLockedPoolOrManager nonReentrant {
         require(to != address(0), "LockedPoolEscrow/invalid recipient");
         require(amount > 0, "LockedPoolEscrow/invalid amount");
@@ -217,10 +227,9 @@ contract LockedPoolEscrow is
         emit FundsWithdrawn(to, amount);
     }
 
-    /**
-     * @notice Record penalty collection and separate from principal
-     * @param amount Penalty amount
-     */
+
+ // ==================== PENALTIES ====================
+
     function recordPenalty(uint256 amount) external onlyLockedPoolOrManager {
         require(principalHeld >= amount, "LockedPoolEscrow/penalty exceeds principal");
         principalHeld -= amount;
@@ -228,10 +237,24 @@ contract LockedPoolEscrow is
         emit PenaltyCollected(amount);
     }
 
-    /**
-     * @notice Transfer penalties to treasury
-     * @param treasury Treasury address
-     */
+    function transferPenaltiesToFeeManager() external onlyOperator nonReentrant {
+        require(feeManager != address(0), "LockedPoolEscrow/fee manager not set");
+        require(penaltiesCollected > 0, "LockedPoolEscrow/no penalties");
+        
+        uint256 amount = penaltiesCollected;
+        penaltiesCollected = 0;
+        
+        asset.forceApprove(feeManager, amount);
+        IFeeManager(feeManager).collectFee(
+            lockedPool,
+            address(asset),
+            amount,
+            IFeeManager.FeeType.EARLY_EXIT_PENALTY
+        );
+        
+        emit PenaltiesSentToFeeManager(amount);
+    }
+
     function transferPenaltiesToTreasury(address treasury) external onlyOperator nonReentrant {
         require(treasury != address(0), "LockedPoolEscrow/invalid treasury");
         require(penaltiesCollected > 0, "LockedPoolEscrow/no penalties");
@@ -242,34 +265,151 @@ contract LockedPoolEscrow is
         asset.safeTransfer(treasury, amount);
     }
 
-    /**
-     * @notice Transfer penalties to yield reserve
-     * @param yieldReserve Yield reserve escrow address
-     */
-    function transferPenaltiesToReserve(address yieldReserve) external onlyOperator nonReentrant {
-        require(yieldReserve != address(0), "LockedPoolEscrow/invalid reserve");
+    function transferPenaltiesToReserve(address yieldReserve_) external onlyOperator nonReentrant {
+        require(yieldReserve_ != address(0), "LockedPoolEscrow/invalid reserve");
         require(penaltiesCollected > 0, "LockedPoolEscrow/no penalties");
         
         uint256 amount = penaltiesCollected;
         penaltiesCollected = 0;
         
-        asset.forceApprove(yieldReserve, amount);
+        asset.forceApprove(yieldReserve_, amount);
         
-        (bool success,) = yieldReserve.call(
+        (bool success,) = yieldReserve_.call(
             abi.encodeWithSignature("receiveYield(uint256)", amount)
         );
         require(success, "LockedPoolEscrow/reserve transfer failed");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// SPV COORDINATION ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
-    /**
-     * @notice Allocate funds to SPV for investment
-     * @param spvAddress SPV address
-     * @param amount Amount to allocate
-     */
+    function sendYieldToReserve(uint256 amount) external onlyLockedPoolOrManager nonReentrant {
+        require(yieldReserve != address(0), "LockedPoolEscrow/yield reserve not set");
+        require(amount > 0, "LockedPoolEscrow/invalid amount");
+        require(principalHeld >= amount, "LockedPoolEscrow/insufficient funds");
+        
+        principalHeld -= amount;
+        
+        asset.forceApprove(yieldReserve, amount);
+        YieldReserveEscrow(yieldReserve).receiveYield(amount);
+        
+        emit YieldSentToReserve(amount);
+    }
+
+    function collectWithdrawalFee(uint256 amount) external onlyLockedPoolOrManager nonReentrant {
+        require(feeManager != address(0), "LockedPoolEscrow/fee manager not set");
+        require(amount > 0, "LockedPoolEscrow/invalid fee amount");
+        require(principalHeld >= amount, "LockedPoolEscrow/fee exceeds principal");
+        
+        principalHeld -= amount;
+        withdrawalFeesCollected += amount;
+        
+        asset.safeTransfer(feeManager, amount);
+        IFeeManager(feeManager).recordFeeOnly(
+            lockedPool,
+            address(asset),
+            amount,
+            IFeeManager.FeeType.WITHDRAWAL_FEE
+        );
+        
+        emit WithdrawalFeeCollected(amount);
+    }
+
+    function receiveProtocolFundsFromAdmin(uint256 amount) external onlyAdmin nonReentrant {
+        require(amount > 0, "LockedPoolEscrow/invalid amount");
+        
+        asset.safeTransferFrom(msg.sender, address(this), amount);
+        protocolFundsDirectDeposit += amount;
+        
+        if (yieldReserve != address(0)) {
+            IYieldReserveEscrow(yieldReserve).recordDirectDeposit(lockedPool, amount);
+        }
+        
+        emit ProtocolFundsReceived(msg.sender, amount);
+    }
+
+    function recordProtocolFundsFromReserve(uint256 amount) external {
+        require(
+            msg.sender == yieldReserve || 
+            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender),
+            "LockedPoolEscrow/unauthorized"
+        );
+        require(amount > 0, "LockedPoolEscrow/invalid amount");
+        
+        protocolFundsFromReserve += amount;
+        
+        emit ProtocolFundsReceived(msg.sender, amount);
+    }
+
+    function returnProtocolFundsToReserve(uint256 amount) external nonReentrant {
+        require(
+            msg.sender == lockedPoolManager ||
+            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender),
+            "LockedPoolEscrow/unauthorized"
+        );
+        require(yieldReserve != address(0), "LockedPoolEscrow/yield reserve not set");
+        require(amount > 0, "LockedPoolEscrow/invalid amount");
+        require(protocolFundsFromReserve >= amount, "LockedPoolEscrow/exceeds reserve funds");
+        
+        protocolFundsFromReserve -= amount;
+        
+        asset.forceApprove(yieldReserve, amount);
+        IYieldReserveEscrow(yieldReserve).receiveRecalledFunds(lockedPool, amount);
+        
+        emit ProtocolFundsReleased(yieldReserve, amount);
+    }
+
+    function releaseDirectDepositFunds(address to, uint256 amount) external onlyAdmin nonReentrant {
+        require(to != address(0), "LockedPoolEscrow/invalid recipient");
+        require(amount > 0, "LockedPoolEscrow/invalid amount");
+        require(protocolFundsDirectDeposit >= amount, "LockedPoolEscrow/exceeds direct deposits");
+        
+        protocolFundsDirectDeposit -= amount;
+        
+        asset.safeTransfer(to, amount);
+        
+        if (yieldReserve != address(0)) {
+            IYieldReserveEscrow(yieldReserve).recordDirectDepositWithdrawn(lockedPool, amount);
+        }
+        
+        emit ProtocolFundsReleased(to, amount);
+    }
+
+    function getProtocolFundsHeld() external view returns (uint256) {
+        return protocolFundsFromReserve + protocolFundsDirectDeposit;
+    }
+
+    function sweepDust() external onlyOperator nonReentrant {
+        require(feeManager != address(0), "LockedPoolEscrow/fee manager not set");
+        
+        uint256 actualBalance = asset.balanceOf(address(this));
+        uint256 expectedBalance = principalHeld + penaltiesCollected + protocolFundsFromReserve + protocolFundsDirectDeposit;
+        
+        require(actualBalance > expectedBalance, "LockedPoolEscrow/no dust to sweep");
+        
+        uint256 dust = actualBalance - expectedBalance;
+        
+        uint256 minThreshold = IFeeManager(feeManager).getMinSweepThreshold();
+        require(dust >= minThreshold, "LockedPoolEscrow/dust below threshold");
+        
+        asset.safeTransfer(feeManager, dust);
+        IFeeManager(feeManager).recordFeeOnly(
+            lockedPool,
+            address(asset),
+            dust,
+            IFeeManager.FeeType.OTHER
+        );
+        
+        emit DustSwept(feeManager, dust);
+    }
+
+    function getSweepableDust() external view returns (uint256 dust) {
+        uint256 actualBalance = asset.balanceOf(address(this));
+        uint256 expectedBalance = principalHeld + penaltiesCollected + protocolFundsFromReserve + protocolFundsDirectDeposit;
+        
+        if (actualBalance > expectedBalance) {
+            return actualBalance - expectedBalance;
+        }
+        return 0;
+    }
+
     function allocateToSPV(address spvAddress, uint256 amount) external onlyOperator nonReentrant {
         require(spvAddress != address(0), "LockedPoolEscrow/invalid SPV");
         require(amount > 0, "LockedPoolEscrow/invalid amount");
@@ -283,10 +423,6 @@ contract LockedPoolEscrow is
         emit SPVAllocation(spvAddress, amount);
     }
     
-    /**
-     * @notice Receive funds back from SPV
-     * @param amount Amount received
-     */
     function receiveSPVReturn(uint256 amount) external nonReentrant {
         require(
             msg.sender == lockedPoolManager ||
@@ -302,10 +438,6 @@ contract LockedPoolEscrow is
         emit SPVReturn(msg.sender, amount);
     }
 
-    /**
-     * @notice Record received funds without transfer (when manager transfers directly)
-     * @param amount Amount to record
-     */
     function recordReceivedFunds(uint256 amount) external {
         require(msg.sender == lockedPoolManager, "LockedPoolEscrow/only manager");
         require(amount > 0, "LockedPoolEscrow/invalid amount");
@@ -314,10 +446,6 @@ contract LockedPoolEscrow is
         
         emit SPVReturn(msg.sender, amount);
     }
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
     function getPrincipalHeld() external view returns (uint256) {
         return principalHeld;
@@ -331,6 +459,14 @@ contract LockedPoolEscrow is
         return penaltiesCollected;
     }
 
+    function getProtocolFundsFromReserve() external view returns (uint256) {
+        return protocolFundsFromReserve;
+    }
+
+    function getProtocolFundsDirectDeposit() external view returns (uint256) {
+        return protocolFundsDirectDeposit;
+    }
+
     function getSPVAllocation(address spvAddress) external view returns (uint256) {
         return spvAllocations[spvAddress];
     }
@@ -339,17 +475,28 @@ contract LockedPoolEscrow is
         return asset.balanceOf(address(this));
     }
 
+    function getExpectedBalance() external view returns (uint256) {
+        return principalHeld + penaltiesCollected + protocolFundsFromReserve + protocolFundsDirectDeposit;
+    }
+
+    function getDepositFeesCollected() external view returns (uint256) {
+        return depositFeesCollected;
+    }
+
+    function getWithdrawalFeesCollected() external view returns (uint256) {
+        return withdrawalFeesCollected;
+    }
+
+    function getTotalFeesCollected() external view returns (uint256) {
+        return depositFeesCollected + withdrawalFeesCollected;
+    }
+
     function getVersion() external view returns (uint256) {
         return version;
     }
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ADMIN FUNCTIONS ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
     function updatePoolName(string memory newPoolName) external onlyAdmin {
         require(bytes(newPoolName).length > 0, "LockedPoolEscrow/invalid pool name");
         poolName = newPoolName;
     }
 }
-

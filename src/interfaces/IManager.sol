@@ -3,8 +3,13 @@ pragma solidity ^0.8.22;
 
 import "../types/IPoolTypes.sol";
 
+/// @title IPoolManager
+/// @dev Interface for the Single-Asset (deal) pool manager: lifecycle operations, coupon handling,
+///      deposit/withdrawal routing, and pool status queries.
 interface IPoolManager {
-    // Custom Errors
+
+    // ==================== ERRORS ====================
+
     error CallerNotPool();
     error InvalidPool();
     error OnlyFactory();
@@ -53,7 +58,8 @@ interface IPoolManager {
     error WithdrawalNotAllowed();
     error SlippageProtectionTriggered();
 
-    
+    // ==================== EVENTS ====================
+
     event Deposit(address liquidityPool, address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
     event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
     event InvestmentConfirmed(uint256 actualAmount, string proofHash);
@@ -65,6 +71,8 @@ interface IPoolManager {
     event EmergencyExit(address indexed caller, uint256 timestamp);
     event CouponClaimed(address indexed pool, address indexed user, uint256 amount);
     
+    // ==================== STATE ACCESSORS ====================
+
     function escrow() external view returns (address);
     function config() external view returns (IPoolTypes.PoolConfig memory);
     function status() external view returns (IPoolTypes.PoolStatus);
@@ -75,14 +83,20 @@ interface IPoolManager {
     function userDepositTime(address user) external view returns (uint256);
     function poolTotalRaised(address pool) external view returns (uint256);
     
+    // ==================== DEPOSIT / WITHDRAW ====================
+
     function handleDeposit(address liquidityPool, uint256 assets, address receiver, address sender) external returns (uint256 shares);
     function handleWithdraw(address liquidityPool, uint256 assets, address receiver, address owner, address sender) external returns (uint256 shares);
     function calculateTotalAssets() external view returns (uint256);
     
+    // ==================== LIFECYCLE ====================
+
     function processInvestment(address liquidityPool, uint256 actualAmount, string memory proofHash) external;
     function processCouponPayment(address poolAddress, uint256 amount) external;
     function processMaturity(address poolAddress, uint256 finalAmount) external;
     
+    // ==================== COUPON ====================
+
     function claimUserCoupon(address liquidityPool, address user) external returns (uint256);
     
     function calculateUserReturn(address user) external view returns (uint256);
@@ -90,11 +104,12 @@ interface IPoolManager {
     function getUserAvailableCoupon(address liquidityPool, address user) external view returns (uint256);
     function claimMaturityEntitlement(address user) external view returns (uint256);
     
+    // ==================== EMERGENCY / PAUSE ====================
+
     function emergencyExit() external;
     function pausePool(address liquidityPool) external;
     function unpausePool(address liquidityPool) external;
     
-
     function closeEpoch(address liquidityPool) external;
     
     function initializePool(address pool, IPoolTypes.PoolConfig memory poolConfig) external;
@@ -105,15 +120,11 @@ interface IPoolManager {
     function getExpectedReturn() external view returns (uint256);
     function getPoolStatus() external view returns (uint8);
     
-    // Coupon tracking functions
     function getUnclaimedCoupons(address liquidityPool) external view returns (uint256);
 
-    
-    // Upgrade management functions
     function setTimelockController(address newTimelockController) external;
     function version() external view returns (uint256);
     
-    // Additional events for upgradeability
     event ManagerUpgraded(address indexed oldImplementation, address indexed newImplementation, uint256 version);
     event TimelockControllerUpdated(address indexed oldController, address indexed newController);
 }

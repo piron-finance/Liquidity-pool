@@ -3,12 +3,8 @@ pragma solidity ^0.8.22;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/**
- * @title MockERC20
- * @dev Mock ERC20 token for testing purposes
- * @notice Provides additional functionality for testing scenarios
- */
 contract MockERC20 is ERC20 {
     uint8 private _decimals;
     
@@ -37,10 +33,6 @@ contract MockERC20 is ERC20 {
     }
 }
 
-/**
- * @title MockManager
- * @dev Mock manager contract for testing LiquidityPool in isolation
- */
 contract MockManager {
     mapping(address => bool) public pools;
     
@@ -53,19 +45,15 @@ contract MockManager {
     }
     
     function handleDeposit(address pool, address user, uint256 amount) external {
-        // Mock implementation
     }
     
     function handleWithdrawal(address pool, address user, uint256 amount) external {
-        // Mock implementation
     }
 }
 
-/**
- * @title MockPoolEscrow
- * @dev Mock escrow contract for testing LiquidityPool in isolation
- */
 contract MockPoolEscrow {
+    using SafeERC20 for IERC20;
+    
     IERC20 public asset;
     address public manager;
     address public pool;
@@ -81,15 +69,18 @@ contract MockPoolEscrow {
         pool = _pool;
     }
     
-    function receiveDeposit(address user, uint256 amount) external {
-        balances[user] += amount;
-        asset.transferFrom(msg.sender, address(this), amount);
+    function processDeposit(address user, uint256 amount, uint256 feeBps) external returns (uint256 netAmount, uint256 fee) {
+        fee = (amount * feeBps) / 10000;
+        netAmount = amount - fee;
+        balances[user] += netAmount;
+        asset.safeTransferFrom(msg.sender, address(this), amount);
+        return (netAmount, fee);
     }
     
     function releaseFunds(address recipient, uint256 amount) external {
         require(balances[recipient] >= amount, "Insufficient balance");
         balances[recipient] -= amount;
-        asset.transfer(recipient, amount);
+        asset.safeTransfer(recipient, amount);
     }
     
     function getBalance() external view returns (uint256) {
@@ -97,10 +88,6 @@ contract MockPoolEscrow {
     }
 }
 
-/**
- * @title MockAccessManager
- * @dev Mock access manager for testing contracts that depend on AccessManager
- */
 contract MockAccessManager {
     mapping(bytes32 => mapping(address => bool)) public roles;
     
@@ -138,10 +125,6 @@ contract MockAccessManager {
     }
 }
 
-/**
- * @title MockUpgradeable
- * @dev Mock upgradeable contract for testing upgrade scenarios
- */
 contract MockUpgradeable {
     address public implementation;
     bool public upgraded;

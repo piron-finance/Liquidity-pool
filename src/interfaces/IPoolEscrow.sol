@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
+/// @title IPoolEscrow
+/// @dev Interface for deal-pool escrow: fund locking, release, SPV transfers, coupon tracking.
 interface IPoolEscrow {
+
+    // ==================== ENUMS ====================
+
     enum TransferType {
         TO_SPV,
         FROM_SPV,
@@ -10,6 +15,8 @@ interface IPoolEscrow {
         DISCOUNT_RELEASE
     }
     
+    // ==================== STRUCTS ====================
+
     struct Transfer {
         TransferType transferType;
         address recipient;
@@ -20,6 +27,8 @@ interface IPoolEscrow {
         uint256 timestamp;
     }
     
+    // ==================== EVENTS ====================
+
     event TransferProposed(
         bytes32 indexed transferId,
         TransferType transferType,
@@ -51,9 +60,10 @@ interface IPoolEscrow {
     function lockFunds(uint256 amount) external;
     function releaseFunds(address recipient, uint256 amount) external;
     function getBalance() external view returns (uint256);
-
     
-    function receiveDeposit(address user, uint256 amount) external;
+    function processDeposit(address user, uint256 amount, uint256 feeBps) external returns (uint256 netAmount, uint256 fee);
+    
+    function collectWithdrawalFee(uint256 amount) external;
 
     function trackCouponPayment(uint256 amount) external;
 
@@ -61,7 +71,6 @@ interface IPoolEscrow {
 
     function claimCoupon(address user, uint256 amount) external;
     
-
     function withdrawForInvestment(uint256 amount) external returns (bytes32 transferId);
     function canWithdrawForInvestment(uint256 amount) external view returns (bool);
 } 

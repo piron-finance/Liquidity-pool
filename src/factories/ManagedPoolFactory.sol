@@ -8,6 +8,9 @@ import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol"
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "../interfaces/IPoolRegistry.sol";
+import "../interfaces/IFeeManager.sol";
+import "../interfaces/IYieldReserveEscrow.sol";
+import "../escrows/YieldReserveEscrow.sol";
 import "../StableYieldManager.sol";
 import "../LockedPoolManager.sol";
 import "../managed/StableYieldPool.sol";
@@ -20,60 +23,50 @@ import "../types/ILockedPoolTypes.sol";
 
 /**
  * @title ManagedPoolFactory
- * @dev factory for deploying  managed pools
- * @notice Deploy managed pools for any approved stablecoin with flexible configuration
+ * @dev Deploys StableYieldPool and LockedPool pairs with their escrows using
+ *      minimal proxies (Clones). Registers pools with the registry and managers,
+ *      and configures escrow-level fee manager and yield reserve addresses.
  */
 contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
-    
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STATE VARIABLES //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
+    // ==================== STATE ====================
+    
     IPoolRegistry public registry;
-    
     AccessManager public accessManager;
-
     StableYieldManager public stableYieldManager;
     LockedPoolManager public lockedPoolManager;
-
     address public timelockController;
-
     uint256 public version;
-
     address public stableYieldPoolImplementation;
     address public managedPoolEscrowImplementation;
-    
     address public lockedPoolImplementation;
     address public lockedPoolEscrowImplementation;
-    
+    address public feeManager;
+    address public yieldReserve;
     uint256 public deploymentNonce;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STRUCTS ////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== STRUCTS ====================
 
-    struct PoolDeploymentConfig { // delete unused props
-        address asset;              // CNGN, KES, USDT, USDC, etc.
-        string poolName;            // "Piron Nigeria Treasury Pool"
-        string poolSymbol;          // "pCNGN-TREAS"
-        address spvAddress;         // SPV for this pool
-        uint256[] supportedTenors;  // Optional: [90, 180, 270, 360] days (empty for flexible-only pools)
-        uint256 minInvestment;      // 1000 * 10^decimals
-        address[] underlyingPools;  // Optional: existing T-bill pools to aggregate . mark to delete
+    /// @dev Configuration for deploying a StableYieldPool + escrow pair.
+    struct PoolDeploymentConfig {
+        address asset;
+        string poolName;
+        string poolSymbol;
+        address spvAddress;
+        uint256 minInvestment;
     }
 
+    /// @dev Configuration for deploying a LockedPool + escrow pair with lock tiers.
     struct LockedPoolDeploymentConfig {
-        address asset;              // CNGN, KES, USDT, USDC, etc.
-        string poolName;            // "Piron CNGN Treasury Locked Pool"
-        string poolSymbol;          // "pCNGN-LOCK"
-        address spvAddress;         // SPV for this pool
-        uint256 minInvestment;      // Minimum deposit
-        ILockedPoolTypes.LockTier[] initialTiers;  // Multiple tenors: 3mo, 6mo, 12mo etc.
+        address asset;
+        string poolName;
+        string poolSymbol;
+        address spvAddress;
+        uint256 minInvestment;
+        ILockedPoolTypes.LockTier[] initialTiers;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== EVENTS ====================
 
     event StableYieldPoolCreated(
         address indexed poolAddress,
@@ -97,10 +90,8 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         address indexed newImplementation
     );
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// MODIFIERS ///////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-    
+    // ==================== MODIFIERS ====================
+
     modifier onlyPoolCreator() {
         require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), msg.sender), "ManagedPoolFactory/not pool creator");
         _;
@@ -111,24 +102,14 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         _;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INITIALIZATION /////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== INITIALIZER ====================
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /**
-     * @notice Initialize the ManagedPoolFactory contract
-     * @param _registry PoolRegistry contract address
-     * @param _accessManager AccessManager contract address
-     * @param _stableYieldManager StableYieldManager contract address
-     * @param _timelockController TimelockController contract address
-     * @param _stableYieldPoolImplementation StableYieldPool implementation address
-     * @param _managedPoolEscrowImplementation ManagedPoolEscrow implementation address
-     */
+    /// @dev Sets registry, access manager, and initial implementations.
     function initialize(
         address _registry,
         address _accessManager,
@@ -140,9 +121,6 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         require(_registry != address(0), "ManagedPoolFactory/invalid registry");
         require(_accessManager != address(0), "ManagedPoolFactory/invalid access manager");
         require(_timelockController != address(0), "ManagedPoolFactory/invalid timelock controller");
-        // StableYieldManager is optional - only required for creating StableYield pools
-        // StableYieldPool implementation is optional - only required for creating StableYield pools
-        // ManagedPoolEscrow implementation is optional - only required for creating StableYield pools
         
         __UUPSUpgradeable_init();
         
@@ -152,7 +130,6 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         version = 1;
         deploymentNonce = 0;
         
-        // Set optional StableYield components if provided
         if (_stableYieldManager != address(0)) {
             stableYieldManager = StableYieldManager(_stableYieldManager);
         }
@@ -164,9 +141,8 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         }
     }
 
-    /**
-     * @notice Authorize contract upgrades (timelock only)
-     */
+    // ==================== UPGRADE ====================
+
     function _authorizeUpgrade(address newImplementation) internal override {
         require(msg.sender == timelockController, "ManagedPoolFactory/only timelock");
         require(newImplementation != address(0), "ManagedPoolFactory/invalid implementation");
@@ -174,16 +150,9 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         version ++;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// POOL DEPLOYMENT ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== POOL CREATION ====================
 
-    /**
-     * @notice Deploy a new stable yield pool
-     * @param config Deployment configuration
-     * @return poolAddress Address of deployed StableYieldPool
-     * @return escrowAddress Address of deployed ManagedPoolEscrow
-     */
+    /// @dev Deploys a StableYieldPool + StableYieldEscrow pair, registers with manager and registry.
     function createStableYieldPool(PoolDeploymentConfig memory config) 
         external 
         onlyPoolCreator() 
@@ -201,6 +170,15 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         StableYieldEscrow(escrowAddress).setStableYieldPool(poolAddress);
         StableYieldEscrow(escrowAddress).setStableYieldManager(address(stableYieldManager));
         
+        if (feeManager != address(0)) {
+            StableYieldEscrow(escrowAddress).setFeeManager(feeManager);
+            IFeeManager(feeManager).authorizeCollector(escrowAddress, true);
+        }
+        if (yieldReserve != address(0)) {
+            StableYieldEscrow(escrowAddress).setYieldReserve(yieldReserve);
+            YieldReserveEscrow(yieldReserve).authorizeEscrow(escrowAddress, true);
+        }
+        
         stableYieldManager.registerPool(
             poolAddress,
             escrowAddress,
@@ -214,12 +192,7 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         emit StableYieldPoolCreated(poolAddress, escrowAddress, config.asset, config.poolName, config.spvAddress);
     }
 
-    /**
-     * @notice Deploy a new locked pool
-     * @param config Deployment configuration
-     * @return poolAddress Address of deployed LockedPool
-     * @return escrowAddress Address of deployed LockedPoolEscrow
-     */
+    /// @dev Deploys a LockedPool + LockedPoolEscrow pair, registers with manager, and configures tiers.
     function createLockedPool(LockedPoolDeploymentConfig memory config) 
         external 
         onlyPoolCreator() 
@@ -235,6 +208,15 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         
         LockedPoolEscrow(escrowAddress).setLockedPool(poolAddress);
         LockedPoolEscrow(escrowAddress).setLockedPoolManager(address(lockedPoolManager));
+        
+        if (feeManager != address(0)) {
+            LockedPoolEscrow(escrowAddress).setFeeManager(feeManager);
+            IFeeManager(feeManager).authorizeCollector(escrowAddress, true);
+        }
+        if (yieldReserve != address(0)) {
+            LockedPoolEscrow(escrowAddress).setYieldReserve(yieldReserve);
+            YieldReserveEscrow(yieldReserve).authorizeEscrow(escrowAddress, true);
+        }
         
         lockedPoolManager.registerPool(
             poolAddress,
@@ -257,9 +239,7 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         return (poolAddress, escrowAddress);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INTERNAL DEPLOYMENT ////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== INTERNAL DEPLOY HELPERS ====================
 
     function _deployManagedPoolEscrow(PoolDeploymentConfig memory config) 
         internal 
@@ -361,9 +341,7 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         return poolAddress;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VALIDATION ///////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== VALIDATION ====================
 
     function _validateDeploymentConfig(PoolDeploymentConfig memory config) internal view {
         require(registry.isApprovedAsset(config.asset), "ManagedPoolFactory/asset not approved");
@@ -371,25 +349,7 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         require(bytes(config.poolName).length > 0, "ManagedPoolFactory/invalid pool name");
         require(bytes(config.poolSymbol).length > 0, "ManagedPoolFactory/invalid pool symbol");
         require(config.minInvestment > 0, "ManagedPoolFactory/invalid min investment");
-
-        if (config.supportedTenors.length > 0) {
-            for (uint256 i = 0; i < config.supportedTenors.length; i++) {
-                uint256 tenor = config.supportedTenors[i];
-                require(
-                    tenor == 90 || tenor == 180 || tenor == 270 || tenor == 360,
-                    "ManagedPoolFactory/invalid tenor"
-                );
-            }
-        }
         
-        if (config.underlyingPools.length > 0) {
-            for (uint256 i = 0; i < config.underlyingPools.length; i++) {
-                require(
-                    registry.isRegisteredPool(config.underlyingPools[i]),
-                    "ManagedPoolFactory/invalid underlying pool"
-                );
-            }
-        }
     }
 
     function _validateLockedPoolConfig(LockedPoolDeploymentConfig memory config) internal view {
@@ -410,14 +370,9 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         }
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ADMIN FUNCTIONS ////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== ADMIN CONFIGURATION ====================
 
-    /**
-     * @notice Update StableYieldPool implementation
-     * @param newImplementation New implementation address
-     */
+    /// @dev Updates the implementation address for new StableYieldPool clones.
     function updateStableYieldPoolImplementation(address newImplementation) external onlyAdmin {
         require(newImplementation != address(0), "ManagedPoolFactory/invalid implementation");
         
@@ -427,10 +382,6 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         emit ImplementationUpdated("StableYieldPool", oldImplementation, newImplementation);
     }
     
-    /**
-     * @notice Update ManagedPoolEscrow implementation
-     * @param newImplementation New implementation address
-     */
     function updateManagedPoolEscrowImplementation(address newImplementation) external onlyAdmin {
         require(newImplementation != address(0), "ManagedPoolFactory/invalid implementation");
         
@@ -440,19 +391,21 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         emit ImplementationUpdated("ManagedPoolEscrow", oldImplementation, newImplementation);
     }
 
-    /**
-     * @notice Set LockedPoolManager address
-     * @param _lockedPoolManager LockedPoolManager contract address
-     */
     function setLockedPoolManager(address _lockedPoolManager) external onlyAdmin {
         require(_lockedPoolManager != address(0), "ManagedPoolFactory/invalid locked pool manager");
         lockedPoolManager = LockedPoolManager(_lockedPoolManager);
     }
 
-    /**
-     * @notice Update LockedPool implementation
-     * @param newImplementation New implementation address
-     */
+    function setFeeManager(address _feeManager) external onlyAdmin {
+        require(_feeManager != address(0), "ManagedPoolFactory/invalid fee manager");
+        feeManager = _feeManager;
+    }
+
+    function setYieldReserve(address _yieldReserve) external onlyAdmin {
+        require(_yieldReserve != address(0), "ManagedPoolFactory/invalid yield reserve");
+        yieldReserve = _yieldReserve;
+    }
+
     function updateLockedPoolImplementation(address newImplementation) external onlyAdmin {
         require(newImplementation != address(0), "ManagedPoolFactory/invalid implementation");
         
@@ -462,10 +415,6 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         emit ImplementationUpdated("LockedPool", oldImplementation, newImplementation);
     }
 
-    /**
-     * @notice Update LockedPoolEscrow implementation
-     * @param newImplementation New implementation address
-     */
     function updateLockedPoolEscrowImplementation(address newImplementation) external onlyAdmin {
         require(newImplementation != address(0), "ManagedPoolFactory/invalid implementation");
         
@@ -475,14 +424,9 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         emit ImplementationUpdated("LockedPoolEscrow", oldImplementation, newImplementation);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// UTILITY FUNCTIONS ///////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== VIEW FUNCTIONS ====================
 
-    /**
-     * @notice Get all managed pools created by this factory
-     * @return pools Array of managed pool addresses
-     */
+    /// @dev Returns all managed pools registered in the registry.
     function getAllManagedPools() external view returns (address[] memory pools) {
         uint256 totalPools = registry.getTotalStableYieldPools();
         pools = new address[](totalPools);
@@ -492,28 +436,14 @@ contract ManagedPoolFactory is Initializable, UUPSUpgradeable {
         return pools;
     }
     
-    /**
-     * @notice Check if pool was created by this factory
-     * @param poolAddress Pool address to check
-     * @return isManaged Whether pool is a managed pool
-     */
     function isManagedPool(address poolAddress) external view returns (bool isManaged) {
         return registry.isManagedPool(poolAddress);
     }
     
-    /**
-     * @notice Get managed pool count
-     * @return count Number of managed pools
-     */
     function getTotalManagedPools() external view returns (uint256 count) {
         return registry.getTotalStableYieldPools();
     }
     
-    /**
-     * @notice Get managed pool at index
-     * @param index Pool index
-     * @return poolAddress Pool address
-     */
     function getManagedPoolAtIndex(uint256 index) external view returns (address poolAddress) {
         return registry.getManagedPoolAtIndex(index);
     }

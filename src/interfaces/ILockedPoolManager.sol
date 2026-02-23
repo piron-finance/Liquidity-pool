@@ -3,15 +3,12 @@ pragma solidity ^0.8.22;
 
 import "../types/ILockedPoolTypes.sol";
 
-/**
- * @title ILockedPoolManager
- * @dev Interface for locked pool manager operations
- */
+/// @title ILockedPoolManager
+/// @dev Interface for managing locked (fixed-term) pools: tier configuration, deposits,
+///      redemptions, early exits, rollovers, and SPV allocations.
 interface ILockedPoolManager {
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== EVENTS ====================
 
     event PoolRegistered(
         address indexed poolAddress,
@@ -96,9 +93,18 @@ interface ILockedPoolManager {
         uint256 interestHandled
     );
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ADMIN FUNCTIONS //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    event DepositFeeCollected(
+        address indexed poolAddress,
+        address indexed depositor,
+        uint256 amount,
+        uint256 fee
+    );
+
+    event FeeManagerUpdated(address indexed feeManager);
+    event DefaultDepositFeeUpdated(uint256 feeBps);
+    event PoolDepositFeeUpdated(address indexed pool, uint256 feeBps);
+
+    // ==================== POOL SETUP ====================
 
     function registerPool(
         address poolAddress,
@@ -126,9 +132,7 @@ interface ILockedPoolManager {
         uint256 newApyBps
     ) external;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// USER FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== DEPOSIT / REDEEM / EXIT ====================
 
     function processDeposit(
         address poolAddress,
@@ -150,9 +154,17 @@ interface ILockedPoolManager {
         address caller
     ) external returns (uint256 payout, uint256 penalty);
 
+    // ==================== ROLLOVER ====================
+
     function setAutoRollover(
         uint256 positionId,
         bool enabled,
+        address caller
+    ) external;
+    
+    function transferPositionOwnership(
+        uint256 positionId,
+        address newOwner,
         address caller
     ) external;
 
@@ -164,9 +176,7 @@ interface ILockedPoolManager {
         uint256[] calldata positionIds
     ) external returns (uint256[] memory newPositionIds);
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// SPV FUNCTIONS ////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== SPV ALLOCATION ====================
 
     function createPendingAllocation(
         address poolAddress,
@@ -179,9 +189,7 @@ interface ILockedPoolManager {
         uint256 returnedAmount
     ) external;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== VIEW FUNCTIONS ====================
 
     function getPosition(
         uint256 positionId
@@ -215,4 +223,3 @@ interface ILockedPoolManager {
         uint256 durationDays
     ) external pure returns (uint256);
 }
-

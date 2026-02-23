@@ -5,21 +5,17 @@ import "../types/ILockedPoolTypes.sol";
 
 /**
  * @title LockedPoolLibrary
- * @dev Library for locked pool calculations
- * @notice Handles interest calculations, early exit payouts, and position management
+ * @dev Pure helpers for locked pool math: interest calculations, early-exit penalties,
+ *      position building, tier validation, and redemption checks.
  */
 library LockedPoolLibrary {
 
     uint256 public constant DAYS_PER_YEAR = 365;
     uint256 public constant BPS_DENOMINATOR = 10000;
 
-    /**
-     * @notice Calculate interest for a locked position
-     * @param principal Principal amount
-     * @param apyBps Annual percentage yield in basis points
-     * @param durationDays Lock duration in days
-     * @return interest Calculated interest amount
-     */
+    // ==================== INTEREST ====================
+
+    /// @dev Simple interest = (principal * apyBps * durationDays) / (BPS * 365).
     function calculateInterest(
         uint256 principal,
         uint256 apyBps,
@@ -28,13 +24,7 @@ library LockedPoolLibrary {
         return (principal * apyBps * durationDays) / (BPS_DENOMINATOR * DAYS_PER_YEAR);
     }
 
-    /**
-     * @notice Calculate pro-rata interest based on time elapsed
-     * @param fullInterest Full interest for complete term
-     * @param timeElapsed Time elapsed since lock start
-     * @param totalDuration Total lock duration
-     * @return earnedInterest Pro-rata interest earned
-     */
+    /// @dev Returns the linearly accrued portion of fullInterest based on elapsed time.
     function calculateProRataInterest(
         uint256 fullInterest,
         uint256 timeElapsed,
@@ -46,38 +36,35 @@ library LockedPoolLibrary {
         return (fullInterest * timeElapsed) / totalDuration;
     }
 
-    /**
-     * @notice Calculate early exit payout for upfront interest position
-     * @param position User position
-     * @param tier Lock tier configuration
-     * @return result Early exit calculation result
-     */
+    // ==================== EARLY EXIT ====================
+
+    /// @dev Early-exit for upfront-interest positions: penalty applied to total value received.
     function calculateEarlyExitUpfront(
         ILockedPoolTypes.UserPosition memory position,
         ILockedPoolTypes.LockTier memory tier
     ) public pure returns (ILockedPoolTypes.EarlyExitCalculation memory result) {
-        uint256 valueAtExit = position.investedAmount;  // exit here refers to time of exit not maturity
+        uint256 totalValueReceived = position.investedAmount + position.fullInterestAmount;
+        uint256 penalty = (totalValueReceived * tier.earlyExitPenaltyBps) / BPS_DENOMINATOR;
         
-        uint256 penalty = (valueAtExit * tier.earlyExitPenaltyBps) / BPS_DENOMINATOR;
-        uint256 payout = valueAtExit - penalty;
+        uint256 payout;
+        if (penalty >= position.investedAmount) {
+            payout = 0;
+            penalty = position.investedAmount;
+        } else {
+            payout = position.investedAmount - penalty;
+        }
         
         result = ILockedPoolTypes.EarlyExitCalculation({
             payout: payout,
             penalty: penalty,
             interestEarned: position.fullInterestAmount,
-            valueAtExit: valueAtExit
+            valueAtExit: totalValueReceived
         });
         
         return result;
     }
 
-    /**
-     * @notice Calculate early exit payout for maturity interest position
-     * @param position User position
-     * @param tier Lock tier configuration
-     * @param currentTime Current timestamp
-     * @return result Early exit calculation result
-     */
+    /// @dev Early-exit for at-maturity-interest positions: pro-rata interest + penalty.
     function calculateEarlyExitMaturity(
         ILockedPoolTypes.UserPosition memory position,
         ILockedPoolTypes.LockTier memory tier,
@@ -107,13 +94,9 @@ library LockedPoolLibrary {
         return result;
     }
 
-    /**
-     * @notice Calculate invested amount based on interest payment choice
-     * @param principal Principal deposited
-     * @param interestAmount Calculated interest
-     * @param paymentChoice Upfront or maturity
-     * @return investedAmount Amount to send to SPV
-     */
+    // ==================== INVESTED AMOUNT / PAYOUT ====================
+
+    /// @dev For upfront interest, investedAmount = principal - interest (interest paid immediately).
     function calculateInvestedAmount(
         uint256 principal,
         uint256 interestAmount,
@@ -125,13 +108,6 @@ library LockedPoolLibrary {
         return principal; 
     }
 
-    /**
-     * @notice Calculate expected maturity payout
-     * @param principal Principal deposited
-     * @param interestAmount Calculated interest
-     * @param paymentChoice Upfront or maturity
-     * @return expectedPayout Amount user receives at maturity
-     */
     function calculateExpectedMaturityPayout(
         uint256 principal,
         uint256 interestAmount,
@@ -143,12 +119,8 @@ library LockedPoolLibrary {
         return principal + interestAmount;
     }
 
-    /**
-     * @notice Check if position can be redeemed
-     * @param position User position
-     * @param currentTime Current timestamp
-     * @return canRedeem True if matured and not yet redeemed
-     */
+    // ==================== STATUS CHECKS ====================
+
     function canRedeem(
         ILockedPoolTypes.UserPosition memory position,
         uint256 currentTime
@@ -157,12 +129,6 @@ library LockedPoolLibrary {
                position.status == ILockedPoolTypes.PositionStatus.ACTIVE;
     }
 
-    /**
-     * @notice Check if position can early exit
-     * @param position User position
-     * @param currentTime Current timestamp
-     * @return canExit True if active and before maturity
-     */
     function canEarlyExit(
         ILockedPoolTypes.UserPosition memory position,
         uint256 currentTime
@@ -171,12 +137,6 @@ library LockedPoolLibrary {
                position.status == ILockedPoolTypes.PositionStatus.ACTIVE;
     }
 
-    /**
-     * @notice Calculate days remaining until maturity
-     * @param lockEnd Lock end timestamp
-     * @param currentTime Current timestamp
-     * @return daysRemaining Days until maturity (0 if matured)
-     */
     function calculateDaysRemaining(
         uint256 lockEnd,
         uint256 currentTime
@@ -185,12 +145,9 @@ library LockedPoolLibrary {
         return (lockEnd - currentTime) / 1 days;
     }
 
-    /**
-     * @notice Build position summary
-     * @param position User position
-     * @param currentTime Current timestamp
-     * @return summary Position summary struct
-     */
+    // ==================== POSITION SUMMARY ====================
+
+    /// @dev Builds a read-only summary struct for front-end display.
     function buildPositionSummary(
         ILockedPoolTypes.UserPosition memory position,
         uint256 currentTime
@@ -222,11 +179,9 @@ library LockedPoolLibrary {
         return summary;
     }
 
-    /**
-     * @notice Validate tier configuration
-     * @param tier Lock tier to validate
-     * @return isValid True if tier is valid
-     */
+    // ==================== VALIDATION ====================
+
+    /// @dev Validates a lock tier: duration > 0, APY <= 50%, penalty <= 50%.
     function validateTier(
         ILockedPoolTypes.LockTier memory tier
     ) public pure returns (bool isValid) {
@@ -236,15 +191,6 @@ library LockedPoolLibrary {
         return true;
     }
 
-    /**
-     * @notice Validate deposit parameters
-     * @param amount Deposit amount
-     * @param tierIndex Tier index
-     * @param tier Lock tier
-     * @param tierCount Total tiers configured
-     * @return isValid True if deposit is valid
-     * @return errorMsg Error message if invalid
-     */
     function validateDeposit(
         uint256 amount,
         uint256 tierIndex,
@@ -258,18 +204,9 @@ library LockedPoolLibrary {
         return (true, "");
     }
 
-    /**
-     * @notice Build new position struct
-     * @param positionId Position ID
-     * @param user User address
-     * @param poolAddress Pool address
-     * @param principal Principal amount
-     * @param tier Lock tier
-     * @param tierIndex Tier index
-     * @param paymentChoice Interest payment choice
-     * @param currentTime Current timestamp
-     * @return position New position struct
-     */
+    // ==================== POSITION BUILDING ====================
+
+    /// @dev Constructs a complete UserPosition struct from deposit parameters.
     function buildPosition(
         uint256 positionId,
         address user,
@@ -312,13 +249,7 @@ library LockedPoolLibrary {
         return position;
     }
 
-    /**
-     * @notice Calculate early exit result
-     * @param position User position
-     * @param tier Lock tier
-     * @param currentTime Current timestamp
-     * @return result Early exit calculation
-     */
+    /// @dev Routes early-exit calculation to the correct handler based on interest payment type.
     function calculateEarlyExit(
         ILockedPoolTypes.UserPosition memory position,
         ILockedPoolTypes.LockTier memory tier,
@@ -331,14 +262,6 @@ library LockedPoolLibrary {
         }
     }
 
-    /**
-     * @notice Generate position ID
-     * @param pool Pool address
-     * @param user User address
-     * @param nonce Nonce value
-     * @param timestamp Current timestamp
-     * @return positionId Unique position ID
-     */
     function generatePositionId(
         address pool,
         address user,
@@ -348,23 +271,10 @@ library LockedPoolLibrary {
         return uint256(keccak256(abi.encodePacked(pool, user, nonce, timestamp)));
     }
 
-    /**
-     * @notice Calculate shares to mint for deposit
-     * @param principal Principal deposited
-     * @return shares Shares to mint (1:1 with principal)
-     */
     function calculateShares(uint256 principal) public pure returns (uint256) {
         return principal;
     }
 
-    /**
-     * @notice Check if position is in valid state for redemption
-     * @param position Position to check
-     * @param caller Caller address
-     * @param currentTime Current timestamp
-     * @return isValid True if can redeem
-     * @return errorMsg Error message if invalid
-     */
     function validateRedemption(
         ILockedPoolTypes.UserPosition memory position,
         address caller,
@@ -379,14 +289,6 @@ library LockedPoolLibrary {
         return (true, "");
     }
 
-    /**
-     * @notice Check if position is in valid state for early exit
-     * @param position Position to check
-     * @param caller Caller address
-     * @param currentTime Current timestamp
-     * @return isValid True if can early exit
-     * @return errorMsg Error message if invalid
-     */
     function validateEarlyExit(
         ILockedPoolTypes.UserPosition memory position,
         address caller,
@@ -400,4 +302,3 @@ library LockedPoolLibrary {
         return (true, "");
     }
 }
-

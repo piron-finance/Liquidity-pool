@@ -4,6 +4,8 @@ pragma solidity ^0.8.22;
 import "./fixtures/BaseTest.sol";
 import "../src/StableYieldManager.sol";
 import "../src/PoolRegistry.sol";
+import "../src/FeeManager.sol";
+import "../src/escrows/YieldReserveEscrow.sol";
 import "../src/factories/ManagedPoolFactory.sol";
 import "../src/managed/StableYieldPool.sol";
 import "../src/escrows/StableYieldEscrow.sol";
@@ -11,39 +13,33 @@ import "../src/AccessManager.sol";
 import "../src/types/IStableYieldTypes.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-/**
- * @title StableYieldPoolTest
- * @notice Comprehensive tests for Stable Yield Pool (revolving T-bill) functionality
- * @dev Tests NAV, deposits, withdrawals, SPV allocations, instruments
- */
 contract StableYieldPoolTest is BaseTest {
     
     AccessManager accessManager;
     PoolRegistry registry;
     StableYieldManager stableYieldManager;
     ManagedPoolFactory managedFactory;
+    FeeManager feeManager;
+    YieldReserveEscrow yieldReserve;
     MockERC20 token;
     
     address poolAddress;
     address escrowAddress;
     
     uint256 constant MIN_INVESTMENT = 1000e6;
-    uint256 constant DEFAULT_FEE_BPS = 300; // 3%
+    uint256 constant DEFAULT_FEE_BPS = 300;
     
     function setUp() public override {
         super.setUp();
         
-        // Deploy token
         token = new MockERC20("Mock USDC", "USDC", 6);
         token.mint(user1, INITIAL_BALANCE);
         token.mint(user2, INITIAL_BALANCE);
         token.mint(user3, INITIAL_BALANCE);
         token.mint(spv, INITIAL_BALANCE * 10);
         
-        // Deploy AccessManager
         accessManager = new AccessManager(admin, spv, operator, emergency, multisigAdmin);
         
-        // Deploy and initialize PoolRegistry
         PoolRegistry registryImpl = new PoolRegistry();
         bytes memory registryInit = abi.encodeWithSignature(
             "initialize(address,address)",
@@ -53,7 +49,30 @@ contract StableYieldPoolTest is BaseTest {
         ERC1967Proxy registryProxy = new ERC1967Proxy(address(registryImpl), registryInit);
         registry = PoolRegistry(address(registryProxy));
         
-        // Deploy and initialize StableYieldManager
+        YieldReserveEscrow yieldReserveImpl = new YieldReserveEscrow();
+        bytes memory yieldReserveInit = abi.encodeWithSignature(
+            "initialize(address,address,address,uint256,uint256)",
+            address(token),
+            address(accessManager),
+            treasury,
+            5000,
+            5000
+        );
+        ERC1967Proxy yieldReserveProxy = new ERC1967Proxy(address(yieldReserveImpl), yieldReserveInit);
+        yieldReserve = YieldReserveEscrow(address(yieldReserveProxy));
+        
+        FeeManager feeManagerImpl = new FeeManager();
+        bytes memory feeManagerInit = abi.encodeWithSignature(
+            "initialize(address,address,address,address,address)",
+            address(accessManager),
+            address(registry),
+            address(yieldReserve),
+            treasury,
+            treasury
+        );
+        ERC1967Proxy feeManagerProxy = new ERC1967Proxy(address(feeManagerImpl), feeManagerInit);
+        feeManager = FeeManager(address(feeManagerProxy));
+        
         StableYieldManager managerImpl = new StableYieldManager();
         bytes memory managerInit = abi.encodeWithSignature(
             "initialize(address,address,address,uint256)",
@@ -65,11 +84,9 @@ contract StableYieldPoolTest is BaseTest {
         ERC1967Proxy managerProxy = new ERC1967Proxy(address(managerImpl), managerInit);
         stableYieldManager = StableYieldManager(address(managerProxy));
         
-        // Deploy pool implementations
         StableYieldPool poolImpl = new StableYieldPool();
         StableYieldEscrow escrowImpl = new StableYieldEscrow();
         
-        // Deploy and initialize ManagedPoolFactory
         ManagedPoolFactory factoryImpl = new ManagedPoolFactory();
         bytes memory factoryInit = abi.encodeWithSignature(
             "initialize(address,address,address,address,address,address)",
@@ -83,41 +100,30 @@ contract StableYieldPoolTest is BaseTest {
         ERC1967Proxy factoryProxy = new ERC1967Proxy(address(factoryImpl), factoryInit);
         managedFactory = ManagedPoolFactory(address(factoryProxy));
         
-        // Configure
         vm.startPrank(admin);
         registry.approveAsset(address(token), "Mock USDC", "USDC", true);
         stableYieldManager.setManagedPoolFactory(address(managedFactory));
+        stableYieldManager.setYieldReserve(address(yieldReserve));
+        managedFactory.setFeeManager(address(feeManager));
+        managedFactory.setYieldReserve(address(yieldReserve));
+        yieldReserve.setStableYieldManager(address(stableYieldManager));
         
-        // Grant roles
         accessManager.grantRoleDuringDeployment(accessManager.POOL_CREATOR_ROLE(), address(stableYieldManager));
         accessManager.grantRoleDuringDeployment(accessManager.POOL_CREATOR_ROLE(), admin);
         accessManager.grantFactoryRoleDuringDeployment(address(managedFactory));
-        // Factory also needs POOL_CREATOR_ROLE to register pools in PoolRegistry
         accessManager.grantRoleDuringDeployment(accessManager.POOL_CREATOR_ROLE(), address(managedFactory));
-        // StableYieldManager needs OPERATOR_ROLE to call escrow.allocateToSPV()
         accessManager.grantRoleDuringDeployment(accessManager.OPERATOR_ROLE(), address(stableYieldManager));
-        // Grant operator role to operator address for tests
         accessManager.grantRoleDuringDeployment(accessManager.OPERATOR_ROLE(), operator);
         vm.stopPrank();
     }
     
-    // ============ HELPER FUNCTIONS ============
-    
     function _createPool() internal returns (address, address) {
-        // Tenors are in days (not seconds) - factory validates for 90, 180, 270, or 360
-        uint256[] memory tenors = new uint256[](3);
-        tenors[0] = 90;
-        tenors[1] = 180;
-        tenors[2] = 360;
-        
         ManagedPoolFactory.PoolDeploymentConfig memory config = ManagedPoolFactory.PoolDeploymentConfig({
             asset: address(token),
             poolName: "Test Stable Yield Pool",
             poolSymbol: "tSYP",
             spvAddress: spv,
-            supportedTenors: tenors,
-            minInvestment: MIN_INVESTMENT,
-            underlyingPools: new address[](0)
+            minInvestment: MIN_INVESTMENT
         });
         
         vm.prank(admin);
@@ -133,16 +139,12 @@ contract StableYieldPoolTest is BaseTest {
         vm.stopPrank();
     }
     
-    // ============ POOL CREATION TESTS ============
-    
     function test_createPool_success() public {
         (poolAddress, escrowAddress) = _createPool();
         
         assertTrue(registry.isRegisteredPool(poolAddress), "Pool not registered");
         assertEq(StableYieldPool(poolAddress).asset(), address(token), "Wrong asset");
     }
-    
-    // ============ DEPOSIT TESTS ============
     
     function test_deposit_success() public {
         (poolAddress, escrowAddress) = _createPool();
@@ -153,7 +155,6 @@ contract StableYieldPoolTest is BaseTest {
         
         _depositAs(user1, depositAmount);
         
-        // Shares should equal net deposit (1:1 initially)
         assertApproxEqRel(
             StableYieldPool(poolAddress).balanceOf(user1), 
             netDeposit, 
@@ -168,7 +169,6 @@ contract StableYieldPoolTest is BaseTest {
         _depositAs(user2, 30_000e6);
         _depositAs(user3, 20_000e6);
         
-        // Each user should have proportional shares (minus fees)
         uint256 user1Shares = StableYieldPool(poolAddress).balanceOf(user1);
         uint256 user2Shares = StableYieldPool(poolAddress).balanceOf(user2);
         uint256 user3Shares = StableYieldPool(poolAddress).balanceOf(user3);
@@ -186,8 +186,6 @@ contract StableYieldPoolTest is BaseTest {
         StableYieldPool(poolAddress).deposit(500e6, user1);
         vm.stopPrank();
     }
-    
-    // ============ NAV TESTS ============
     
     function test_nav_initiallyEqualToDeposits() public {
         (poolAddress, escrowAddress) = _createPool();
@@ -207,7 +205,6 @@ contract StableYieldPoolTest is BaseTest {
         
         uint256 navBefore = stableYieldManager.calculatePoolNAV(poolAddress);
         
-        // Operator creates allocation for SPV
         vm.prank(operator);
         bytes32 allocationId = stableYieldManager.createPendingAllocation(
             poolAddress,
@@ -220,20 +217,17 @@ contract StableYieldPoolTest is BaseTest {
             poolAddress,
             allocationId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
-            50_000e6,  // purchase price
-            52_500e6,  // face value (5% yield)
-            block.timestamp + 90 days, // maturity
-            0, // annual coupon rate
-            0  // coupon frequency
+            50_000e6,
+            52_500e6,
+            block.timestamp + 90 days,
+            0,
+            0
         );
         
         uint256 navAfter = stableYieldManager.calculatePoolNAV(poolAddress);
         
-        // NAV should include mark-to-market value of instrument
         assertTrue(navAfter >= navBefore, "NAV should not decrease");
     }
-    
-    // ============ WITHDRAWAL TESTS ============
     
     function test_withdraw_afterHoldingPeriod() public {
         (poolAddress, escrowAddress) = _createPool();
@@ -242,7 +236,6 @@ contract StableYieldPoolTest is BaseTest {
         
         uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
         
-        // Skip the holding period
         skipTime(30 days + 1);
         
         uint256 balanceBefore = token.balanceOf(user1);
@@ -260,7 +253,6 @@ contract StableYieldPoolTest is BaseTest {
         
         uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
         
-        // Try to withdraw immediately - should fail
         vm.prank(user1);
         vm.expectRevert("StableYieldPool/minimum holding period not met");
         StableYieldPool(poolAddress).redeem(shares, user1, user1);
@@ -281,19 +273,14 @@ contract StableYieldPoolTest is BaseTest {
         
         uint256 received = token.balanceOf(user1) - balanceBefore;
         
-        // Should receive assets minus withdrawal fee
-        // The exact amount depends on NAV calculations
         assertTrue(received > 0, "Should receive some tokens");
     }
-    
-    // ============ SPV ALLOCATION TESTS ============
     
     function test_spvAllocation_createAndUse() public {
         (poolAddress, escrowAddress) = _createPool();
         
         _depositAs(user1, 100_000e6);
         
-        // Create allocation (operator on behalf of SPV)
         vm.prank(operator);
         bytes32 allocationId = stableYieldManager.createPendingAllocation(
             poolAddress,
@@ -327,7 +314,7 @@ contract StableYieldPoolTest is BaseTest {
             allocationId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
             50_000e6,
-            52_500e6, // 5% yield
+            52_500e6,
             block.timestamp + 90 days,
             0,
             0
@@ -353,7 +340,6 @@ contract StableYieldPoolTest is BaseTest {
             50_000e6
         );
         
-        // SPV only uses 30k
         vm.prank(spv);
         stableYieldManager.addInstrument(
             poolAddress,
@@ -366,7 +352,6 @@ contract StableYieldPoolTest is BaseTest {
             0
         );
         
-        // Return unused funds (20k)
         vm.startPrank(spv);
         token.approve(address(stableYieldManager), 20_000e6);
         stableYieldManager.returnUnusedFunds(allocationId, 20_000e6);
@@ -377,8 +362,6 @@ contract StableYieldPoolTest is BaseTest {
         
         assertEq(allocation.returnedAmount, 20_000e6);
     }
-    
-    // ============ INSTRUMENT MATURITY TESTS ============
     
     function test_instrumentMaturity_fullCycle() public {
         (poolAddress, escrowAddress) = _createPool();
@@ -404,62 +387,49 @@ contract StableYieldPoolTest is BaseTest {
             0
         );
         
-        // Verify instrument exists before maturity
         IStableYieldTypes.InstrumentHolding[] memory instrumentsBefore = 
             stableYieldManager.getPoolInstruments(poolAddress);
         assertEq(instrumentsBefore.length, 1, "Should have 1 instrument before maturity");
         assertTrue(instrumentsBefore[0].isActive, "Instrument should be active before maturity");
         
-        // Skip to maturity
         skipTime(90 days + 1);
         
-        // SPV returns matured funds
         vm.startPrank(spv);
         token.approve(address(stableYieldManager), 52_500e6);
         stableYieldManager.matureInstrumentWithFunds(poolAddress, 0, 52_500e6);
         vm.stopPrank();
         
-        // Instrument is removed after maturity (not just marked inactive)
         IStableYieldTypes.InstrumentHolding[] memory instrumentsAfter = 
             stableYieldManager.getPoolInstruments(poolAddress);
         
         assertEq(instrumentsAfter.length, 0, "Instrument should be removed after maturity");
     }
     
-    // ============ SHARE TRANSFER TESTS ============
-    
     function test_shareTransfer_resetsHoldingPeriod() public {
         (poolAddress, escrowAddress) = _createPool();
         
         _depositAs(user1, 100_000e6);
         
-        // Skip some time (but not full holding period)
         skipTime(15 days);
         
         uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
         
-        // Transfer to user2
         vm.prank(user1);
-        StableYieldPool(poolAddress).transfer(user2, shares);
+        require(StableYieldPool(poolAddress).transfer(user2, shares), "transfer failed");
         
-        // User2 cannot withdraw immediately (holding period reset)
         vm.prank(user2);
         vm.expectRevert("StableYieldPool/minimum holding period not met");
         StableYieldPool(poolAddress).redeem(shares, user2, user2);
         
-        // After full holding period, user2 can withdraw
         skipTime(30 days + 1);
         
         vm.prank(user2);
         StableYieldPool(poolAddress).redeem(shares, user2, user2);
     }
     
-    // ============ EDGE CASES ============
-    
     function test_edgeCase_depositWhenNoLiquidity() public {
         (poolAddress, escrowAddress) = _createPool();
         
-        // First deposit should work
         _depositAs(user1, 100_000e6);
         
         assertTrue(StableYieldPool(poolAddress).balanceOf(user1) > 0);
@@ -493,10 +463,8 @@ contract StableYieldPoolTest is BaseTest {
             50_000e6
         );
         
-        // Skip past expiry (ALLOCATION_EXPIRY is 10 days)
         skipTime(11 days);
         
-        // Try to add instrument - should fail
         vm.prank(spv);
         vm.expectRevert(StableYieldManager.AllocationExpired.selector);
         stableYieldManager.addInstrument(
@@ -511,12 +479,9 @@ contract StableYieldPoolTest is BaseTest {
         );
     }
     
-    // ============ FEE TESTS ============
-    
     function test_fee_customPoolFee() public {
         (poolAddress, escrowAddress) = _createPool();
         
-        // Set custom fee for this pool (5%)
         vm.prank(admin);
         stableYieldManager.setPoolTransactionFee(poolAddress, 500);
         
@@ -526,11 +491,8 @@ contract StableYieldPoolTest is BaseTest {
         _depositAs(user1, depositAmount);
         
         uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
-        // Shares should be approximately deposit minus 5% fee
         assertApproxEqRel(shares, depositAmount - expectedFee, 0.02e18);
     }
-    
-    // ============ VIEW FUNCTION TESTS ============
     
     function test_canWithdraw_returnsFalseBeforeHoldingPeriod() public {
         (poolAddress, escrowAddress) = _createPool();
@@ -570,7 +532,486 @@ contract StableYieldPoolTest is BaseTest {
         
         uint256 navPerShare = StableYieldPool(poolAddress).getNAVPerShare();
         
-        // Initially should be 1e18 (1:1)
         assertApproxEqRel(navPerShare, 1e18, 0.01e18);
+    }
+    
+    function test_queuedWithdrawal_collectsFees() public {
+        (poolAddress, escrowAddress) = _createPool();
+        
+        uint256 depositAmount = 100_000e6;
+        _depositAs(user1, depositAmount);
+        
+        skipTime(30 days + 1);
+        
+        uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
+        uint256 user1BalanceBefore = token.balanceOf(user1);
+        
+        vm.prank(user1);
+        StableYieldPool(poolAddress).redeem(shares, user1, user1);
+        
+        uint256 user1BalanceAfter = token.balanceOf(user1);
+        uint256 received = user1BalanceAfter - user1BalanceBefore;
+        
+        uint256 expectedFee = (depositAmount * DEFAULT_FEE_BPS * 2) / 10000;
+        assertTrue(received < depositAmount, "Withdrawal should have fees deducted");
+    }
+    
+    function _seedYieldReserve(uint256 amount) internal {
+        token.mint(address(stableYieldManager), amount);
+        vm.startPrank(address(stableYieldManager));
+        token.approve(address(yieldReserve), amount);
+        yieldReserve.receiveYield(amount);
+        vm.stopPrank();
+    }
+
+    // ==================== YIELD RESERVE TESTS ====================
+
+    function test_deployProtocolCapital_toPool() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _seedYieldReserve(500_000e6);
+
+        uint256 deployAmount = 100_000e6;
+        uint256 escrowReservesBefore = StableYieldEscrow(escrowAddress).getPoolReserves();
+
+        vm.prank(admin);
+        stableYieldManager.deployProtocolCapital(poolAddress, deployAmount);
+
+        uint256 escrowReservesAfter = StableYieldEscrow(escrowAddress).getPoolReserves();
+        StableYieldEscrow escrow = StableYieldEscrow(escrowAddress);
+
+        assertEq(escrow.protocolFundsFromReserve(), deployAmount, "Protocol funds tracking should match");
+        assertEq(token.balanceOf(escrowAddress) - escrowReservesBefore, deployAmount, "Escrow should receive capital");
+    }
+
+    function test_recallProtocolCapital_fromPool() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _seedYieldReserve(500_000e6);
+
+        vm.prank(admin);
+        stableYieldManager.deployProtocolCapital(poolAddress, 100_000e6);
+
+        uint256 reserveBalBefore = yieldReserve.getAvailableBalance();
+
+        vm.prank(admin);
+        stableYieldManager.recallProtocolCapital(poolAddress, 50_000e6);
+
+        uint256 reserveBalAfter = yieldReserve.getAvailableBalance();
+        assertEq(reserveBalAfter - reserveBalBefore, 50_000e6, "Reserve should receive recalled funds");
+
+        StableYieldEscrow escrow = StableYieldEscrow(escrowAddress);
+        assertEq(escrow.protocolFundsFromReserve(), 50_000e6, "Should reflect partial recall");
+    }
+
+    function test_withdrawalQueue_sourcesFromReserve() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 100_000e6);
+
+        // Allocate most funds to SPV, leaving escrow short
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(poolAddress, spv, 80_000e6);
+
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            poolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.DISCOUNTED,
+            80_000e6,
+            84_000e6,
+            block.timestamp + 90 days,
+            0,
+            0
+        );
+
+        // Seed yield reserve to backstop
+        _seedYieldReserve(500_000e6);
+
+        skipTime(30 days + 1);
+
+        uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
+        uint256 user1BalBefore = token.balanceOf(user1);
+
+        // This should either process immediately or queue + get settled from reserve
+        vm.prank(user1);
+        StableYieldPool(poolAddress).redeem(shares, user1, user1);
+
+        // Check if queued
+        (uint256 head, uint256 tail,,) = stableYieldManager.getWithdrawalQueueStatus(poolAddress);
+
+        if (tail > head) {
+            // Was queued; settle from reserve
+            uint256[] memory requestIds = new uint256[](1);
+            requestIds[0] = head;
+
+            vm.prank(operator);
+            stableYieldManager.settleWithdrawals(poolAddress, requestIds);
+        }
+
+        uint256 user1BalAfter = token.balanceOf(user1);
+        assertTrue(user1BalAfter > user1BalBefore, "User should receive funds even when escrow is short");
+    }
+
+    function test_escrowAuthorized_afterPoolCreation() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        assertTrue(
+            yieldReserve.isEscrowAuthorized(escrowAddress),
+            "Escrow should be auto-authorized on pool creation"
+        );
+    }
+
+    function test_adminDirectDeposit_trackedOnReserve() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        uint256 depositAmount = 50_000e6;
+        token.mint(admin, depositAmount);
+
+        vm.startPrank(admin);
+        token.approve(escrowAddress, depositAmount);
+        StableYieldEscrow(escrowAddress).receiveProtocolFundsFromAdmin(depositAmount);
+        vm.stopPrank();
+
+        StableYieldEscrow escrow = StableYieldEscrow(escrowAddress);
+        assertEq(escrow.protocolFundsDirectDeposit(), depositAmount, "Direct deposit tracked on escrow");
+
+        assertEq(
+            yieldReserve.directDepositsToPool(poolAddress),
+            depositAmount,
+            "Reserve should track direct deposit"
+        );
+    }
+
+    function test_isReadyForAllocation_accountsForPendingWithdrawals() public {
+        (poolAddress, escrowAddress) = _createPool();
+        
+        uint256 depositAmount = 1_000_000e6;
+        _depositAs(user1, depositAmount);
+        _depositAs(user2, depositAmount);
+        
+        skipTime(30 days + 1);
+        
+        (bool readyBefore, uint256 availableBefore) = stableYieldManager.isReadyForAllocation(poolAddress);
+        assertTrue(readyBefore, "Should be ready for allocation after deposits");
+        assertTrue(availableBefore > 0, "Should have funds available for allocation");
+        
+        uint256 user1Shares = StableYieldPool(poolAddress).balanceOf(user1);
+        vm.prank(user1);
+        StableYieldPool(poolAddress).redeem(user1Shares, user1, user1);
+        
+        (bool readyAfter, uint256 availableAfter) = stableYieldManager.isReadyForAllocation(poolAddress);
+        
+        assertTrue(availableAfter < availableBefore, "Available should decrease after withdrawal");
+    }
+
+    // ==================== FULL INSTRUMENT LIFECYCLE WITH RESERVE ====================
+
+    function test_fullInstrumentCycle_discountedWithReserveCapital() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _seedYieldReserve(300_000e6);
+
+        vm.prank(admin);
+        stableYieldManager.deployProtocolCapital(poolAddress, 100_000e6);
+
+        _depositAs(user1, 100_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(poolAddress, spv, 80_000e6);
+
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            poolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.DISCOUNTED,
+            80_000e6,
+            84_000e6,
+            block.timestamp + 90 days,
+            0,
+            0
+        );
+
+        skipTime(90 days + 1);
+
+        vm.startPrank(spv);
+        token.approve(address(stableYieldManager), 84_000e6);
+        stableYieldManager.matureInstrumentWithFunds(poolAddress, 0, 84_000e6);
+        vm.stopPrank();
+
+        IStableYieldTypes.InstrumentHolding[] memory instruments = stableYieldManager.getPoolInstruments(poolAddress);
+        assertEq(instruments.length, 0, "Instrument should be removed after maturity");
+
+        vm.prank(admin);
+        stableYieldManager.recallProtocolCapital(poolAddress, 100_000e6);
+
+        StableYieldEscrow escrow = StableYieldEscrow(escrowAddress);
+        assertEq(escrow.protocolFundsFromReserve(), 0, "All protocol capital recalled");
+    }
+
+    function test_interestBearingInstrument_multipleCoupons() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _depositAs(user1, 200_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(poolAddress, spv, 100_000e6);
+
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            poolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.INTEREST_BEARING,
+            100_000e6,
+            100_000e6,
+            block.timestamp + 365 days,
+            800,
+            4
+        );
+
+        uint256 couponAmount = 2_000e6;
+
+        for (uint i = 0; i < 3; i++) {
+            vm.warp(block.timestamp + 92 days);
+            token.mint(spv, couponAmount);
+            vm.startPrank(spv);
+            token.approve(address(stableYieldManager), couponAmount);
+            stableYieldManager.recordCouponPayment(poolAddress, 0, couponAmount);
+            vm.stopPrank();
+        }
+
+        IStableYieldTypes.InstrumentHolding memory instrument = stableYieldManager.getInstrument(poolAddress, 0);
+        assertEq(instrument.couponsPaid, 3, "Should have recorded 3 coupon payments");
+    }
+
+    // ==================== WITHDRAWAL QUEUE WITH RESERVE BACKSTOP ====================
+
+    function test_withdrawalQueue_multipleUsers_settledFromReserve() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 50_000e6);
+        _depositAs(user2, 50_000e6);
+        _depositAs(user3, 50_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(poolAddress, spv, 120_000e6);
+
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            poolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.DISCOUNTED,
+            120_000e6,
+            126_000e6,
+            block.timestamp + 90 days,
+            0,
+            0
+        );
+
+        _seedYieldReserve(1_000_000e6);
+
+        skipTime(30 days + 1);
+
+        uint256 shares1 = StableYieldPool(poolAddress).balanceOf(user1);
+        uint256 shares2 = StableYieldPool(poolAddress).balanceOf(user2);
+
+        vm.prank(user1);
+        StableYieldPool(poolAddress).redeem(shares1, user1, user1);
+
+        vm.prank(user2);
+        StableYieldPool(poolAddress).redeem(shares2, user2, user2);
+
+        (uint256 head, uint256 tail,,) = stableYieldManager.getWithdrawalQueueStatus(poolAddress);
+
+        if (tail > head) {
+            uint256 count = tail - head;
+            uint256[] memory ids = new uint256[](count);
+            for (uint256 i = 0; i < count; i++) {
+                ids[i] = head + i;
+            }
+            vm.prank(operator);
+            stableYieldManager.settleWithdrawals(poolAddress, ids);
+        }
+
+        assertTrue(token.balanceOf(user1) > 0, "User1 should be paid");
+        assertTrue(token.balanceOf(user2) > 0, "User2 should be paid");
+    }
+
+    function test_withdrawalQueue_processQueue_fromReserve() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 100_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(poolAddress, spv, 80_000e6);
+
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            poolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.DISCOUNTED,
+            80_000e6,
+            84_000e6,
+            block.timestamp + 90 days,
+            0,
+            0
+        );
+
+        _seedYieldReserve(500_000e6);
+
+        skipTime(30 days + 1);
+
+        uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
+        uint256 balBefore = token.balanceOf(user1);
+
+        vm.prank(user1);
+        StableYieldPool(poolAddress).redeem(shares, user1, user1);
+
+        (uint256 head, uint256 tail,,) = stableYieldManager.getWithdrawalQueueStatus(poolAddress);
+
+        if (tail > head) {
+            vm.prank(operator);
+            stableYieldManager.processWithdrawalQueue(poolAddress, 10);
+        }
+
+        uint256 balAfter = token.balanceOf(user1);
+        assertTrue(balAfter > balBefore, "User should receive funds");
+    }
+
+    // ==================== RETURN UNUSED FUNDS ====================
+
+    function test_returnUnusedFunds_fullReturn() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _depositAs(user1, 100_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(poolAddress, spv, 50_000e6);
+
+        uint256 reservesBefore = StableYieldEscrow(escrowAddress).getPoolReserves();
+
+        vm.startPrank(spv);
+        token.approve(address(stableYieldManager), 50_000e6);
+        stableYieldManager.returnUnusedFunds(allocId, 50_000e6);
+        vm.stopPrank();
+
+        uint256 reservesAfter = StableYieldEscrow(escrowAddress).getPoolReserves();
+        assertEq(reservesAfter - reservesBefore, 50_000e6, "Full return should restore reserves");
+
+        IStableYieldTypes.PendingAllocation memory alloc = stableYieldManager.getPendingAllocation(allocId);
+        assertEq(uint8(alloc.status), uint8(IStableYieldTypes.AllocationStatus.RETURNED), "Should be RETURNED");
+    }
+
+    // ==================== ESCROW BALANCE INTEGRITY ====================
+
+    function test_escrowBalanceIntegrity_afterMultipleOps() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _seedYieldReserve(500_000e6);
+
+        vm.prank(admin);
+        stableYieldManager.deployProtocolCapital(poolAddress, 100_000e6);
+
+        uint256 directDeposit = 50_000e6;
+        token.mint(admin, directDeposit);
+        vm.startPrank(admin);
+        token.approve(escrowAddress, directDeposit);
+        StableYieldEscrow(escrowAddress).receiveProtocolFundsFromAdmin(directDeposit);
+        vm.stopPrank();
+
+        _depositAs(user1, 50_000e6);
+
+        StableYieldEscrow escrow = StableYieldEscrow(escrowAddress);
+        uint256 expected = escrow.getExpectedBalance();
+        uint256 actual = escrow.getTotalBalance();
+        assertEq(actual, expected, "Balance accounting must match");
+    }
+
+    // ==================== ADMIN DIRECT DEPOSIT ====================
+
+    function test_adminDirectDeposit_releaseTracking() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        uint256 depositAmt = 50_000e6;
+        token.mint(admin, depositAmt);
+
+        vm.startPrank(admin);
+        token.approve(escrowAddress, depositAmt);
+        StableYieldEscrow(escrowAddress).receiveProtocolFundsFromAdmin(depositAmt);
+        vm.stopPrank();
+
+        assertEq(yieldReserve.directDepositsToPool(poolAddress), depositAmt, "Reserve tracks direct deposit");
+
+        vm.prank(admin);
+        StableYieldEscrow(escrowAddress).releaseDirectDepositFunds(treasury, 20_000e6);
+
+        assertEq(yieldReserve.directDepositsToPool(poolAddress), 30_000e6, "Reserve updates after release");
+        assertEq(StableYieldEscrow(escrowAddress).protocolFundsDirectDeposit(), 30_000e6, "Escrow updates after release");
+    }
+
+    // ==================== NAV WITH PROTOCOL CAPITAL ====================
+
+    function test_nav_withProtocolCapital() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _seedYieldReserve(500_000e6);
+
+        vm.prank(admin);
+        stableYieldManager.deployProtocolCapital(poolAddress, 100_000e6);
+
+        _depositAs(user1, 100_000e6);
+
+        uint256 nav = stableYieldManager.calculatePoolNAV(poolAddress);
+        assertTrue(nav > 0, "NAV should be positive with deposits and protocol capital");
+
+        uint256 navPerShare = StableYieldPool(poolAddress).getNAVPerShare();
+        assertTrue(navPerShare >= 1e18, "NAV per share should be >= 1.0");
+    }
+
+    // ==================== END-TO-END: DEPOSIT -> ALLOCATE -> MATURE -> WITHDRAW ====================
+
+    function test_endToEnd_depositAllocateMatureWithdraw() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 100_000e6);
+        _depositAs(user2, 50_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(poolAddress, spv, 80_000e6);
+
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            poolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.DISCOUNTED,
+            80_000e6,
+            84_000e6,
+            block.timestamp + 90 days,
+            0,
+            0
+        );
+
+        skipTime(90 days + 1);
+
+        vm.startPrank(spv);
+        token.approve(address(stableYieldManager), 84_000e6);
+        stableYieldManager.matureInstrumentWithFunds(poolAddress, 0, 84_000e6);
+        vm.stopPrank();
+
+        skipTime(30 days);
+
+        uint256 user1Shares = StableYieldPool(poolAddress).balanceOf(user1);
+        uint256 user1BalBefore = token.balanceOf(user1);
+
+        vm.prank(user1);
+        StableYieldPool(poolAddress).redeem(user1Shares, user1, user1);
+
+        assertTrue(token.balanceOf(user1) > user1BalBefore, "User should withdraw with yield");
+
+        uint256 user2Shares = StableYieldPool(poolAddress).balanceOf(user2);
+        uint256 user2BalBefore = token.balanceOf(user2);
+
+        vm.prank(user2);
+        StableYieldPool(poolAddress).redeem(user2Shares, user2, user2);
+
+        assertTrue(token.balanceOf(user2) > user2BalBefore, "User2 should withdraw with yield");
     }
 }

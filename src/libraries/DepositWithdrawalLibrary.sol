@@ -8,8 +8,15 @@ import "../interfaces/IPoolEscrow.sol";
 import "../interfaces/ILiquidityPool.sol";
 import "./ValidationLibrary.sol";
 
+/**
+ * @title DepositWithdrawalLibrary
+ * @dev Orchestrates deposit, withdrawal, and fee logic for Single-Asset (deal) pools.
+ *      Delegates status-specific handling to ValidationLibrary.
+ */
 library DepositWithdrawalLibrary {
     uint256 constant BASIS_POINTS = 10000;
+
+    // ==================== EVENTS / ERRORS ====================
     
     event Deposit(address indexed pool, address indexed sender, address indexed receiver, uint256 assets, uint256 shares);
     event Withdraw(address indexed caller, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
@@ -17,6 +24,9 @@ library DepositWithdrawalLibrary {
 
     error WithdrawalNotAllowed();
 
+    // ==================== DEPOSIT ====================
+
+    /// @dev Handles a deposit during the FUNDING phase. Mints 1:1 shares.
     function handleDeposit(
         mapping(address => IPoolTypes.PoolData) storage pools,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
@@ -29,7 +39,6 @@ library DepositWithdrawalLibrary {
         IPoolTypes.PoolData storage poolData = pools[liquidityPool];
         ValidationLibrary.validateDeposit(poolData, registry, liquidityPool, assets, receiver);
         ValidationLibrary.validateAddress(sender, false);
-        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         
         if (poolUsers[liquidityPool][receiver].depositTime == 0) {
             poolUsers[liquidityPool][receiver].depositTime = block.timestamp;
@@ -38,14 +47,14 @@ library DepositWithdrawalLibrary {
         
         poolData.totalRaised += assets;
         
-        IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
-        escrowContract.receiveDeposit(receiver, assets);
-        
         emit Deposit(liquidityPool, sender, receiver, assets, shares);
         
         return shares;
     }
 
+    // ==================== WITHDRAW ====================
+
+    /// @dev Routes withdrawal to the correct handler based on pool status.
     function handleWithdraw(
         mapping(address => IPoolTypes.PoolData) storage pools,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
@@ -71,24 +80,21 @@ library DepositWithdrawalLibrary {
         }
         
         if (currentStatus == IPoolTypes.PoolStatus.FUNDING) {
-            // No fee during funding phase - users get full refund
             return ValidationLibrary.handleFundingWithdrawal(pools, poolUsers, registry, liquidityPool, assets, receiver, owner, poolData.config);
         } else if (currentStatus == IPoolTypes.PoolStatus.INVESTED) {
             revert WithdrawalNotAllowed();
         } else if (currentStatus == IPoolTypes.PoolStatus.MATURED) {
-            // Matured withdrawal with fee collection
             return _handleMaturedWithdrawWithFee(pools, poolUsers, registry, liquidityPool, receiver, owner, poolData, treasury);
         } else if (currentStatus == IPoolTypes.PoolStatus.EMERGENCY) {
-            // No fee during emergency - users get full refund
             return ValidationLibrary.handleEmergencyWithdrawal(poolUsers, registry, liquidityPool, assets, receiver, owner);
         } else {
             revert WithdrawalNotAllowed();
         }
     }
     
-    /**
-     * @dev Internal function to handle matured withdrawal with fee collection
-     */
+    // ==================== MATURED WITHDRAWAL (INTERNAL) ====================
+
+    /// @dev Handles post-maturity withdrawal: calculates user entitlement, deducts fee, and transfers.
     function _handleMaturedWithdrawWithFee(
         mapping(address => IPoolTypes.PoolData) storage pools,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
@@ -108,7 +114,6 @@ library DepositWithdrawalLibrary {
         uint256 totalReturns = calculateTotalReturns(poolData);
         uint256 userEntitlement = (userShares * totalReturns) / totalShares;
         
-        // Calculate fee
         uint256 feeBps = poolData.config.withdrawalFeeBps;
         uint256 feeAmount = (userEntitlement * feeBps) / BASIS_POINTS;
         uint256 netAmount = userEntitlement - feeAmount;
@@ -117,17 +122,13 @@ library DepositWithdrawalLibrary {
         ILiquidityPool(liquidityPool).burnShares(owner, shares);
         
         poolUsers[liquidityPool][owner].depositTime = 0;
-        
-        // Track fee collection
         pools[liquidityPool].totalFeesCollected += feeAmount;
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
         
-        // Send net amount to user
         escrowContract.releaseFunds(receiver, netAmount);
         
-        // Send fee to treasury
         if (feeAmount > 0 && treasury != address(0)) {
             escrowContract.releaseFunds(treasury, feeAmount);
         }
@@ -150,6 +151,9 @@ library DepositWithdrawalLibrary {
         return baseValue;
     }
 
+    // ==================== DISCOUNT ====================
+
+    /// @dev Records the discount earned for a matured discounted instrument.
     function distributeDiscount(
         mapping(address => IPoolTypes.PoolData) storage pools,
         IPoolRegistry registry,
@@ -167,4 +171,3 @@ library DepositWithdrawalLibrary {
     }
 
 }
-

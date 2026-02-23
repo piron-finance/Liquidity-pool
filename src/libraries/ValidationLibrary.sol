@@ -9,24 +9,15 @@ import "../interfaces/IPoolEscrow.sol";
 
 /**
  * @title ValidationLibrary
- * @dev Library for performing validation checks across the protocol
- * @notice This library centralizes all validation logic 
+ * @dev Common validation helpers used by Manager and DepositWithdrawalLibrary.
+ *      Validates deposits, withdrawals, maturity, pool status, and addresses.
+ *      Also contains withdrawal handlers for funding, matured, and emergency states.
  */
 library ValidationLibrary {
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// DEPOSIT VALIDATIONS //////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== DEPOSIT VALIDATION ====================
 
-    /**
-     * @notice Validates deposit parameters and pool state
-     * @dev Comprehensive validation for deposit operations with lifecycle checks
-     * @param poolData Storage reference to pool data
-     * @param poolRegistry Address of the pool registry contract
-     * @param poolAddress Address of the pool being validated
-     * @param assets Amount of assets being deposited
-     * @param receiver Address receiving the shares
-     */
+    /// @dev Validates all preconditions for a deposit during the FUNDING phase.
     function validateDeposit(
         IPoolTypes.PoolData storage poolData,
         IPoolRegistry poolRegistry,
@@ -51,29 +42,18 @@ library ValidationLibrary {
         require(poolRegistry.isApprovedAsset(poolInfo.asset), "ValidationLibrary/asset not approved");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// WITHDRAWAL VALIDATIONS ////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== WITHDRAWAL VALIDATION ====================
 
-    /**
-     * @notice Validates withdrawal parameters and pool state
-     * @dev Comprehensive validation for withdrawal operations with maturity checks
-     * @param poolData Storage reference to pool data
-     * @param poolRegistry Address of the pool registry contract
-     * @param poolAddress Address of the pool being validated
-     * @param owner Address of the share owner
-     */
+    /// @dev Validates that a withdrawal is allowed given the current pool status.
     function validateWithdrawal(
         IPoolTypes.PoolData storage poolData,
         IPoolRegistry poolRegistry,
         address poolAddress,
         address owner
     ) internal view {
-        // Basic parameter validation
         require(owner != address(0), "ValidationLibrary/invalid owner");
         require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
         
-        // Pool status validation - Allow withdrawals in specific states
         bool canWithdraw = poolData.status == IPoolTypes.PoolStatus.FUNDING ||
                           poolData.status == IPoolTypes.PoolStatus.MATURED || 
                           poolData.status == IPoolTypes.PoolStatus.EMERGENCY ||
@@ -83,17 +63,8 @@ library ValidationLibrary {
         require(canWithdraw, "ValidationLibrary/withdrawals not allowed");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EMERGENCY VALIDATIONS //////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== STATUS-SPECIFIC VALIDATION ====================
 
-    /**
-     * @notice Validates emergency refund distribution parameters
-     * @dev Validates that emergency refunds can be distributed for a pool
-     * @param poolData Storage reference to pool data
-     * @param poolRegistry Address of the pool registry contract
-     * @param poolAddress Address of the pool being validated
-     */
     function validateEmergencyRefunds(
         IPoolTypes.PoolData storage poolData,
         IPoolRegistry poolRegistry,
@@ -103,17 +74,6 @@ library ValidationLibrary {
         require(poolData.status == IPoolTypes.PoolStatus.EMERGENCY, "ValidationLibrary/not in emergency");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// DISCOUNT VALIDATIONS ///////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Validates discount distribution parameters
-     * @dev Validates that discounts can be distributed for a discounted instrument pool
-     * @param poolData Storage reference to pool data
-     * @param poolRegistry Address of the pool registry contract
-     * @param poolAddress Address of the pool being validated
-     */
     function validateDiscountDistribution(
         IPoolTypes.PoolData storage poolData,
         IPoolRegistry poolRegistry,
@@ -124,18 +84,6 @@ library ValidationLibrary {
         require(poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED, "ValidationLibrary/not discounted instrument");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// MATURITY VALIDATIONS ///////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Validates maturity processing parameters
-     * @dev Validates that a pool can have its maturity processed
-     * @param poolData Storage reference to pool data
-     * @param poolRegistry Address of the pool registry contract
-     * @param poolAddress Address of the pool being validated
-     * @param finalAmount Final amount being returned by SPV
-     */
     function validateMaturityProcessing(
         IPoolTypes.PoolData storage poolData,
         IPoolRegistry poolRegistry,
@@ -148,17 +96,6 @@ library ValidationLibrary {
         require(finalAmount != 0, "ValidationLibrary/invalid amount");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// POOL CANCELLATION VALIDATIONS //////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Validates pool cancellation parameters
-     * @dev Validates that a pool can be cancelled (emergency exit during funding)
-     * @param poolData Storage reference to pool data
-     * @param poolRegistry Address of the pool registry contract
-     * @param poolAddress Address of the pool being validated
-     */
     function validatePoolCancellation(
         IPoolTypes.PoolData storage poolData,
         IPoolRegistry poolRegistry,
@@ -168,16 +105,8 @@ library ValidationLibrary {
         require(poolData.status == IPoolTypes.PoolStatus.FUNDING, "ValidationLibrary/not funding phase");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// BASIC VALIDATIONS //////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== GENERIC VALIDATORS ====================
 
-    /**
-     * @notice Validates basic address parameters
-     * @dev Common validation for non-zero addresses
-     * @param addr Address to validate
-     * @param isReceiver Whether this is a receiver address (affects error type)
-     */
     function validateAddress(address addr, bool isReceiver) internal pure {
         if (isReceiver) {
             require(addr != address(0), "ValidationLibrary/invalid receiver");
@@ -186,21 +115,10 @@ library ValidationLibrary {
         }
     }
 
-    /**
-     * @notice Validates amount parameters
-     * @dev Common validation for non-zero amounts
-     * @param amount Amount to validate
-     */
     function validateAmount(uint256 amount) internal pure {
         require(amount != 0, "ValidationLibrary/invalid amount");
     }
 
-    /**
-     * @notice Validates pool registration
-     * @dev Common validation for pool registration status
-     * @param poolRegistry Address of the pool registry contract
-     * @param poolAddress Address of the pool being validated
-     */
     function validatePoolRegistration(
         IPoolRegistry poolRegistry,
         address poolAddress
@@ -208,16 +126,11 @@ library ValidationLibrary {
         require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// WITHDRAWAL HANDLERS ////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== WITHDRAWAL HANDLERS ====================
 
     event Withdraw(address indexed caller, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
 
-    /**
-     * @notice Handles withdrawal during funding phase
-     * @dev Allows full withdrawal before pool is filled and invested
-     */
+    /// @dev Handles withdrawal during FUNDING: burns shares, releases funds from escrow.
     function handleFundingWithdrawal(
         mapping(address => IPoolTypes.PoolData) storage pools,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
@@ -254,10 +167,7 @@ library ValidationLibrary {
         return shares;
     }
     
-    /**
-     * @notice Handles withdrawal after pool maturity
-     * @dev Calculates proportional returns including principal + returns
-     */
+    /// @dev Handles matured withdrawal: calculates user entitlement, burns shares, and releases from escrow.
     function handleMaturedWithdrawal(
         mapping(address => IPoolTypes.PoolData) storage /* pools */,
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
@@ -290,10 +200,7 @@ library ValidationLibrary {
         return shares;
     }
     
-    /**
-     * @notice Handles emergency withdrawal
-     * @dev Emergency exit mechanism for users when pool is in emergency state
-     */
+    /// @dev Handles emergency withdrawal: returns proportional assets to the user.
     function handleEmergencyWithdrawal(
         mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
         IPoolRegistry registry,
@@ -324,4 +231,3 @@ library ValidationLibrary {
         return shares;
     }
 }
-

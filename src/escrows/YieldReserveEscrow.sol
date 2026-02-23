@@ -11,23 +11,50 @@ import "../AccessManager.sol";
 
 /**
  * @title YieldReserveEscrow
- * @dev Holds protocol yield from locked pool operations
- * @notice Manages yield reserve, loans to pools for early exits, and treasury distributions
+ * @dev Protocol-level reserve for yield, liquidity backstop, and early-exit loans.
+ *      Receives yield from escrows, splits to treasury/reserve, deploys capital to
+ *      pools, lends to users during early exit, and absorbs shortfalls.
  */
 contract YieldReserveEscrow is 
     Initializable, 
     UUPSUpgradeable, 
     ReentrancyGuardUpgradeable 
 {
+    // ==================== STRUCTS ====================
+
     using SafeERC20 for IERC20;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// STATE VARIABLES //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    struct ReserveInvestment {
+        address pool;
+        uint256 positionId;
+        uint256 amount;
+        uint256 expectedReturn;
+        uint256 investedAt;
+        bool active;
+    }
+
+    struct ProtocolFundsSnapshot {
+        uint256 reserveBalance;
+        uint256 totalDeployedViaReserve;
+        uint256 totalDirectDeposits;
+        uint256 totalEarlyExitLoans;
+        uint256 grandTotal;
+        uint256 poolCount;
+    }
+
+    struct PoolProtocolFunds {
+        uint256 fromReserve;
+        uint256 directDeposit;
+        uint256 earlyExitLoan;
+        uint256 total;
+    }
+
+    // ==================== STATE ====================
 
     IERC20 public asset;
     AccessManager public accessManager;
     address public lockedPoolManager;
+    address public stableYieldManager;
     address public treasury;
     
     uint256 public version;
@@ -46,22 +73,22 @@ contract YieldReserveEscrow is
     mapping(address => uint256) public poolLoans;
     mapping(uint256 => uint256) public positionLoans;
 
-    struct ReserveInvestment {
-        address pool;
-        uint256 positionId;
-        uint256 amount;
-        uint256 expectedReturn;
-        uint256 investedAt;
-        bool active;
-    }
-    
     mapping(uint256 => ReserveInvestment) public reserveInvestments;
     uint256 public nextInvestmentId;
     uint256 public totalInvested;
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// EVENTS //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    uint256 public totalDeployedToEscrows;
+    mapping(address => uint256) public deployedToPool;
+    
+    uint256 public totalDirectDepositsReported;
+    mapping(address => uint256) public directDepositsToPool;
+    
+    address[] public trackedPools;
+    mapping(address => bool) public isTrackedPool;
+
+    mapping(address => bool) public authorizedEscrows;
+
+    // ==================== EVENTS ====================
 
     event YieldReceived(uint256 amount, uint256 toTreasury, uint256 toReserve);
     event LoanToPool(address indexed pool, uint256 positionId, uint256 amount);
@@ -73,13 +100,41 @@ contract YieldReserveEscrow is
     event TreasuryUpdated(address newTreasury);
     event ReserveInvested(uint256 indexed investmentId, address indexed pool, uint256 amount);
     event ReserveInvestmentMatured(uint256 indexed investmentId, uint256 returned);
+    
+    event ProtocolFundsDeployed(address indexed pool, address indexed escrow, uint256 amount);
+    event ProtocolFundsRecalled(address indexed pool, uint256 amount);
+    event DirectDepositRecorded(address indexed pool, address indexed escrow, uint256 amount);
+    event DirectDepositWithdrawnRecorded(address indexed pool, uint256 amount);
+    event EscrowAuthorized(address indexed escrow, bool authorized);
+    event StableYieldManagerUpdated(address indexed manager);
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// MODIFIERS ///////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    // ==================== MODIFIERS ====================
+
+    modifier onlyAuthorizedManager() {
+        require(
+            msg.sender == lockedPoolManager || msg.sender == stableYieldManager,
+            "YieldReserveEscrow/unauthorized manager"
+        );
+        _;
+    }
+
+    modifier onlyAuthorizedManagerOrEscrow() {
+        require(
+            msg.sender == lockedPoolManager || 
+            msg.sender == stableYieldManager || 
+            authorizedEscrows[msg.sender],
+            "YieldReserveEscrow/unauthorized"
+        );
+        _;
+    }
 
     modifier onlyLockedPoolManager() {
-        require(msg.sender == lockedPoolManager, "YieldReserveEscrow/only manager");
+        require(msg.sender == lockedPoolManager, "YieldReserveEscrow/only locked manager");
+        _;
+    }
+
+    modifier onlyAuthorizedEscrow() {
+        require(authorizedEscrows[msg.sender], "YieldReserveEscrow/unauthorized escrow");
         _;
     }
 
@@ -99,23 +154,11 @@ contract YieldReserveEscrow is
         _;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// INITIALIZATION /////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /**
-     * @notice Initialize the YieldReserveEscrow
-     * @param asset_ Underlying stablecoin asset
-     * @param accessManager_ Access manager address
-     * @param treasury_ Treasury address for profit distribution
-     * @param treasuryBps_ Percentage to treasury in basis points (6000 = 60%)
-     * @param minReserveFloor_ Minimum reserve balance before treasury sweep
-     */
     function initialize(
         address asset_,
         address accessManager_,
@@ -141,31 +184,47 @@ contract YieldReserveEscrow is
         nextInvestmentId = 1;
     }
 
-    /**
-     * @notice Set the locked pool manager address (one-time only)
-     * @param manager_ The locked pool manager address
-     */
     function setLockedPoolManager(address manager_) external onlyAdmin {
         require(manager_ != address(0), "YieldReserveEscrow/invalid manager");
         require(lockedPoolManager == address(0), "YieldReserveEscrow/manager already set");
         lockedPoolManager = manager_;
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyAdmin {
+    function setStableYieldManager(address manager_) external onlyAdmin {
+        require(manager_ != address(0), "YieldReserveEscrow/invalid manager");
+        require(stableYieldManager == address(0), "YieldReserveEscrow/manager already set");
+        stableYieldManager = manager_;
+        emit StableYieldManagerUpdated(manager_);
+    }
+
+    function authorizeEscrow(address escrow_, bool authorized_) external {
+        require(
+            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender) ||
+            accessManager.hasRole(accessManager.FACTORY_ROLE(), msg.sender),
+            "YieldReserveEscrow/not admin or factory"
+        );
+        require(escrow_ != address(0), "YieldReserveEscrow/invalid escrow");
+        authorizedEscrows[escrow_] = authorized_;
+        emit EscrowAuthorized(escrow_, authorized_);
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override {
+        require(
+            accessManager.hasRole(accessManager.MULTISIG_ADMIN_ROLE(), msg.sender),
+            "YieldReserveEscrow/only multisig"
+        );
         require(newImplementation != address(0), "YieldReserveEscrow/invalid implementation");
         version += 1;
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// YIELD DISTRIBUTION ///////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    function _trackPool(address pool) internal {
+        if (!isTrackedPool[pool]) {
+            trackedPools.push(pool);
+            isTrackedPool[pool] = true;
+        }
+    }
 
-    /**
-     * @notice Receive yield and split between treasury and reserve
-     * @dev Called by LockedPoolManager when SPV returns funds
-     * @param amount Yield amount to distribute
-     */
-    function receiveYield(uint256 amount) external onlyLockedPoolManager nonReentrant {
+    function receiveYield(uint256 amount) external onlyAuthorizedManagerOrEscrow nonReentrant {
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         
         asset.safeTransferFrom(msg.sender, address(this), amount);
@@ -184,11 +243,7 @@ contract YieldReserveEscrow is
         emit YieldReceived(amount, toTreasury, toReserve);
     }
 
-    /**
-     * @notice Receive yield directly (when funds transferred separately)
-     * @param amount Amount to record
-     */
-    function recordYield(uint256 amount) external onlyLockedPoolManager {
+    function recordYield(uint256 amount) external onlyAuthorizedManager {
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         
         uint256 toTreasury = (amount * treasuryBps) / 10000;
@@ -205,41 +260,122 @@ contract YieldReserveEscrow is
         emit YieldReceived(amount, toTreasury, toReserve);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// POOL LOANS //////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
+    function deployToPool(
+        address pool,
+        address escrow,
+        uint256 amount
+    ) external nonReentrant {
+        require(
+            msg.sender == lockedPoolManager || 
+            msg.sender == stableYieldManager ||
+            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender),
+            "YieldReserveEscrow/unauthorized"
+        );
+        require(pool != address(0), "YieldReserveEscrow/invalid pool");
+        require(escrow != address(0), "YieldReserveEscrow/invalid escrow");
+        require(amount > 0, "YieldReserveEscrow/invalid amount");
+        require(totalBalance >= amount, "YieldReserveEscrow/insufficient balance");
+        
+        _trackPool(pool);
+        
+        totalBalance -= amount;
+        totalDeployedToEscrows += amount;
+        deployedToPool[pool] += amount;
+        
+        asset.safeTransfer(escrow, amount);
+        
+        emit ProtocolFundsDeployed(pool, escrow, amount);
+    }
 
-    /**
-     * @notice Loan funds to a pool for early exit payout
-     * @param pool Pool address
-     * @param positionId Position being exited
-     * @param amount Loan amount
-     */
+    function receiveRecalledFunds(
+        address pool,
+        uint256 amount
+    ) external onlyAuthorizedEscrow nonReentrant {
+        require(pool != address(0), "YieldReserveEscrow/invalid pool");
+        require(amount > 0, "YieldReserveEscrow/invalid amount");
+        require(deployedToPool[pool] >= amount, "YieldReserveEscrow/exceeds deployed");
+        
+        asset.safeTransferFrom(msg.sender, address(this), amount);
+        
+        totalDeployedToEscrows -= amount;
+        deployedToPool[pool] -= amount;
+        totalBalance += amount;
+        
+        emit ProtocolFundsRecalled(pool, amount);
+    }
+
+    function recallFromPool(
+        address pool,
+        address escrow,
+        uint256 amount
+    ) external onlyOperator nonReentrant {
+        require(pool != address(0), "YieldReserveEscrow/invalid pool");
+        require(escrow != address(0), "YieldReserveEscrow/invalid escrow");
+        require(amount > 0, "YieldReserveEscrow/invalid amount");
+        require(deployedToPool[pool] >= amount, "YieldReserveEscrow/exceeds deployed");
+        
+        asset.safeTransferFrom(escrow, address(this), amount);
+        
+        totalDeployedToEscrows -= amount;
+        deployedToPool[pool] -= amount;
+        totalBalance += amount;
+        
+        emit ProtocolFundsRecalled(pool, amount);
+    }
+
+    function recordDirectDeposit(
+        address pool,
+        uint256 amount
+    ) external onlyAuthorizedEscrow {
+        require(pool != address(0), "YieldReserveEscrow/invalid pool");
+        require(amount > 0, "YieldReserveEscrow/invalid amount");
+        
+        _trackPool(pool);
+        
+        totalDirectDepositsReported += amount;
+        directDepositsToPool[pool] += amount;
+        
+        emit DirectDepositRecorded(pool, msg.sender, amount);
+    }
+
+    function recordDirectDepositWithdrawn(
+        address pool,
+        uint256 amount
+    ) external onlyAuthorizedEscrow {
+        require(pool != address(0), "YieldReserveEscrow/invalid pool");
+        require(amount > 0, "YieldReserveEscrow/invalid amount");
+        require(directDepositsToPool[pool] >= amount, "YieldReserveEscrow/exceeds direct deposits");
+        
+        totalDirectDepositsReported -= amount;
+        directDepositsToPool[pool] -= amount;
+        
+        emit DirectDepositWithdrawnRecorded(pool, amount);
+    }
+
     function loanToPool(
         address pool,
         uint256 positionId,
-        uint256 amount
-    ) external onlyLockedPoolManager nonReentrant {
+        uint256 amount,
+        address recipient
+    ) external onlyAuthorizedManager nonReentrant {
         require(pool != address(0), "YieldReserveEscrow/invalid pool");
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         require(totalBalance >= amount, "YieldReserveEscrow/insufficient balance");
+        require(recipient != address(0), "YieldReserveEscrow/invalid recipient");
+        
+        _trackPool(pool);
         
         totalBalance -= amount;
         totalLoanedOut += amount;
         poolLoans[pool] += amount;
         positionLoans[positionId] = amount;
         
-        asset.safeTransfer(pool, amount);
+        asset.safeTransfer(recipient, amount);
         
         emit LoanToPool(pool, positionId, amount);
     }
 
-    /**
-     * @notice Pay user directly from reserve (for early exit)
-     * @param user User to pay
-     * @param amount Amount to pay
-     */
-    function payUser(address user, uint256 amount) external onlyLockedPoolManager nonReentrant {
+    function payUser(address user, uint256 amount) external onlyAuthorizedManager nonReentrant {
         require(user != address(0), "YieldReserveEscrow/invalid user");
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         require(totalBalance >= amount, "YieldReserveEscrow/insufficient balance");
@@ -250,17 +386,11 @@ contract YieldReserveEscrow is
         asset.safeTransfer(user, amount);
     }
 
-    /**
-     * @notice Repay loan when SPV returns funds
-     * @param pool Pool address
-     * @param positionId Position that was exited
-     * @param amount Repayment amount
-     */
     function repayLoan(
         address pool,
         uint256 positionId,
         uint256 amount
-    ) external onlyLockedPoolManager nonReentrant {
+    ) external onlyAuthorizedManager nonReentrant {
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         
         uint256 loanOwed = positionLoans[positionId];
@@ -283,17 +413,11 @@ contract YieldReserveEscrow is
         emit LoanRepaid(pool, positionId, repayAmount);
     }
 
-    /**
-     * @notice Record loan repayment (when funds transferred separately)
-     * @param pool Pool address
-     * @param positionId Position ID
-     * @param amount Amount repaid
-     */
     function recordLoanRepayment(
         address pool,
         uint256 positionId,
         uint256 amount
-    ) external onlyLockedPoolManager {
+    ) external onlyAuthorizedManager {
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         
         uint256 loanOwed = positionLoans[positionId];
@@ -314,21 +438,14 @@ contract YieldReserveEscrow is
         emit LoanRepaid(pool, positionId, repayAmount);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// SHORTFALL COVERAGE //////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Cover shortfall when SPV underperforms
-     * @param pool Pool needing coverage
-     * @param amount Shortfall amount
-     */
     function coverShortfall(
         address pool,
         uint256 amount
-    ) external onlyLockedPoolManager nonReentrant {
+    ) external onlyAuthorizedManager nonReentrant {
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         require(totalBalance >= amount, "YieldReserveEscrow/insufficient balance");
+        
+        _trackPool(pool);
         
         totalBalance -= amount;
         totalLossesAbsorbed += amount;
@@ -338,19 +455,6 @@ contract YieldReserveEscrow is
         emit ShortfallCovered(pool, amount);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// RESERVE REINVESTMENT ////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Invest reserve funds in a locked pool position
-     * @dev Only when reserve balance exceeds floor. Funds sent to escrow.
-     * @param pool Pool to invest in (for tracking)
-     * @param escrow Pool's escrow to receive funds
-     * @param amount Amount to invest
-     * @param expectedReturn Expected return at maturity
-     * @return investmentId ID of the reserve investment
-     */
     function investReserve(
         address pool,
         address escrow,
@@ -361,6 +465,8 @@ contract YieldReserveEscrow is
         require(escrow != address(0), "YieldReserveEscrow/invalid escrow");
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         require(totalBalance > minReserveFloor + amount, "YieldReserveEscrow/below floor");
+        
+        _trackPool(pool);
         
         investmentId = nextInvestmentId++;
         
@@ -383,11 +489,6 @@ contract YieldReserveEscrow is
         return investmentId;
     }
 
-    /**
-     * @notice Record position ID for reserve investment
-     * @param investmentId Reserve investment ID
-     * @param positionId Pool position ID
-     */
     function linkInvestmentToPosition(
         uint256 investmentId,
         uint256 positionId
@@ -396,15 +497,10 @@ contract YieldReserveEscrow is
         reserveInvestments[investmentId].positionId = positionId;
     }
 
-    /**
-     * @notice Record matured reserve investment return
-     * @param investmentId Investment that matured
-     * @param returnedAmount Amount returned
-     */
     function recordInvestmentMaturity(
         uint256 investmentId,
         uint256 returnedAmount
-    ) external onlyLockedPoolManager {
+    ) external onlyAuthorizedManager {
         ReserveInvestment storage investment = reserveInvestments[investmentId];
         require(investment.active, "YieldReserveEscrow/investment not active");
         
@@ -415,14 +511,6 @@ contract YieldReserveEscrow is
         emit ReserveInvestmentMatured(investmentId, returnedAmount);
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// ADMIN FUNCTIONS //////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
-
-    /**
-     * @notice Update treasury/reserve split
-     * @param newTreasuryBps New treasury percentage in basis points
-     */
     function setSplitConfig(uint256 newTreasuryBps) external onlyAdmin {
         require(newTreasuryBps <= 10000, "YieldReserveEscrow/invalid bps");
         treasuryBps = newTreasuryBps;
@@ -430,29 +518,17 @@ contract YieldReserveEscrow is
         emit SplitConfigUpdated(newTreasuryBps, reserveBps);
     }
 
-    /**
-     * @notice Update minimum reserve floor
-     * @param newFloor New minimum balance
-     */
     function setMinReserveFloor(uint256 newFloor) external onlyAdmin {
         minReserveFloor = newFloor;
         emit MinReserveFloorUpdated(newFloor);
     }
 
-    /**
-     * @notice Update treasury address
-     * @param newTreasury New treasury address
-     */
     function setTreasury(address newTreasury) external onlyAdmin {
         require(newTreasury != address(0), "YieldReserveEscrow/invalid treasury");
         treasury = newTreasury;
         emit TreasuryUpdated(newTreasury);
     }
 
-    /**
-     * @notice Sweep excess balance to treasury
-     * @dev Only allows sweep above min floor
-     */
     function sweepToTreasury() external onlyOperator nonReentrant {
         require(totalBalance > minReserveFloor, "YieldReserveEscrow/below floor");
         
@@ -465,11 +541,6 @@ contract YieldReserveEscrow is
         emit TreasuryTransfer(treasury, sweepAmount);
     }
 
-    /**
-     * @notice Emergency withdraw (admin only)
-     * @param to Recipient
-     * @param amount Amount to withdraw
-     */
     function emergencyWithdraw(address to, uint256 amount) external onlyAdmin nonReentrant {
         require(to != address(0), "YieldReserveEscrow/invalid recipient");
         require(amount > 0, "YieldReserveEscrow/invalid amount");
@@ -483,10 +554,6 @@ contract YieldReserveEscrow is
         
         asset.safeTransfer(to, amount);
     }
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /////////////////////////////// VIEW FUNCTIONS ///////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////
 
     function getAvailableBalance() external view returns (uint256) {
         return totalBalance;
@@ -540,5 +607,62 @@ contract YieldReserveEscrow is
     function getVersion() external view returns (uint256) {
         return version;
     }
-}
 
+    function getProtocolFundsSnapshot() external view returns (ProtocolFundsSnapshot memory snapshot) {
+        return ProtocolFundsSnapshot({
+            reserveBalance: totalBalance,
+            totalDeployedViaReserve: totalDeployedToEscrows,
+            totalDirectDeposits: totalDirectDepositsReported,
+            totalEarlyExitLoans: totalLoanedOut,
+            grandTotal: totalBalance + totalDeployedToEscrows + totalDirectDepositsReported + totalLoanedOut,
+            poolCount: trackedPools.length
+        });
+    }
+
+    function getPoolProtocolFunds(address pool) external view returns (PoolProtocolFunds memory funds) {
+        return PoolProtocolFunds({
+            fromReserve: deployedToPool[pool],
+            directDeposit: directDepositsToPool[pool],
+            earlyExitLoan: poolLoans[pool],
+            total: deployedToPool[pool] + directDepositsToPool[pool] + poolLoans[pool]
+        });
+    }
+
+    function getAllPoolsProtocolFunds() external view returns (
+        address[] memory pools,
+        uint256[] memory fromReserve,
+        uint256[] memory directDeposits,
+        uint256[] memory earlyExitLoans,
+        uint256[] memory totals
+    ) {
+        uint256 len = trackedPools.length;
+        pools = new address[](len);
+        fromReserve = new uint256[](len);
+        directDeposits = new uint256[](len);
+        earlyExitLoans = new uint256[](len);
+        totals = new uint256[](len);
+        
+        for (uint256 i = 0; i < len; i++) {
+            address pool = trackedPools[i];
+            pools[i] = pool;
+            fromReserve[i] = deployedToPool[pool];
+            directDeposits[i] = directDepositsToPool[pool];
+            earlyExitLoans[i] = poolLoans[pool];
+            totals[i] = fromReserve[i] + directDeposits[i] + earlyExitLoans[i];
+        }
+        
+        return (pools, fromReserve, directDeposits, earlyExitLoans, totals);
+    }
+
+    function getTrackedPools() external view returns (address[] memory) {
+        return trackedPools;
+    }
+
+    function getTrackedPoolCount() external view returns (uint256) {
+        return trackedPools.length;
+    }
+
+    function isEscrowAuthorized(address escrow) external view returns (bool) {
+        return authorizedEscrows[escrow];
+    }
+}
