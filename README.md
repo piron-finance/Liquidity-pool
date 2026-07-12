@@ -1,3 +1,7 @@
+User/marketing monorepo: https://github.com/piron-finance/apps
+admin/spv monorepo: https://github.com/piron-finance/apps-internal
+Backend: https://github.com/piron-finance/piron-backend
+
 # Piron Pools
 
 Institutional-grade on-chain infrastructure for tokenized fixed-income products. Piron Pools connects capital providers with real-world financial instruments — treasury bills, commercial paper, corporate bonds — through permissioned liquidity pools with full lifecycle management.
