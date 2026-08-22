@@ -430,15 +430,47 @@ contract SingleAssetPoolTest is BaseTest {
         assertEq(token.balanceOf(escrowAddress), 0, "escrow fully distributed");
     }
 
-    /// @dev Characterisation, not an endorsement: with more than one holder a short
-    ///      settlement still strands the last one out.
+    /// @dev Two holders on a short settlement are both paid their share, in either order.
     ///
-    ///      This is a separate defect from the one fixed here. `_handleMaturedWithdrawWithFee`
-    ///      divides the pot by the *live* `totalSupply()`, which falls as shares burn, so
-    ///      each successive redeemer is entitled to a larger fraction of an unchanged pot.
-    ///      This test locks in the current behaviour; it should be inverted when that is
-    ///      fixed.
-    function test_maturity_multipleHolders_stillRacesOnTheLiveDivisor() public {
+    ///      Redemption used to divide by the live totalSupply(), which falls as shares
+    ///      burn while the pot does not, so each successive redeemer was entitled to a
+    ///      larger fraction of an unchanged pot and the escrow ran dry on the last one.
+    function test_maturity_multipleHolders_eachPaidTheirShare() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 60_000e6);
+        _depositAs(user2, 40_000e6);
+        skipTime(EPOCH_DURATION + 1);
+        vm.prank(operator);
+        manager.closeEpoch(poolAddress);
+        vm.prank(spv);
+        manager.withdrawFundsForInvestment(poolAddress, 100_000e6);
+        vm.prank(spv);
+        manager.processInvestment(poolAddress, 100_000e6, "ipfs://proof");
+
+        skipTime(MATURITY_DURATION);
+        uint256 recovered = 95_000e6;
+        _settle(recovered);
+
+        uint256 before1 = token.balanceOf(user1);
+        uint256 before2 = token.balanceOf(user2);
+
+        vm.prank(user1);
+        LiquidityPool(poolAddress).withdraw(60_000e6, user1, user1);
+        vm.prank(user2);
+        LiquidityPool(poolAddress).withdraw(40_000e6, user2, user2);
+
+        uint256 gross1 = (uint256(60_000e6) * recovered) / 100_000e6;
+        uint256 gross2 = (uint256(40_000e6) * recovered) / 100_000e6;
+        assertEq(token.balanceOf(user1) - before1, gross1 - (gross1 * 100) / 10000, "60% share");
+        assertEq(token.balanceOf(user2) - before2, gross2 - (gross2 * 100) / 10000, "40% share");
+
+        // Everything distributed, nothing stranded, nobody locked out.
+        assertEq(token.balanceOf(escrowAddress), 0, "escrow drained exactly");
+    }
+
+    /// @dev Order of redemption does not change what anyone gets.
+    function test_maturity_redemptionOrderDoesNotMatter() public {
         (poolAddress, escrowAddress) = _createPool();
 
         _depositAs(user1, 60_000e6);
@@ -454,19 +486,13 @@ contract SingleAssetPoolTest is BaseTest {
         skipTime(MATURITY_DURATION);
         _settle(95_000e6);
 
-        // First out is paid correctly: 60% of the recovery.
-        uint256 before1 = token.balanceOf(user1);
-        vm.prank(user1);
-        LiquidityPool(poolAddress).withdraw(60_000e6, user1, user1);
-        uint256 expected1 = (uint256(60_000e6) * 95_000e6) / 100_000e6;
-        uint256 fee1 = (expected1 * 100) / 10000;
-        assertEq(token.balanceOf(user1) - before1, expected1 - fee1, "first holder pro-rata");
-
-        // Second is computed against a supply that has already shrunk, so the escrow
-        // cannot cover it.
+        // Second holder goes first this time.
+        uint256 before2 = token.balanceOf(user2);
         vm.prank(user2);
-        vm.expectRevert("PoolEscrow/insufficient-balance");
         LiquidityPool(poolAddress).withdraw(40_000e6, user2, user2);
+
+        uint256 gross2 = (uint256(40_000e6) * 95_000e6) / 100_000e6;
+        assertEq(token.balanceOf(user2) - before2, gross2 - (gross2 * 100) / 10000, "same 40% share");
     }
 
     function test_maturity_discountedInstrument() public {

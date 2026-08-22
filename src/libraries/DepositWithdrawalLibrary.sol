@@ -111,9 +111,10 @@ library DepositWithdrawalLibrary {
         uint256 userShares = IERC20(liquidityPool).balanceOf(owner);
         require(userShares != 0, "DepositWithdrawal/no shares");
         
-        uint256 totalShares = IERC20(liquidityPool).totalSupply();
+        uint256 sharesAtMaturity = poolData.sharesAtMaturity;
+        require(sharesAtMaturity != 0, "DepositWithdrawal/settlement not recorded");
         uint256 totalReturns = CalculationLibrary.calculateTotalReturns(poolData);
-        uint256 userEntitlement = (userShares * totalReturns) / totalShares;
+        uint256 userEntitlement = (userShares * totalReturns) / sharesAtMaturity;
         
         uint256 feeBps = poolData.config.withdrawalFeeBps;
         uint256 feeAmount = (userEntitlement * feeBps) / BASIS_POINTS;

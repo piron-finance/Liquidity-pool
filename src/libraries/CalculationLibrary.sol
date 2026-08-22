@@ -61,8 +61,10 @@ library CalculationLibrary {
             uint256 totalValue = calculateCurrentPoolValue(poolData);
             return (userShares * totalValue) / totalShares;
         } else if (poolData.status == IPoolTypes.PoolStatus.MATURED) {
+            uint256 sharesAtMaturity = poolData.sharesAtMaturity;
+            if (sharesAtMaturity == 0) return 0;
             uint256 totalReturns = calculateTotalReturns(poolData);
-            return (userShares * totalReturns) / totalShares;
+            return (userShares * totalReturns) / sharesAtMaturity;
         } else if (poolData.status == IPoolTypes.PoolStatus.EMERGENCY) {
             return (userShares * poolData.totalRaised) / totalShares;
         }

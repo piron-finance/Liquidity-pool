@@ -52,6 +52,13 @@ interface IPoolTypes {
         uint256 fundsWithdrawnBySPV;
         uint256 fundsReturnedBySPV;
         uint256 totalFeesCollected;
+        /// @dev Share supply as it stood at settlement.
+        ///
+        ///      A Single-Asset pool mints nothing after funding closes, so each holder's
+        ///      fraction of the settlement is a constant of the deal. Reading the live
+        ///      totalSupply() at redemption reads a number that moves because other
+        ///      holders left, which has nothing to do with what anyone is owed.
+        uint256 sharesAtMaturity;
     }
     
     struct UserPoolData {
