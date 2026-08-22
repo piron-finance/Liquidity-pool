@@ -1637,4 +1637,134 @@ contract IntegrationTest is BaseTest {
         assertTrue(foundLocked && foundStable, "Both pools must be in the list");
     }
 
+
+    // ==================== A MALFORMED INSTRUMENT CANNOT FREEZE NAV ====================
+
+    /// @dev Already enforced in _addInstrumentWithAllocation; asserted here alongside the
+    ///      rate check so both halves of the coupon config are covered.
+    function test_stableYield_zeroCouponFrequency_isRejected() public {
+        (stablePoolAddress, stableEscrowAddress) = _createStableYieldPool();
+        _stableDeposit(user1, 100_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+
+        vm.prank(spv);
+        vm.expectRevert(StableYieldManager.InvalidCouponFrequency.selector);
+        stableYieldManager.addInstrument(
+            stablePoolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.INTEREST_BEARING,
+            50_000e6,
+            50_000e6,
+            block.timestamp + 90 days,
+            800,
+            0
+        );
+    }
+
+    function test_stableYield_zeroCouponRate_isRejected() public {
+        (stablePoolAddress, stableEscrowAddress) = _createStableYieldPool();
+        _stableDeposit(user1, 100_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+
+        vm.prank(spv);
+        vm.expectRevert(StableYieldManager.InvalidCouponRate.selector);
+        stableYieldManager.addInstrument(
+            stablePoolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.INTEREST_BEARING,
+            50_000e6,
+            50_000e6,
+            block.timestamp + 90 days,
+            0,
+            4
+        );
+    }
+
+    /// @dev A discounted instrument legitimately carries no coupon config.
+    function test_stableYield_discountedNeedsNoCouponConfig() public {
+        (stablePoolAddress, stableEscrowAddress) = _createStableYieldPool();
+        _stableDeposit(user1, 100_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            stablePoolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.DISCOUNTED,
+            50_000e6,
+            52_500e6,
+            block.timestamp + 90 days,
+            0,
+            0
+        );
+
+        assertGt(stableYieldManager.calculatePoolNAV(stablePoolAddress), 0, "NAV still computable");
+    }
+
+    /// @dev An admin can take a bad holding out of NAV without waiting for its maturity
+    ///      or needing the SPV to return funds.
+    function test_stableYield_writeOffInstrument_restoresNav() public {
+        (stablePoolAddress, stableEscrowAddress) = _createStableYieldPool();
+        _stableDeposit(user1, 100_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            stablePoolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.DISCOUNTED,
+            50_000e6,
+            52_500e6,
+            block.timestamp + 90 days,
+            0,
+            0
+        );
+
+        uint256 navWithInstrument = stableYieldManager.calculatePoolNAV(stablePoolAddress);
+
+        vm.prank(admin);
+        stableYieldManager.writeOffInstrument(stablePoolAddress, 0);
+
+        assertLt(
+            stableYieldManager.calculatePoolNAV(stablePoolAddress),
+            navWithInstrument,
+            "written-off holding leaves NAV"
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(StableYieldManager.InstrumentNotActive.selector);
+        stableYieldManager.writeOffInstrument(stablePoolAddress, 0);
+    }
+
+    function test_stableYield_writeOffInstrument_adminOnly() public {
+        (stablePoolAddress, stableEscrowAddress) = _createStableYieldPool();
+        _stableDeposit(user1, 100_000e6);
+
+        vm.prank(operator);
+        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            stablePoolAddress,
+            allocId,
+            IStableYieldTypes.InstrumentType.DISCOUNTED,
+            50_000e6,
+            52_500e6,
+            block.timestamp + 90 days,
+            0,
+            0
+        );
+
+        vm.prank(operator);
+        vm.expectRevert();
+        stableYieldManager.writeOffInstrument(stablePoolAddress, 0);
+    }
+
 }

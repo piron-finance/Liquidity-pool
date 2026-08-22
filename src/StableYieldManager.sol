@@ -58,6 +58,7 @@ contract StableYieldManager is
     error FactoryAlreadySet();
     error InsufficientLiquidity();
     error InvalidCouponFrequency();
+    error InvalidCouponRate();
 
     // ==================== STATE ====================
 
@@ -115,6 +116,7 @@ contract StableYieldManager is
     
     event PoolDeactivated(address indexed poolAddress, uint256 timestamp);
     event DepositValidated( address indexed poolAddress, address indexed user, uint256 amount, uint256 shares );
+    event InstrumentWrittenOff(address indexed poolAddress, uint256 indexed instrumentId, uint256 purchasePrice);
     event WithdrawalValidated( address indexed poolAddress, address indexed user, uint256 shares, uint256 value, bool immediate  ); 
     event WithdrawalQueued( address indexed poolAddress, address indexed user, uint256 indexed requestId, uint256 shares, uint256 estimatedValue);
     event WithdrawalProcessed( address indexed poolAddress, address indexed user, uint256 indexed requestId, uint256 actualValue, uint256 penaltyDeducted ); 
@@ -681,8 +683,9 @@ contract StableYieldManager is
         
         if (maturityDate <= block.timestamp) revert InvalidMaturity();
         if (faceValue < purchasePrice) revert InvalidFaceValue();
-        if (instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING && couponFrequency == 0) {
-            revert InvalidCouponFrequency();
+        if (instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING) {
+            if (couponFrequency == 0) revert InvalidCouponFrequency();
+            if (annualCouponRate == 0) revert InvalidCouponRate();
         }
         
         uint256 instrumentId = poolInstrumentCount[poolAddress];
@@ -893,6 +896,25 @@ contract StableYieldManager is
     /**
      * @dev Deactivate a pool, preventing new deposits and allocations.
      */
+    /// @dev Removes a holding from NAV without requiring funds or its maturity date.
+    ///
+    ///      matureInstrumentWithFunds needs both, which is no use when the problem is the
+    ///      instrument itself. Writes the holding to zero, so use it only where the
+    ///      position is genuinely worthless or was recorded in error.
+    function writeOffInstrument(address poolAddress, uint256 instrumentId)
+        external
+        onlyRole(accessManager.DEFAULT_ADMIN_ROLE())
+        poolExists(poolAddress)
+    {
+        if (instrumentId >= poolInstruments[poolAddress].length) revert InvalidInstrument();
+        IStableYieldTypes.InstrumentHolding storage instrument = poolInstruments[poolAddress][instrumentId];
+        if (!instrument.isActive) revert InstrumentNotActive();
+
+        instrument.isActive = false;
+
+        emit InstrumentWrittenOff(poolAddress, instrumentId, instrument.purchasePrice);
+    }
+
     function deactivatePool(address poolAddress) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) {
         pools[poolAddress].isActive = false;
         emit PoolDeactivated(poolAddress, block.timestamp);

@@ -99,6 +99,13 @@ library StableYieldNAVLibrary {
         IStableYieldTypes.InstrumentHolding storage instrument,
         uint256 currentTime
     ) public view returns (uint256 value) {
+        // Defence in depth: addInstrument rejects a zero frequency, but NAV is read on
+        // every deposit, withdrawal and queue operation. One malformed holding must never
+        // be able to take the whole pool's pricing down.
+        if (instrument.couponFrequency == 0) {
+            return instrument.faceValue;
+        }
+
         uint256 couponPeriodSeconds = SECONDS_PER_YEAR / instrument.couponFrequency;
         uint256 lastCouponDate = instrument.couponsPaid == 0 ? 
             instrument.purchaseDate : 
