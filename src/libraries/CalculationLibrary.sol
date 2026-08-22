@@ -97,14 +97,20 @@ library CalculationLibrary {
         return (actualRaised * BASIS_POINTS) / (BASIS_POINTS - discountRate);
     }
 
+    /// @dev Total distributable to holders after settlement. The single definition of the
+    ///      redemption pot for both instrument types.
+    ///
+    ///      Based on what the SPV actually returned, never on what it promised. The
+    ///      promise lives in `config.faceValue` and is a quote (see calculateExpectedReturn);
+    ///      paying from it means a pool that settles short still tries to pay full face and
+    ///      drains its escrow, leaving late redeemers with nothing.
+    ///
+    ///      Coupons already marked distributed are excluded: those are claimable separately
+    ///      through claimUserCoupon and have already left the escrow, so counting them here
+    ///      would pay them twice.
     function calculateTotalReturns(IPoolTypes.PoolData storage poolData) public view returns (uint256) {
-        if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
-            return poolData.config.faceValue;
-        } else {
-           
-            uint256 undistributedCoupons = poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
-            return poolData.fundsReturnedBySPV + undistributedCoupons;
-        }
+        uint256 undistributedCoupons = poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
+        return poolData.fundsReturnedBySPV + undistributedCoupons;
     }
 
     function calculateExpectedCoupons(IPoolTypes.PoolData storage poolData) public view returns (uint256) {

@@ -7,6 +7,7 @@ import "../interfaces/IPoolRegistry.sol";
 import "../interfaces/IPoolEscrow.sol";
 import "../interfaces/ILiquidityPool.sol";
 import "./ValidationLibrary.sol";
+import "./CalculationLibrary.sol";
 
 /**
  * @title DepositWithdrawalLibrary
@@ -111,7 +112,7 @@ library DepositWithdrawalLibrary {
         require(userShares != 0, "DepositWithdrawal/no shares");
         
         uint256 totalShares = IERC20(liquidityPool).totalSupply();
-        uint256 totalReturns = calculateTotalReturns(poolData);
+        uint256 totalReturns = CalculationLibrary.calculateTotalReturns(poolData);
         uint256 userEntitlement = (userShares * totalReturns) / totalShares;
         
         uint256 feeBps = poolData.config.withdrawalFeeBps;
@@ -139,18 +140,6 @@ library DepositWithdrawalLibrary {
         return shares;
     }
     
-    function calculateTotalReturns(IPoolTypes.PoolData storage poolData) internal view returns (uint256) {
-        uint256 baseValue = poolData.actualInvested;
-        
-        if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
-            return baseValue + poolData.totalDiscountEarned;
-        } else if (poolData.config.instrumentType == IPoolTypes.InstrumentType.INTEREST_BEARING) {
-            return baseValue + poolData.totalCouponsReceived;
-        }
-        
-        return baseValue;
-    }
-
     // ==================== DISCOUNT ====================
 
     /// @dev Records the discount earned for a matured discounted instrument.
