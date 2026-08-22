@@ -22,6 +22,21 @@ library DepositWithdrawalLibrary {
     event Withdraw(address indexed caller, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
     event WithdrawalFeeCollected(address indexed pool, address indexed user, uint256 feeAmount, uint256 netAmount);
 
+    /// @dev Emitted on every Single-Asset withdrawal path, with the pool as topic 1 so an
+    ///      indexer can filter per pool. The ERC-4626 `Withdraw` event spends all three
+    ///      topic slots on addresses and carries no pool, which left funding-stage
+    ///      cancellations and emergency refunds unfilterable and therefore unindexed.
+    ///      `kind` is 0 funding, 1 matured, 2 emergency.
+    event PoolWithdrawal(
+        address indexed pool,
+        address indexed owner,
+        uint8 indexed kind,
+        uint256 assets,
+        uint256 shares,
+        uint256 fee
+    );
+
+
     error WithdrawalNotAllowed();
 
     // ==================== DEPOSIT ====================
@@ -135,6 +150,7 @@ library DepositWithdrawalLibrary {
         
         emit Withdraw(msg.sender, receiver, owner, netAmount, shares);
         emit WithdrawalFeeCollected(liquidityPool, owner, feeAmount, netAmount);
+        emit PoolWithdrawal(liquidityPool, owner, 1, netAmount, shares, feeAmount);
         
         return shares;
     }

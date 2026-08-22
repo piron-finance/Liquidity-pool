@@ -130,6 +130,21 @@ library ValidationLibrary {
 
     event Withdraw(address indexed caller, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
 
+    /// @dev Emitted on every Single-Asset withdrawal path, with the pool as topic 1 so an
+    ///      indexer can filter per pool. The ERC-4626 `Withdraw` event spends all three
+    ///      topic slots on addresses and carries no pool, which left funding-stage
+    ///      cancellations and emergency refunds unfilterable and therefore unindexed.
+    ///      `kind` is 0 funding, 1 matured, 2 emergency.
+    event PoolWithdrawal(
+        address indexed pool,
+        address indexed owner,
+        uint8 indexed kind,
+        uint256 assets,
+        uint256 shares,
+        uint256 fee
+    );
+
+
     /// @dev Handles withdrawal during FUNDING: burns shares, releases funds from escrow.
     function handleFundingWithdrawal(
         mapping(address => IPoolTypes.PoolData) storage pools,
@@ -164,6 +179,7 @@ library ValidationLibrary {
         escrowContract.releaseFunds(receiver, assets);
         
         emit Withdraw(msg.sender, receiver, owner, assets, shares);
+        emit PoolWithdrawal(poolAddress, owner, 0, assets, shares, 0);
         return shares;
     }
     
@@ -228,6 +244,7 @@ library ValidationLibrary {
         escrowContract.releaseFunds(receiver, assets);
         
         emit Withdraw(msg.sender, receiver, owner, assets, shares);
+        emit PoolWithdrawal(poolAddress, owner, 2, assets, shares, 0);
         return shares;
     }
 }

@@ -289,6 +289,76 @@ contract SingleAssetPoolTest is BaseTest {
         assertEq(manager.poolActualInvested(poolAddress), 80_000e6);
     }
     
+
+    // ==================== EVERY WITHDRAWAL PATH IS INDEXABLE ====================
+
+    event PoolWithdrawal(
+        address indexed pool,
+        address indexed owner,
+        uint8 indexed kind,
+        uint256 assets,
+        uint256 shares,
+        uint256 fee
+    );
+
+    /// @dev Cancelling during funding emits an event carrying the pool, so an indexer can
+    ///      filter it. Previously this path emitted only ERC-4626 `Withdraw`, which has no
+    ///      pool topic — so the backend never saw it and balances drifted from chain.
+    function test_fundingCancellation_isIndexable() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _depositAs(user1, 10_000e6);
+
+        vm.expectEmit(true, true, true, true);
+        emit PoolWithdrawal(poolAddress, user1, 0, 10_000e6, 10_000e6, 0);
+
+        vm.prank(user1);
+        LiquidityPool(poolAddress).withdraw(10_000e6, user1, user1);
+    }
+
+    function test_maturedRedemption_isIndexable() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _depositAs(user1, 100_000e6);
+        skipTime(EPOCH_DURATION + 1);
+        vm.prank(operator);
+        manager.closeEpoch(poolAddress);
+        vm.prank(spv);
+        manager.withdrawFundsForInvestment(poolAddress, 100_000e6);
+        vm.prank(spv);
+        manager.processInvestment(poolAddress, 100_000e6, "ipfs://proof");
+
+        skipTime(MATURITY_DURATION);
+        uint256 faceValue = (uint256(100_000e6) * 10000) / (10000 - 500);
+        vm.startPrank(spv);
+        token.approve(address(manager), faceValue);
+        manager.processMaturity(poolAddress, faceValue);
+        vm.stopPrank();
+
+        // Pot is the projection on this branch; PR #29 changes that independently.
+        uint256 entitlement = faceValue;
+        uint256 fee = (entitlement * 100) / 10000;
+
+        vm.expectEmit(true, true, true, true);
+        emit PoolWithdrawal(poolAddress, user1, 1, entitlement - fee, 100_000e6, fee);
+
+        vm.prank(user1);
+        LiquidityPool(poolAddress).withdraw(100_000e6, user1, user1);
+    }
+
+    function test_emergencyRefund_isIndexable() public {
+        (poolAddress, escrowAddress) = _createPool();
+        // Below the 80% threshold, so closing the epoch sends the pool to EMERGENCY.
+        _depositAs(user1, 70_000e6);
+        skipTime(EPOCH_DURATION + 1);
+        vm.prank(operator);
+        manager.closeEpoch(poolAddress);
+
+        vm.expectEmit(true, true, true, true);
+        emit PoolWithdrawal(poolAddress, user1, 2, 30_000e6, 30_000e6, 0);
+
+        vm.prank(user1);
+        LiquidityPool(poolAddress).withdraw(30_000e6, user1, user1);
+    }
+
     function test_maturity_discountedInstrument() public {
         (poolAddress, escrowAddress) = _createPool();
         
