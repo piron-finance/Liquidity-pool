@@ -246,9 +246,12 @@ contract LockedPool is
         durationDays = tier.durationDays;
     }
 
+    /// @dev Anyone who can spot trouble may halt the pool. Releasing it is admin-only:
+    ///      whoever pulled the brake should not also decide when it comes off.
     function pause() external {
         require(
             accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) ||
+            accessManager.hasRole(accessManager.EMERGENCY_ROLE(), msg.sender) ||
             accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender),
             "LockedPool/not authorized"
         );
@@ -256,11 +259,7 @@ contract LockedPool is
     }
 
     function unpause() external {
-        require(
-            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) ||
-            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender),
-            "LockedPool/not authorized"
-        );
+        require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender), "LockedPool/not admin");
         _unpause();
     }
 }

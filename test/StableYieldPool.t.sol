@@ -1014,4 +1014,71 @@ contract StableYieldPoolTest is BaseTest {
 
         assertTrue(token.balanceOf(user2) > user2BalBefore, "User2 should withdraw with yield");
     }
+
+    // ==================== EMERGENCY EXIT AUTHORITY ====================
+
+    function test_emergencyRedeem_paysTheOwnerNotTheCaller() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _depositAs(user1, 10_000e6);
+
+        uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
+        uint256 operatorBefore = token.balanceOf(operator);
+        uint256 ownerBefore = token.balanceOf(user1);
+
+        vm.prank(operator);
+        StableYieldPool(poolAddress).emergencyRedeem(shares, user1);
+
+        assertGt(token.balanceOf(user1), ownerBefore, "owner receives the proceeds");
+        assertEq(token.balanceOf(operator), operatorBefore, "operator receives nothing");
+        assertEq(StableYieldPool(poolAddress).balanceOf(user1), 0, "position closed");
+    }
+
+    function test_emergencyRedeem_onlyOperator() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _depositAs(user1, 10_000e6);
+        uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
+
+        vm.prank(user2);
+        vm.expectRevert("StableYieldPool/not operator");
+        StableYieldPool(poolAddress).emergencyRedeem(shares, user1);
+    }
+
+    function test_emergencyRedeem_blockedWhilePaused() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _depositAs(user1, 10_000e6);
+        uint256 shares = StableYieldPool(poolAddress).balanceOf(user1);
+
+        vm.prank(operator);
+        StableYieldPool(poolAddress).pause();
+
+        // A paused pool is paused for everyone. Letting one holder out while the rest
+        // wait is how a stale price gets arbitraged.
+        vm.prank(operator);
+        vm.expectRevert();
+        StableYieldPool(poolAddress).emergencyRedeem(shares, user1);
+    }
+
+    function test_pause_isWideButUnpauseIsAdminOnly() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        vm.prank(emergency);
+        StableYieldPool(poolAddress).pause();
+        assertTrue(StableYieldPool(poolAddress).paused(), "emergency can halt");
+
+        vm.prank(operator);
+        vm.expectRevert("StableYieldPool/not admin");
+        StableYieldPool(poolAddress).unpause();
+
+        vm.prank(admin);
+        StableYieldPool(poolAddress).unpause();
+        assertFalse(StableYieldPool(poolAddress).paused(), "admin releases");
+    }
+
+    function test_pause_outsiderCannotHalt() public {
+        (poolAddress, escrowAddress) = _createPool();
+        vm.prank(user1);
+        vm.expectRevert("StableYieldPool/not authorized");
+        StableYieldPool(poolAddress).pause();
+    }
+
 }

@@ -246,13 +246,20 @@ contract StableYieldPool is
         }
     }
 
+    /// @dev Anyone who can spot trouble may halt the pool. Releasing it is admin-only:
+    ///      whoever pulled the brake should not also decide when it comes off.
     function pause() external {
-        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
+        require(
+            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) ||
+            accessManager.hasRole(accessManager.EMERGENCY_ROLE(), msg.sender) ||
+            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender),
+            "StableYieldPool/not authorized"
+        );
         _pause();
     }
 
     function unpause() external {
-        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
+        require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender), "StableYieldPool/not admin");
         _unpause();
     }
     
@@ -269,19 +276,21 @@ contract StableYieldPool is
         emit HoldingPeriodUpdated(oldPeriod, newPeriod);
     }
     
-    function emergencyRedeem(uint256 shares, address receiver, address owner) external returns (uint256 assets) {
+    /// @dev Operator-initiated exit that waives the holding period, for wind-downs and
+    ///      compassionate cases. Proceeds always go to the position owner: an operator
+    ///      decides whether someone exits, never where the money goes.
+    function emergencyRedeem(uint256 shares, address owner) external whenNotPaused returns (uint256 assets) {
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
         require(shares > 0, "StableYieldPool/invalid shares");
-        require(receiver != address(0), "StableYieldPool/invalid receiver");
         require(owner != address(0), "StableYieldPool/invalid owner");
 
-        (uint256 actualShares, uint256 withdrawalValue, bool immediate) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
-        
+        (uint256 actualShares, uint256 withdrawalValue, bool immediate) = stableYieldManager.validateWithdrawal(address(this), shares, owner, owner);
+
         _burn(owner, actualShares);
-        
+
         if (immediate) {
-            escrow.withdraw(receiver, withdrawalValue);
-            emit Withdraw(msg.sender, receiver, owner, withdrawalValue, actualShares);
+            escrow.withdraw(owner, withdrawalValue);
+            emit Withdraw(msg.sender, owner, owner, withdrawalValue, actualShares);
         } else {
             emit WithdrawalRequested(owner, shares, withdrawalValue);
         }
