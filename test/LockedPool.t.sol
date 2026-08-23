@@ -192,9 +192,14 @@ contract LockedPoolTest is BaseTest {
         return (pool, escrow);
     }
     
+    /// @dev Seeds the capital that funds locked-pool interest. Routed through the escrow's
+    ///      accounting so the funds are tracked; a bare transfer lands as untracked balance
+    ///      that nothing can spend and sweepDust would ship to the FeeManager.
     function _fundEscrow(uint256 amount) internal {
-        vm.startPrank(operator);
-        IERC20(address(token)).safeTransfer(escrowAddress, amount);
+        token.mint(admin, amount);
+        vm.startPrank(admin);
+        token.approve(escrowAddress, amount);
+        LockedPoolEscrow(escrowAddress).receiveProtocolFundsFromAdmin(amount);
         vm.stopPrank();
     }
     
@@ -1295,7 +1300,7 @@ contract LockedPoolTest is BaseTest {
         uint256 reserveBefore = yieldReserve.getAvailableBalance();
 
         vm.prank(operator);
-        escrow.transferPenaltiesToReserve(address(yieldReserve));
+        escrow.transferPenaltiesToReserve();
 
         uint256 reserveAfter = yieldReserve.getAvailableBalance();
         assertTrue(reserveAfter > reserveBefore, "Reserve should receive penalties");
@@ -1406,4 +1411,55 @@ contract LockedPoolTest is BaseTest {
         assertEq(yieldReserve.directDepositsToPool(poolAddress), 30_000e6, "Reserve updates after release");
         assertEq(LockedPoolEscrow(escrowAddress).protocolFundsDirectDeposit(), 30_000e6, "Escrow updates after release");
     }
+
+    // ==================== ESCROW FUND ACCOUNTING ====================
+
+    /// @dev A maturity payout is principal plus interest. Only the principal is depositor
+    ///      money tracked in principalHeld; the interest is funded from protocol capital.
+    ///      Both must be debited, or the escrow reports holding money it has already paid out.
+    function test_escrowAccounting_payoutDebitsPrincipalThenProtocolCapital() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _fundEscrow(1_000_000e6);
+
+        uint256 principal = 100_000e6;
+        uint256 positionId = _depositAs(user1, principal, 0);
+
+        LockedPoolEscrow escrow = LockedPoolEscrow(escrowAddress);
+        uint256 principalBefore = escrow.getPrincipalHeld();
+        uint256 protocolBefore = escrow.getProtocolFundsDirectDeposit();
+
+        skipTime(TIER_3M_DAYS * 1 days + 1);
+
+        uint256 balanceBefore = token.balanceOf(user1);
+        vm.prank(user1);
+        LockedPool(poolAddress).redeemPosition(positionId);
+        uint256 paid = token.balanceOf(user1) - balanceBefore;
+
+        uint256 principalDrawn = principalBefore - escrow.getPrincipalHeld();
+        uint256 protocolDrawn = protocolBefore - escrow.getProtocolFundsDirectDeposit();
+
+        assertEq(principalDrawn + protocolDrawn, paid, "Every unit paid out must be debited somewhere");
+        assertEq(principalDrawn, principal, "Principal comes out of principalHeld");
+        assertEq(protocolDrawn, paid - principal, "The interest comes out of protocol capital");
+    }
+
+    /// @dev With no protocol capital seeded there is nothing to fund the interest from, so
+    ///      the payout must revert rather than transfer against untracked balance.
+    function test_escrowAccounting_payoutRevertsWhenInterestIsUnfunded() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        uint256 principal = 100_000e6;
+        uint256 positionId = _depositAs(user1, principal, 0);
+
+        // A bare transfer gives the escrow tokens it does not account for. The payout must
+        // not quietly spend them.
+        token.mint(escrowAddress, 1_000_000e6);
+
+        skipTime(TIER_3M_DAYS * 1 days + 1);
+
+        vm.prank(user1);
+        vm.expectRevert("LockedPoolEscrow/insufficient funds");
+        LockedPool(poolAddress).redeemPosition(positionId);
+    }
+
 }
