@@ -8,21 +8,20 @@ import "../escrows/StableYieldEscrow.sol";
 
 /**
  * @title StableYieldNAVLibrary
- * @dev Net Asset Value calculations for StableYieldPools: gross asset value (discounted +
- *      interest-bearing instruments), pool reserves, NAV per share, and NAV event triggers.
+ * @dev Asset valuation for StableYieldPools: mark-to-market of discounted and
+ *      interest-bearing instruments, plus escrow reserves.
+ *
+ *      This is the base NAV only. Capital drawn by an SPV and not yet placed is held by
+ *      StableYieldManager and added there, so StableYieldManager.calculatePoolNAV is the
+ *      authoritative figure.
  */
 library StableYieldNAVLibrary {
     
     uint256 constant SECONDS_PER_YEAR = 365 days;
 
-    // ==================== EVENTS ====================
-    
-    event NAVCalculated(address indexed poolAddress, uint256 totalNAV, uint256 navPerShare, uint256 totalShares, uint256 timestamp);
-    event NAVUpdated(address indexed poolAddress, uint256 totalNAV, uint256 navPerShare, string reason, uint256 timestamp);
-
     // ==================== NAV CALCULATION ====================
     
-    /// @dev Total NAV = gross asset value (instruments) + pool reserves (escrow balance).
+    /// @dev Base NAV = gross asset value (instruments) + pool reserves (escrow balance).
     function calculatePoolNAV(
         IStableYieldTypes.PoolData storage poolData,
         IStableYieldTypes.InstrumentHolding[] storage instruments
@@ -33,22 +32,6 @@ library StableYieldNAVLibrary {
         uint256 poolReserves = escrow.getPoolReserves();
         
         return grossAssetValue + poolReserves;
-    }
-    
-    /// @dev NAV per share in 1e18 precision. Returns 1e18 when no shares exist.
-    function calculateNAVPerShare(
-        IStableYieldTypes.PoolData storage poolData,
-        IStableYieldTypes.InstrumentHolding[] storage instruments
-    ) public view returns (uint256 navPerShare) {
-        uint256 totalNAV = calculatePoolNAV(poolData, instruments);
-        
-        uint256 totalShares = IERC20(poolData.poolAddress).totalSupply();
-        
-        if (totalShares == 0) {
-            return 1e18; 
-        }
-        
-        return (totalNAV * 1e18) / totalShares;
     }
     
     // ==================== GROSS ASSET VALUE ====================
@@ -99,6 +82,13 @@ library StableYieldNAVLibrary {
         IStableYieldTypes.InstrumentHolding storage instrument,
         uint256 currentTime
     ) public view returns (uint256 value) {
+        // Interest stops accruing at maturity. Without this an instrument the SPV never
+        // settles keeps inflating NAV forever, and holders redeem against value that
+        // does not exist.
+        if (currentTime > instrument.maturityDate) {
+            currentTime = instrument.maturityDate;
+        }
+        
         uint256 couponPeriodSeconds = SECONDS_PER_YEAR / instrument.couponFrequency;
         uint256 lastCouponDate = instrument.couponsPaid == 0 ? 
             instrument.purchaseDate : 
@@ -109,22 +99,5 @@ library StableYieldNAVLibrary {
         uint256 accruedInterest = (couponAmount * timeSinceLastCoupon) / couponPeriodSeconds;
         
         return instrument.faceValue + accruedInterest;
-    }
-    
-    // ==================== NAV UPDATE TRIGGER ====================
-
-    /// @dev Emits NAVUpdated and NAVCalculated events for off-chain indexing.
-    function triggerNAVUpdate(
-        address poolAddress,
-        IStableYieldTypes.PoolData storage poolData,
-        IStableYieldTypes.InstrumentHolding[] storage instruments,
-        string memory reason
-    ) external {
-        uint256 totalNAV = calculatePoolNAV(poolData, instruments);
-        uint256 totalShares = IERC20(poolData.poolAddress).totalSupply();
-        uint256 navPerShare = calculateNAVPerShare( poolData, instruments);
-        
-        emit NAVUpdated(poolAddress, totalNAV, navPerShare, reason, block.timestamp);
-        emit NAVCalculated(poolAddress, totalNAV, navPerShare, totalShares, block.timestamp);
     }
 }
