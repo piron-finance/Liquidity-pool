@@ -9,11 +9,12 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "./interfaces/ILiquidityPool.sol";
 import "./interfaces/IManager.sol";
 import "./interfaces/IPoolEscrow.sol";
+import "./types/IPoolTypes.sol";
 
 /**
  * @title LiquidityPool
  * @dev ERC4626 vault for Single Asset (deal) pools. Delegates lifecycle logic to Manager.
- *      Supports coupon claims, maturity entitlements, discount accrual, and emergency exit.
+ *      Supports coupon claims, maturity entitlements, and emergency exit.
  */
 contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, ILiquidityPool, PausableUpgradeable {
     // ==================== STATE ====================
@@ -22,10 +23,6 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
     
     IPoolManager public manager;
     IPoolEscrow public escrow;
-    mapping(address => uint256) public override pendingRefunds;
-    mapping(address => uint256) public override discountedBillsAccrued; 
-    uint256 public override totalPendingRefunds;
-    uint256 public override totalDiscountAccrued;
 
     // ==================== MODIFIERS ====================
 
@@ -114,29 +111,8 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         return actualShares;
     }
 
-    // ==================== REFUND / EMERGENCY ====================
+    // ==================== EMERGENCY ====================
 
-    /// @dev Claims a pending refund for the caller, burns proportional shares, and transfers assets.
-    function claimRefund() external whenNotPaused {
-        require(pendingRefunds[msg.sender] > 0, "LiquidityPool/no-refund-available");
-        
-        uint256 refundAmount = pendingRefunds[msg.sender];
-        uint256 userShares = balanceOf(msg.sender);
-        
-        uint256 totalUserValue = manager.calculateUserReturn(msg.sender);
-
-        uint256 sharesToBurn = totalUserValue > 0 ? (userShares * refundAmount) / totalUserValue : userShares;
-        
-        pendingRefunds[msg.sender] = 0;
-        totalPendingRefunds -= refundAmount;
-        
-        _burn(msg.sender, sharesToBurn);
-        
-        IPoolManager(manager).handleWithdraw(address(this), refundAmount, msg.sender, msg.sender, msg.sender);
-        
-        emit RefundClaimed(msg.sender, refundAmount);
-    }
-    
     /// @dev Emergency exit: burns all caller shares and retrieves available assets.
     function emergencyWithdraw() external whenNotPaused {
         uint256 userShares = balanceOf(msg.sender);
@@ -164,34 +140,6 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
 
     // ==================== MANAGER-ONLY STATE SETTERS ====================
 
-    /// @dev Sets the refund amount for a user. Called by the manager during lifecycle transitions.
-    function setUserRefund(address user, uint256 amount) external override onlyManager {
-        uint256 oldAmount = pendingRefunds[user];
-        pendingRefunds[user] = amount;
-        
-        if (amount > oldAmount) {
-            totalPendingRefunds += (amount - oldAmount);
-        } else {
-            totalPendingRefunds -= (oldAmount - amount);
-        }
-        
-        emit RefundSet(user, amount);
-    }
-
-    /// @dev Sets the discount accrual for a user. Called by the manager for discounted instruments.
-    function setDiscountAccrued(address user, uint256 amount) external override onlyManager {
-        uint256 oldAmount = discountedBillsAccrued[user];
-        discountedBillsAccrued[user] = amount;
-        
-        if (amount > oldAmount) {
-            totalDiscountAccrued += (amount - oldAmount);
-        } else {
-            totalDiscountAccrued -= (oldAmount - amount);
-        }
-        
-        emit DiscountAccrued(user, amount);
-    }
-    
     function mintShares(uint256 shares, address receiver) external override onlyManager {
         _mint(receiver, shares);
     }
@@ -248,16 +196,13 @@ contract LiquidityPool is Initializable, UUPSUpgradeable, ERC4626Upgradeable, IL
         return IPoolManager(manager).getExpectedReturn();
     }
     
+    /// @dev True while the pool holds a live investment.
     function isActive() external view returns (bool) {
-        return manager.getPoolStatus() == 2;
+        return manager.getPoolStatus() == uint8(IPoolTypes.PoolStatus.INVESTED);
     }
     
     function isInEmergency() external view returns (bool) {
-        return manager.getPoolStatus() == 4;
-    }
-
-    function _getEmergencyRefundPool() internal view returns (uint256) {
-        return manager.poolTotalRaised(address(this));
+        return manager.getPoolStatus() == uint8(IPoolTypes.PoolStatus.EMERGENCY);
     }
 
 }

@@ -73,7 +73,6 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
     event PoolFullyWithdrawn(address indexed pool, uint256 timestamp);
     event EmergencyStateChanged(address indexed poolAddress, string trigger, uint256 totalAmount, uint256 totalShares, uint256 timestamp);
     event PoolCancelled(address indexed poolAddress, address indexed cancelledBy, uint256 timestamp);
-    event DiscountsDistributed(address indexed poolAddress, uint256 totalDiscount, uint256 totalShares);
     event MaturityExtended(address indexed pool, uint256 oldDate, uint256 newDate, address indexed extendedBy);
     event TreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
     event WithdrawalFeeCollected(address indexed pool, address indexed user, uint256 feeAmount, uint256 netAmount);
@@ -185,6 +184,20 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
         if (poolConfig.minimumFundingThreshold == 0 || poolConfig.minimumFundingThreshold > 10000) revert InvalidConfig();
         if (poolConfig.withdrawalFeeBps > MAX_WITHDRAWAL_FEE) revert FeeTooHigh();
         if (poolConfig.minInvestment == 0) revert InvalidConfig();
+        
+        // PoolFactory is the only caller and already enforces a non-zero targetRaise, a
+        // non-zero epochDuration, and a maturity past the epoch. What it does not check is
+        // everything below, each of which strands deposits: a discount rate at or above 100%
+        // reverts face-value derivation at epoch close so the pool can never leave FUNDING;
+        // a minimum above the target makes the pool undepositable; and mismatched coupon
+        // arrays revert at investment confirmation. Funding-phase withdrawal closes at
+        // epochEndTime, so in every case the money is already locked in by then.
+        if (poolConfig.minInvestment > poolConfig.targetRaise) revert InvalidConfig();
+        if (poolConfig.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
+            if (poolConfig.discountRate == 0 || poolConfig.discountRate >= 10000) revert InvalidConfig();
+        } else {
+            if (poolConfig.couponDates.length != poolConfig.couponRates.length) revert InvalidConfig();
+        }
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(pool);
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
