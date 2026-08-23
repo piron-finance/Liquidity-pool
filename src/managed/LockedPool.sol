@@ -107,7 +107,7 @@ contract LockedPool is
         return (positionId, shares);
     }
 
-    function redeemPosition(uint256 positionId) external whenNotPaused returns (uint256 payout) {
+    function redeemPosition(uint256 positionId) external returns (uint256 payout) {
         ILockedPoolTypes.UserPosition memory position = lockedPoolManager.getPosition(positionId);
         require(position.user == msg.sender, "LockedPool/not owner");
         
@@ -139,7 +139,7 @@ contract LockedPool is
         return (payout, penalty);
     }
 
-    function setAutoRollover(uint256 positionId, bool enabled) external whenNotPaused {
+    function setAutoRollover(uint256 positionId, bool enabled) external {
         lockedPoolManager.setAutoRollover(positionId, enabled, msg.sender);
         
         emit AutoRolloverUpdated(msg.sender, positionId, enabled);
@@ -246,6 +246,8 @@ contract LockedPool is
         durationDays = tier.durationDays;
     }
 
+    /// @dev Pausing freezes new deposits, early exits, and transfers. Matured redemptions
+    ///      and rollover opt-outs stay open. Kept wide so whoever notices a problem can act.
     function pause() external {
         require(
             accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) ||
@@ -255,12 +257,9 @@ contract LockedPool is
         _pause();
     }
 
+    /// @dev Admin only, so a compromised operator cannot undo a pause.
     function unpause() external {
-        require(
-            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) ||
-            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender),
-            "LockedPool/not authorized"
-        );
+        require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender), "LockedPool/not admin");
         _unpause();
     }
 }

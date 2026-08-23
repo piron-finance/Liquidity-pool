@@ -93,7 +93,6 @@ contract LockedPoolManager is
     mapping(address => uint256) public totalSPVAllocations;
     mapping(address => mapping(address => uint256)) public poolToSPVAllocations;
     mapping(bytes32 => ILockedPoolTypes.SPVAllocation) public spvAllocations;
-    mapping(address => bytes32[]) public poolAllocationIds;
 
     mapping(address => ILockedPoolTypes.PoolProtocolAccounting) public poolAccounting;
     mapping(uint256 => ILockedPoolTypes.DebtPosition) public debtPositions;
@@ -635,7 +634,6 @@ contract LockedPoolManager is
             status: ILockedPoolTypes.AllocationStatus.INVESTED
         });
         
-        poolAllocationIds[poolAddress].push(allocationId);
         totalSPVAllocations[spvAddress] += amount;
         poolToSPVAllocations[poolAddress][spvAddress] += amount;
         
