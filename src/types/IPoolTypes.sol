@@ -52,6 +52,9 @@ interface IPoolTypes {
         uint256 fundsWithdrawnBySPV;
         uint256 fundsReturnedBySPV;
         uint256 totalFeesCollected;
+        /// @dev Share supply frozen at maturity. Redemption divides by this, not by live
+        ///      supply, so each holder's fraction of the settled pot cannot shift as others exit.
+        uint256 sharesAtMaturity;
     }
     
     struct UserPoolData {

@@ -107,6 +107,7 @@ contract YieldReserveEscrow is
     event DirectDepositWithdrawnRecorded(address indexed pool, uint256 amount);
     event EscrowAuthorized(address indexed escrow, bool authorized);
     event StableYieldManagerUpdated(address indexed manager);
+    event UntrackedFundsSynced(uint256 credited, uint256 newTotalBalance);
 
     // ==================== MODIFIERS ====================
 
@@ -272,7 +273,7 @@ contract YieldReserveEscrow is
             "YieldReserveEscrow/unauthorized"
         );
         require(pool != address(0), "YieldReserveEscrow/invalid pool");
-        require(escrow != address(0), "YieldReserveEscrow/invalid escrow");
+        require(authorizedEscrows[escrow], "YieldReserveEscrow/unauthorized escrow");
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         require(totalBalance >= amount, "YieldReserveEscrow/insufficient balance");
         
@@ -462,7 +463,7 @@ contract YieldReserveEscrow is
         uint256 expectedReturn
     ) external onlyOperator nonReentrant returns (uint256 investmentId) {
         require(pool != address(0), "YieldReserveEscrow/invalid pool");
-        require(escrow != address(0), "YieldReserveEscrow/invalid escrow");
+        require(authorizedEscrows[escrow], "YieldReserveEscrow/unauthorized escrow");
         require(amount > 0, "YieldReserveEscrow/invalid amount");
         require(totalBalance > minReserveFloor + amount, "YieldReserveEscrow/below floor");
         
@@ -553,6 +554,30 @@ contract YieldReserveEscrow is
         }
         
         asset.safeTransfer(to, amount);
+    }
+
+    /**
+     * @dev Credit tokens the reserve holds but has not accounted for.
+     *
+     *      Every tracked path moves tokens and `totalBalance` together, so the two agree.
+     *      Plain transfers in do not: FeeManager.distributeFees sends the reserve its share
+     *      with a bare transfer, and early-exit penalties default to routing 100% here — so
+     *      exactly the revenue meant to keep the reserve solvent would otherwise sit unusable,
+     *      invisible to every path that checks `totalBalance`.
+     */
+    function syncUntrackedFunds() external onlyOperator returns (uint256 credited) {
+        uint256 held = asset.balanceOf(address(this));
+        require(held > totalBalance, "YieldReserveEscrow/nothing to sync");
+        
+        credited = held - totalBalance;
+        totalBalance = held;
+        
+        emit UntrackedFundsSynced(credited, totalBalance);
+    }
+
+    function getUntrackedFunds() external view returns (uint256) {
+        uint256 held = asset.balanceOf(address(this));
+        return held > totalBalance ? held - totalBalance : 0;
     }
 
     function getAvailableBalance() external view returns (uint256) {

@@ -409,26 +409,34 @@ contract IntegrationTest is BaseTest {
     //  FINDING 4 - SPV ALLOCATION BOUND TO DESIGNATED SPV
     // ================================================================
 
-    function test_finding4_spvAllocation_boundToDesignatedSPV() public {
+    function test_spvCapital_cannotBeSpentByAnotherSPV() public {
         (stablePoolAddress, stableEscrowAddress) = _createStableYieldPool();
         _stableDeposit(user1, 100_000e6);
 
         vm.prank(operator);
-        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+        stableYieldManager.allocateCapital(stablePoolAddress, spv, 50_000e6);
 
-        IStableYieldTypes.PendingAllocation memory alloc = stableYieldManager.getPendingAllocation(allocId);
-        assertEq(alloc.spv, spv, "Allocation must be bound to designated SPV");
+        assertEq(
+            stableYieldManager.getUndeployedCapital(stablePoolAddress, spv),
+            50_000e6,
+            "Capital must be credited to the designated SPV"
+        );
 
         address randomSPV = makeAddr("randomSPV");
         vm.startPrank(admin);
         accessManager.grantRoleDuringDeployment(accessManager.SPV_ROLE(), randomSPV);
         vm.stopPrank();
 
+        assertEq(
+            stableYieldManager.getUndeployedCapital(stablePoolAddress, randomSPV),
+            0,
+            "Another SPV holds no undeployed capital for this pool"
+        );
+
         vm.prank(randomSPV);
-        vm.expectRevert(StableYieldManager.NotAllocationSPV.selector);
+        vm.expectRevert(StableYieldManager.ExceedsUndeployedCapital.selector);
         stableYieldManager.addInstrument(
             stablePoolAddress,
-            allocId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
             50_000e6,
             52_500e6,
@@ -446,8 +454,7 @@ contract IntegrationTest is BaseTest {
         (lockedPoolAddress, lockedEscrowAddress) = _createLockedPool();
 
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 1_000_000e6);
-
+        _fundLockedEscrow(1_000_000e6);
         _lockedDeposit(user1, 100_000e6, 0);
 
         vm.prank(operator);
@@ -472,8 +479,7 @@ contract IntegrationTest is BaseTest {
         (lockedPoolAddress, lockedEscrowAddress) = _createLockedPool();
         
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 10_000_000e6);
-
+        _fundLockedEscrow(10_000_000e6);
         uint256 positionId = _lockedDeposit(user1, 100_000e6, 0);
 
         skipTime(30 days);
@@ -488,7 +494,7 @@ contract IntegrationTest is BaseTest {
         uint256 reserveBefore = yieldReserve.getAvailableBalance();
 
         vm.prank(operator);
-        escrow.transferPenaltiesToReserve(address(yieldReserve));
+        escrow.transferPenaltiesToReserve();
 
         uint256 reserveAfter = yieldReserve.getAvailableBalance();
         assertTrue(reserveAfter > reserveBefore, "Reserve should receive penalties");
@@ -503,8 +509,7 @@ contract IntegrationTest is BaseTest {
         (lockedPoolAddress, lockedEscrowAddress) = _createLockedPool();
 
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 10_000_000e6);
-
+        _fundLockedEscrow(10_000_000e6);
         uint256 positionId = _lockedDeposit(user1, 50_000e6, 0);
 
         skipTime(30 days);
@@ -588,8 +593,7 @@ contract IntegrationTest is BaseTest {
         (lockedPoolAddress, lockedEscrowAddress) = _createLockedPool();
 
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 1_000_000e6);
-
+        _fundLockedEscrow(1_000_000e6);
         _lockedDeposit(user1, 100_000e6, 0);
 
         vm.prank(operator);
@@ -624,8 +628,7 @@ contract IntegrationTest is BaseTest {
         (lockedPoolAddress, lockedEscrowAddress) = _createLockedPool();
 
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 1_000_000e6);
-
+        _fundLockedEscrow(1_000_000e6);
         _lockedDeposit(user1, 100_000e6, 0);
 
         vm.prank(operator);
@@ -733,12 +736,11 @@ contract IntegrationTest is BaseTest {
         _stableDeposit(user1, 100_000e6);
 
         vm.prank(operator);
-        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 80_000e6);
+        stableYieldManager.allocateCapital(stablePoolAddress, spv, 80_000e6);
 
         vm.prank(spv);
         stableYieldManager.addInstrument(
             stablePoolAddress,
-            allocId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
             80_000e6,
             84_000e6,
@@ -777,12 +779,11 @@ contract IntegrationTest is BaseTest {
         _stableDeposit(user2, 50_000e6);
 
         vm.prank(operator);
-        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 80_000e6);
+        stableYieldManager.allocateCapital(stablePoolAddress, spv, 80_000e6);
 
         vm.prank(spv);
         stableYieldManager.addInstrument(
             stablePoolAddress,
-            allocId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
             80_000e6,
             84_000e6,
@@ -830,12 +831,11 @@ contract IntegrationTest is BaseTest {
         _stableDeposit(user1, 100_000e6);
 
         vm.prank(operator);
-        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+        stableYieldManager.allocateCapital(stablePoolAddress, spv, 50_000e6);
 
         vm.prank(spv);
         stableYieldManager.addInstrument(
             stablePoolAddress,
-            allocId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
             50_000e6,
             52_500e6,
@@ -875,12 +875,11 @@ contract IntegrationTest is BaseTest {
         _stableDeposit(user1, 100_000e6);
 
         vm.prank(operator);
-        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+        stableYieldManager.allocateCapital(stablePoolAddress, spv, 50_000e6);
 
         vm.prank(spv);
         stableYieldManager.addInstrument(
             stablePoolAddress,
-            allocId,
             IStableYieldTypes.InstrumentType.INTEREST_BEARING,
             50_000e6,
             50_000e6,
@@ -918,8 +917,7 @@ contract IntegrationTest is BaseTest {
         (lockedPoolAddress, lockedEscrowAddress) = _createLockedPool();
 
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 1_000_000e6);
-
+        _fundLockedEscrow(1_000_000e6);
         uint256 pos1 = _lockedDeposit(user1, 50_000e6, 0);
         uint256 pos2 = _lockedDeposit(user2, 30_000e6, 1);
         uint256 pos3 = _lockedDeposit(user3, 20_000e6, 0);
@@ -1016,8 +1014,7 @@ contract IntegrationTest is BaseTest {
         (lockedPoolAddress, lockedEscrowAddress) = _createLockedPool();
 
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 500_000e6);
-
+        _fundLockedEscrow(500_000e6);
         uint256 pos1 = _lockedDeposit(user1, 100_000e6, 0);
         uint256 pos2 = _lockedDeposit(user2, 100_000e6, 0);
 
@@ -1051,7 +1048,7 @@ contract IntegrationTest is BaseTest {
             uint256 reserveBeforePenalties = yieldReserve.getAvailableBalance();
 
             vm.prank(operator);
-            escrow.transferPenaltiesToReserve(address(yieldReserve));
+            escrow.transferPenaltiesToReserve();
 
             uint256 reserveAfterPenalties = yieldReserve.getAvailableBalance();
             assertTrue(reserveAfterPenalties > reserveBeforePenalties, "Penalties should flow to reserve");
@@ -1081,12 +1078,11 @@ contract IntegrationTest is BaseTest {
         assertEq(escrow.protocolFundsFromReserve(), 50_000e6, "Protocol capital tracked");
 
         vm.prank(operator);
-        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 100_000e6);
+        stableYieldManager.allocateCapital(stablePoolAddress, spv, 100_000e6);
 
         vm.prank(spv);
         stableYieldManager.addInstrument(
             stablePoolAddress,
-            allocId,
             IStableYieldTypes.InstrumentType.DISCOUNTED,
             100_000e6,
             105_000e6,
@@ -1127,8 +1123,7 @@ contract IntegrationTest is BaseTest {
         (stablePoolAddress, stableEscrowAddress) = _createStableYieldPool();
 
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 1_000_000e6);
-
+        _fundLockedEscrow(1_000_000e6);
         _lockedDeposit(user1, 50_000e6, 0);
         _stableDeposit(user1, 50_000e6);
 
@@ -1447,8 +1442,7 @@ contract IntegrationTest is BaseTest {
         (dealPoolAddress, dealEscrowAddress) = _createDealPool();
         
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 1_000_000e6);
-        
+        _fundLockedEscrow(1_000_000e6);
         _lockedDeposit(user1, 30_000e6, 0);
         _stableDeposit(user1, 30_000e6);
         _dealDeposit(user1, 30_000e6);
@@ -1470,8 +1464,7 @@ contract IntegrationTest is BaseTest {
         (lockedPoolAddress, lockedEscrowAddress) = _createLockedPool();
         
         vm.prank(operator);
-        token.transfer(lockedEscrowAddress, 100_000_000e6);
-        
+        _fundLockedEscrow(100_000_000e6);
         uint256[] memory positions = new uint256[](50);
         for (uint i = 0; i < 50; i++) {
             address user = i % 3 == 0 ? user1 : (i % 3 == 1 ? user2 : user3);
@@ -1546,7 +1539,7 @@ contract IntegrationTest is BaseTest {
         uint256 navBefore = stableYieldManager.calculatePoolNAV(stablePoolAddress);
 
         vm.prank(operator);
-        stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+        stableYieldManager.allocateCapital(stablePoolAddress, spv, 50_000e6);
 
         uint256 navAfter = stableYieldManager.calculatePoolNAV(stablePoolAddress);
         assertApproxEqRel(navAfter, navBefore, 0.01e18, "NAV should include pending allocations");
@@ -1561,13 +1554,12 @@ contract IntegrationTest is BaseTest {
         _stableDeposit(user1, 100_000e6);
 
         vm.prank(operator);
-        bytes32 allocId = stableYieldManager.createPendingAllocation(stablePoolAddress, spv, 50_000e6);
+        stableYieldManager.allocateCapital(stablePoolAddress, spv, 50_000e6);
 
         vm.prank(spv);
         vm.expectRevert(StableYieldManager.InvalidCouponFrequency.selector);
         stableYieldManager.addInstrument(
             stablePoolAddress,
-            allocId,
             IStableYieldTypes.InstrumentType.INTEREST_BEARING,
             50_000e6,
             50_000e6,
@@ -1635,6 +1627,17 @@ contract IntegrationTest is BaseTest {
             }
         }
         assertTrue(foundLocked && foundStable, "Both pools must be in the list");
+    }
+
+
+    /// @dev Seeds the capital that funds locked-pool interest, through the escrow's own
+    ///      accounting. A bare transfer lands as untracked balance that nothing can spend.
+    function _fundLockedEscrow(uint256 amount) internal {
+        token.mint(admin, amount);
+        vm.startPrank(admin);
+        token.approve(lockedEscrowAddress, amount);
+        LockedPoolEscrow(lockedEscrowAddress).receiveProtocolFundsFromAdmin(amount);
+        vm.stopPrank();
     }
 
 }

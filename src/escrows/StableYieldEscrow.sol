@@ -44,7 +44,8 @@ contract StableYieldEscrow is
 
     bool public emergencyWithdrawalEnabled;
 
-    mapping(address => uint256) public spvAllocations;
+    /// @dev Cumulative capital ever sent to an SPV. Never decreases; not a live exposure figure.
+    mapping(address => uint256) public lifetimeAllocatedToSPV;
 
     uint256 public protocolFundsFromReserve; 
     uint256 public protocolFundsDirectDeposit; 
@@ -267,12 +268,13 @@ contract StableYieldEscrow is
         require(amount > 0, "StableYieldEscrow/invalid amount");
         require(protocolFundsFromReserve >= amount, "StableYieldEscrow/exceeds reserve funds");
         
+        // Protocol capital deployed into this pool lives inside poolReserves. If reserves no
+        // longer cover it the capital is out with an SPV, and recalling anyway would transfer
+        // depositor cash to the yield reserve while zeroing the accounting that tracks it.
+        require(poolReserves >= amount, "StableYieldEscrow/capital not in reserves");
+        
         protocolFundsFromReserve -= amount;
-        if (poolReserves >= amount) {
-            poolReserves -= amount;
-        } else {
-            poolReserves = 0;
-        }
+        poolReserves -= amount;
         
         asset.forceApprove(yieldReserve, amount);
         IYieldReserveEscrow(yieldReserve).receiveRecalledFunds(stableYieldPool, amount);
@@ -340,7 +342,7 @@ contract StableYieldEscrow is
         require(poolReserves >= amount, "StableYieldEscrow/insufficient pool reserves");
         
         poolReserves -= amount;
-        spvAllocations[spvAddress] += amount;
+        lifetimeAllocatedToSPV[spvAddress] += amount;
         
         asset.safeTransfer(spvAddress, amount);
         
@@ -388,8 +390,8 @@ contract StableYieldEscrow is
         return poolReserves + protocolFundsDirectDeposit;
     }
 
-    function getSPVAllocation(address spvAddress) external view returns (uint256) {
-        return spvAllocations[spvAddress];
+    function getLifetimeAllocatedToSPV(address spvAddress) external view returns (uint256) {
+        return lifetimeAllocatedToSPV[spvAddress];
     }
 
     function toggleEmergencyWithdrawal(bool enabled) external onlyAdmin {
@@ -405,13 +407,14 @@ contract StableYieldEscrow is
         require(amount > 0, "StableYieldEscrow/invalid amount");
         require(asset.balanceOf(address(this)) >= amount, "StableYieldEscrow/insufficient balance");
 
-        asset.safeTransfer(to, amount);
+        uint256 fromReserves = amount > poolReserves ? poolReserves : amount;
+        uint256 fromDirectDeposit = amount - fromReserves;
+        require(protocolFundsDirectDeposit >= fromDirectDeposit, "StableYieldEscrow/exceeds tracked funds");
         
-        if (poolReserves >= amount) {
-            poolReserves -= amount;
-        } else {
-            poolReserves = 0;
-        }
+        poolReserves -= fromReserves;
+        protocolFundsDirectDeposit -= fromDirectDeposit;
+        
+        asset.safeTransfer(to, amount);
 
         emit FundsWithdrawn(to, amount, poolReserves);
     }

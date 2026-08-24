@@ -14,6 +14,7 @@ import "./escrows/StableYieldEscrow.sol";
 import "./escrows/YieldReserveEscrow.sol";
 import "./types/IStableYieldTypes.sol";
 import "./libraries/StableYieldNAVLibrary.sol";
+import "./libraries/StableYieldManagerLib.sol";
 
 /**
  * @title StableYieldManager
@@ -34,22 +35,16 @@ contract StableYieldManager is
     error InvalidAmount();
     error InvalidMaturity();
     error InvalidFaceValue();
-    error AllocationNotFound();
-    error AllocationExpired();
-    error AllocationNotPending();
-    error AllocationMismatch();
-    error ExceedsAllocation();
-    error NotAllocationSPV();
-    error InvalidStatus();
+    error ExceedsUndeployedCapital();
+    error InvalidCouponRate();
+    error PoolNotActive();
     error OnlyFactory();
     error PoolAlreadyRegistered();
     error InvalidDecimals();
     error AssetNotApproved();
     error OnlyPool();
     error BelowMinimum();
-    error MaxAllocations();
     error InsufficientFunds();
-    error AllocationExists();
     error InvalidInstrument();
     error InstrumentNotActive();
     error NotMaturedYet();
@@ -77,11 +72,10 @@ contract StableYieldManager is
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant MAX_TRANSACTION_FEE = 500;
     uint256 public constant MAX_INSTRUMENTS_PER_POOL = 100;
-    uint256 public constant MAX_PENDING_ALLOCATIONS = 50;
+    uint256 public constant MAX_ANNUAL_COUPON_RATE = 5000;
+    uint8 public constant MAX_COUPON_FREQUENCY = 12;
 
     uint256 public defaultTransactionFeeBps; 
-
-    uint256 public constant ALLOCATION_EXPIRY = 10 days;
     
     mapping(address => uint256) public poolTransactionFeeBps; 
     mapping(address => IStableYieldTypes.PoolData) public pools;
@@ -93,10 +87,12 @@ contract StableYieldManager is
     mapping(address => mapping(uint256 => IStableYieldTypes.WithdrawalRequest)) public withdrawalRequests;
     mapping(address => mapping(address => uint256[])) public userWithdrawalRequests;
     
-    mapping(address => uint256) public totalSPVAllocations;
-    mapping(address => mapping(address => uint256)) public poolToSPVAllocations;
-    mapping(bytes32 => IStableYieldTypes.PendingAllocation) public pendingAllocations;
-    mapping(address => bytes32[]) public poolPendingAllocationIds;
+    /// @dev Capital drawn by an SPV and not yet placed into an instrument, keyed by SPV across all pools.
+    mapping(address => uint256) public spvUndeployedCapital;
+    /// @dev Capital drawn and not yet placed, keyed by pool and SPV.
+    mapping(address => mapping(address => uint256)) public poolSpvUndeployedCapital;
+    /// @dev Capital drawn and not yet placed, keyed by pool. Sum of poolSpvUndeployedCapital across SPVs.
+    mapping(address => uint256) public poolUndeployedCapital;
     mapping(address => IStableYieldTypes.ReserveConfig) public poolReserveConfigs;
 
     // ==================== EVENTS ====================
@@ -112,6 +108,7 @@ contract StableYieldManager is
     event NAVCalculated( address indexed poolAddress, uint256 totalNAV, uint256 navPerShare, uint256 totalShares, uint256 timestamp); 
     event NAVUpdated( address indexed poolAddress, uint256 totalNAV, uint256 navPerShare, string reason, uint256 timestamp );   
     event InstrumentRemoved( address indexed poolAddress, uint256 indexed instrumentId, uint256 finalValue, string reason);
+    event InstrumentWrittenOff(address indexed poolAddress, uint256 indexed instrumentId, uint256 writtenOffValue, string reason);
     
     event PoolDeactivated(address indexed poolAddress, uint256 timestamp);
     event DepositValidated( address indexed poolAddress, address indexed user, uint256 amount, uint256 shares );
@@ -119,11 +116,9 @@ contract StableYieldManager is
     event WithdrawalQueued( address indexed poolAddress, address indexed user, uint256 indexed requestId, uint256 shares, uint256 estimatedValue);
     event WithdrawalProcessed( address indexed poolAddress, address indexed user, uint256 indexed requestId, uint256 actualValue, uint256 penaltyDeducted ); 
     
-    event AllocationCreated(address indexed pool, address indexed spv, bytes32 indexed allocationId, uint256 amount, uint256 timestamp);
-    event AllocationInvested(address indexed pool, bytes32 indexed allocationId, uint256 instrumentId, uint256 timestamp);
-    event AllocationReturned(address indexed pool, bytes32 indexed allocationId, uint256 returnedAmount, uint256 timestamp);
-    event AllocationMatured(address indexed pool, uint256 indexed instrumentId, bytes32 allocationId, uint256 maturedAmount, uint256 timestamp);
-    event AllocationCancelled(address indexed pool, bytes32 indexed allocationId, uint256 amount, uint256 timestamp);
+    event CapitalAllocated(address indexed pool, address indexed spv, uint256 amount, uint256 undeployedAfter, uint256 timestamp);
+    event CapitalDeployed(address indexed pool, address indexed spv, uint256 indexed instrumentId, uint256 amount, uint256 undeployedAfter);
+    event CapitalReturned(address indexed pool, address indexed spv, uint256 amount, uint256 undeployedAfter, uint256 timestamp);
     event ReserveConfigUpdated(address indexed pool, uint256 minAbsoluteReserve, uint256 reserveRatioBps);
     event PoolReadyForAllocation(address indexed pool, uint256 availableAmount, uint256 timestamp);
 
@@ -158,7 +153,7 @@ contract StableYieldManager is
     }
 
     function _checkActivePool(address poolAddress) internal view {
-        if (!pools[poolAddress].isActive) revert InvalidStatus();
+        if (!pools[poolAddress].isActive) revert PoolNotActive();
     }
 
     function _checkRole(bytes32 role) internal view {
@@ -313,7 +308,7 @@ contract StableYieldManager is
         if (owner == address(0)) revert InvalidAddress();
         
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        if (!poolData.isActive) revert InvalidStatus();
+        if (!poolData.isActive) revert PoolNotActive();
         
         uint256 navPerShare = calculateNAVPerShare(poolAddress);
         uint256 grossWithdrawalValue = (shares * navPerShare) / 1e18;
@@ -378,7 +373,10 @@ contract StableYieldManager is
         nonReentrant 
         returns (uint256 processed) 
     {
-        return _processQueue(poolAddress, maxRequests, type(uint256).max);
+        return StableYieldManagerLib.processQueue(
+            poolQueues, withdrawalRequests, pools,
+            yieldReserve, poolAddress, maxRequests, type(uint256).max
+        );
     }
 
     /**
@@ -391,130 +389,10 @@ contract StableYieldManager is
         nonReentrant 
         returns (uint256 processed) 
     {
-        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-        
-        uint256 totalNeeded = 0;
-        for (uint256 i = 0; i < requestIds.length; i++) {
-            IStableYieldTypes.WithdrawalRequest storage request = withdrawalRequests[poolAddress][requestIds[i]];
-            if (!request.processed) {
-                totalNeeded += request.estimatedValue + request.feeAmount;
-            }
-        }
-        
-        uint256 available = escrow.getPoolReserves();
-        if (available < totalNeeded) {
-            uint256 shortfall = totalNeeded - available;
-            uint256 deployed = _trySourceFromYieldReserve(poolAddress, shortfall);
-            available += deployed;
-            if (available < totalNeeded) revert InsufficientLiquidity();
-        }
-        
-        for (uint256 i = 0; i < requestIds.length; i++) {
-            IStableYieldTypes.WithdrawalRequest storage request = withdrawalRequests[poolAddress][requestIds[i]];
-            if (!request.processed) {
-                _processQueuedWithdrawal(poolAddress, requestIds[i]);
-                processed++;
-            }
-        }
-        
-        return processed;
-    }
-
-    function _processQueue(
-        address poolAddress, 
-        uint256 maxRequests, 
-        uint256 maxValue
-    ) internal returns (uint256 processed) {
-        IStableYieldTypes.WithdrawalQueue storage queue = poolQueues[poolAddress];
-        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-        
-        uint256 requestsProcessed = 0;
-        uint256 valueProcessed = 0;
-        uint256 currentHead = queue.head;
-        
-        while (requestsProcessed < maxRequests && 
-               valueProcessed < maxValue && 
-               currentHead < queue.tail) {
-            
-            IStableYieldTypes.WithdrawalRequest storage request = withdrawalRequests[poolAddress][currentHead];
-            
-            if (request.processed) {
-                currentHead++;
-                continue;
-            }
-            
-            uint256 netValue = request.estimatedValue;
-            uint256 totalRequired = netValue + request.feeAmount;
-            
-            if (valueProcessed + netValue > maxValue) {
-                break;
-            }
-            
-            uint256 available = escrow.getPoolReserves();
-            
-            if (available < totalRequired) {
-                uint256 shortfall = totalRequired - available;
-                uint256 deployed = _trySourceFromYieldReserve(poolAddress, shortfall);
-                available += deployed;
-                
-                if (available < totalRequired) {
-                    break;
-                }
-            }
-            
-            _processQueuedWithdrawal(poolAddress, currentHead);
-            requestsProcessed++;
-            valueProcessed += netValue;
-            currentHead++;
-        }
-        
-        queue.head = currentHead;
-        return requestsProcessed;
-    }
-
-    function _trySourceFromYieldReserve(
-        address poolAddress, 
-        uint256 amount
-    ) internal returns (uint256 deployed) {
-        if (yieldReserve == address(0)) return 0;
-        
-        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        YieldReserveEscrow reserve = YieldReserveEscrow(yieldReserve);
-        uint256 reserveAvailable = reserve.getAvailableBalance();
-        
-        deployed = amount > reserveAvailable ? reserveAvailable : amount;
-        
-        if (deployed > 0) {
-            reserve.deployToPool(poolAddress, poolData.escrowAddress, deployed);
-            StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-            escrow.recordProtocolFundsFromReserve(deployed);
-        }
-    }
-
-    function _processQueuedWithdrawal(address poolAddress, uint256 requestId) internal {
-        IStableYieldTypes.WithdrawalRequest storage request = withdrawalRequests[poolAddress][requestId];
-        
-        uint256 netValue = request.estimatedValue;
-        uint256 feeAmount = request.feeAmount;
-        
-        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-        
-        request.processed = true;
-        request.processedTime = block.timestamp;
-
-        poolQueues[poolAddress].totalPendingValue -= request.estimatedValue;
-
-        if (feeAmount > 0) {
-            escrow.collectWithdrawalFee(feeAmount);
-            emit TransactionFeeCollected(poolAddress, "withdrawal", netValue + feeAmount, feeAmount);
-        }
-
-        escrow.withdraw(request.user, netValue);
-        
-        emit WithdrawalProcessed(poolAddress, request.user, requestId, netValue, feeAmount);
+        return StableYieldManagerLib.settleWithdrawals(
+            poolQueues, withdrawalRequests, pools,
+            yieldReserve, poolAddress, requestIds
+        );
     }
 
     // ==================== NAV ====================
@@ -528,34 +406,7 @@ contract StableYieldManager is
             poolData,
             poolInstruments[poolAddress]
         );
-        uint256 pendingValue = _getPendingAllocationsValue(poolAddress);
-        return baseNAV + pendingValue;
-    }
-    
-    function _getPendingAllocationsValue(address poolAddress) internal view returns (uint256 pendingValue) {
-        bytes32[] storage allocationIds = poolPendingAllocationIds[poolAddress];
-        uint256 length = allocationIds.length;
-        
-        for (uint256 i = 0; i < length; i++) {
-            IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationIds[i]];
-            if (allocation.status == IStableYieldTypes.AllocationStatus.PENDING ||
-                allocation.status == IStableYieldTypes.AllocationStatus.INVESTED) {
-                uint256 outstanding = allocation.amount - allocation.usedAmount - allocation.returnedAmount;
-                pendingValue += outstanding;
-            }
-        }
-    }
-
-    function _removeAllocationFromTracking(address poolAddress, bytes32 allocationId) internal {
-        bytes32[] storage ids = poolPendingAllocationIds[poolAddress];
-        uint256 length = ids.length;
-        for (uint256 i = 0; i < length; i++) {
-            if (ids[i] == allocationId) {
-                ids[i] = ids[length - 1];
-                ids.pop();
-                return;
-            }
-        }
+        return baseNAV + poolUndeployedCapital[poolAddress];
     }
 
     function calculateNAVPerShare(address poolAddress) public view ActivePool(poolAddress) returns (uint256 navPerShare) {
@@ -573,69 +424,51 @@ contract StableYieldManager is
     // ==================== SPV ALLOCATION ====================
 
     /**
-     * @dev Create a pending allocation for an SPV. Funds are reserved in escrow.
-     *      Allocation expires after ALLOCATION_EXPIRY if not used.
+     * @dev Draw capital from pool reserves for an SPV to invest. The cash leaves escrow
+     *      immediately and is tracked as undeployed capital until it is placed into an
+     *      instrument or returned. Undeployed capital remains part of pool NAV throughout,
+     *      so a pool holding cash at the SPV is valued identically to one holding it in escrow.
+     *
+     *      There is no deadline. The SPV places capital on its own schedule, and holding
+     *      cash while waiting for an instrument worth buying is expected behaviour.
      */
-    function createPendingAllocation(
+    function allocateCapital(
         address poolAddress,
         address spvAddress,
         uint256 amount
-    ) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) nonReentrant returns (bytes32 allocationId) {
+    ) external onlyRole(accessManager.OPERATOR_ROLE()) poolExists(poolAddress) nonReentrant {
         if (spvAddress == address(0)) revert InvalidAddress();
         if (amount == 0) revert InvalidAmount();
-        if (poolPendingAllocationIds[poolAddress].length >= MAX_PENDING_ALLOCATIONS) revert MaxAllocations();
-        
-        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
-        StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-        
+
         (bool ready, uint256 available) = isReadyForAllocation(poolAddress);
         if (!ready || available < amount) revert InsufficientFunds();
-        
-        allocationId = keccak256(abi.encodePacked(
+
+        spvUndeployedCapital[spvAddress] += amount;
+        poolSpvUndeployedCapital[poolAddress][spvAddress] += amount;
+        poolUndeployedCapital[poolAddress] += amount;
+
+        StableYieldEscrow(pools[poolAddress].escrowAddress).allocateToSPV(spvAddress, amount);
+
+        emit CapitalAllocated(
             poolAddress,
             spvAddress,
             amount,
-            block.timestamp,
-            poolInstrumentCount[poolAddress]
-        ));
-        
-        if (pendingAllocations[allocationId].createdAt != 0) revert AllocationExists();
-        
-        pendingAllocations[allocationId] = IStableYieldTypes.PendingAllocation({
-            allocationId: allocationId,
-            pool: poolAddress,
-            spv: spvAddress,
-            amount: amount,
-            usedAmount: 0,
-            returnedAmount: 0,
-            createdAt: block.timestamp,
-            expiresAt: block.timestamp + ALLOCATION_EXPIRY,
-            status: IStableYieldTypes.AllocationStatus.PENDING
-        });
-        
-        poolPendingAllocationIds[poolAddress].push(allocationId);
-        
-        totalSPVAllocations[spvAddress] += amount;
-        poolToSPVAllocations[poolAddress][spvAddress] += amount;
-        
-        escrow.allocateToSPV(spvAddress, amount);
-        
-        emit AllocationCreated(poolAddress, spvAddress, allocationId, amount, block.timestamp);
-        
-        _triggerNAVUpdate(poolAddress, "spv_allocation");
-        
-        return allocationId;
+            poolSpvUndeployedCapital[poolAddress][spvAddress],
+            block.timestamp
+        );
+
+        _triggerNAVUpdate(poolAddress, "capital_allocated");
     }
 
     // ==================== INSTRUMENT LIFECYCLE ====================
 
     /**
-     * @dev SPV purchases an instrument using an existing allocation.
-     *      Validates allocation ownership, expiry, and price bounds.
+     * @dev SPV places undeployed capital into an instrument. The purchase price is debited
+     *      from the SPV's undeployed balance for this pool; pool NAV is unchanged by the
+     *      placement itself, since the capital simply moves from cash to a marked holding.
      */
     function addInstrument(
         address poolAddress,
-        bytes32 allocationId,
         IStableYieldTypes.InstrumentType instrumentType,
         uint256 purchasePrice,
         uint256 faceValue,
@@ -643,46 +476,15 @@ contract StableYieldManager is
         uint256 annualCouponRate,
         uint8 couponFrequency
     ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
-        IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
-        
-        if (allocation.createdAt == 0) revert AllocationNotFound();
-        if (allocation.pool != poolAddress) revert AllocationMismatch();
-        if (allocation.spv != msg.sender) revert NotAllocationSPV();
-        if (allocation.status != IStableYieldTypes.AllocationStatus.PENDING) revert AllocationNotPending();
-        if (block.timestamp >= allocation.expiresAt) revert AllocationExpired();
-        uint256 remainingAllocation = allocation.amount - allocation.usedAmount - allocation.returnedAmount;
-        if (purchasePrice > remainingAllocation) revert ExceedsAllocation();
-        
-        _addInstrumentWithAllocation(
-            poolAddress,
-            allocationId,
-            instrumentType,
-            purchasePrice,
-            faceValue,
-            maturityDate,
-            annualCouponRate,
-            couponFrequency
-        );
-    }
-
-    function _addInstrumentWithAllocation(
-        address poolAddress,
-        bytes32 allocationId,
-        IStableYieldTypes.InstrumentType instrumentType,
-        uint256 purchasePrice,
-        uint256 faceValue,
-        uint256 maturityDate,
-        uint256 annualCouponRate,
-        uint8 couponFrequency
-    ) internal {
         if (poolInstrumentCount[poolAddress] >= MAX_INSTRUMENTS_PER_POOL) revert InvalidInstrument();
-        
-        IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
-        
+        if (purchasePrice == 0) revert InvalidAmount();
+        if (purchasePrice > poolSpvUndeployedCapital[poolAddress][msg.sender]) revert ExceedsUndeployedCapital();
+
         if (maturityDate <= block.timestamp) revert InvalidMaturity();
         if (faceValue < purchasePrice) revert InvalidFaceValue();
-        if (instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING && couponFrequency == 0) {
-            revert InvalidCouponFrequency();
+        if (instrumentType == IStableYieldTypes.InstrumentType.INTEREST_BEARING) {
+            if (couponFrequency == 0 || couponFrequency > MAX_COUPON_FREQUENCY) revert InvalidCouponFrequency();
+            if (annualCouponRate == 0 || annualCouponRate > MAX_ANNUAL_COUPON_RATE) revert InvalidCouponRate();
         }
         
         uint256 instrumentId = poolInstrumentCount[poolAddress];
@@ -698,26 +500,31 @@ contract StableYieldManager is
             nextCouponDueDate: couponFrequency > 0 ? block.timestamp + (365 days / couponFrequency) : 0,
             couponsPaid: 0,
             isActive: true,
-            allocationId: allocationId
+            spv: msg.sender
         }));
-        
-        allocation.usedAmount += purchasePrice;
-        
-        if (allocation.usedAmount + allocation.returnedAmount >= allocation.amount) {
-            allocation.status = IStableYieldTypes.AllocationStatus.INVESTED;
-            _removeAllocationFromTracking(poolAddress, allocationId);
-        }
-        
+
+        spvUndeployedCapital[msg.sender] -= purchasePrice;
+        poolSpvUndeployedCapital[poolAddress][msg.sender] -= purchasePrice;
+        poolUndeployedCapital[poolAddress] -= purchasePrice;
+
         poolInstrumentCount[poolAddress]++;
-        
+
         emit InstrumentPurchased(poolAddress, instrumentId, instrumentType, purchasePrice, faceValue, maturityDate);
-        emit AllocationInvested(poolAddress, allocationId, instrumentId, block.timestamp);
-        
+        emit CapitalDeployed(
+            poolAddress,
+            msg.sender,
+            instrumentId,
+            purchasePrice,
+            poolSpvUndeployedCapital[poolAddress][msg.sender]
+        );
+
         _triggerNAVUpdate(poolAddress, "instrument_added");
     }
 
     /**
-     * @dev SPV returns maturity proceeds. Updates allocation tracking and removes instrument.
+     * @dev SPV returns maturity proceeds to escrow and the instrument is retired.
+     *      Capital moves from a marked holding back into pool reserves; undeployed
+     *      capital is untouched, because none of it was involved in this instrument.
      */
     function matureInstrumentWithFunds(
         address poolAddress,
@@ -738,25 +545,6 @@ contract StableYieldManager is
         asset.safeTransferFrom(msg.sender, address(escrow), maturityAmount);
         escrow.recordReceivedLiquidity(maturityAmount);
         
-        bytes32 allocationId = instrument.allocationId;
-        if (allocationId != bytes32(0)) {
-            IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
-            if (allocation.createdAt > 0) {
-                allocation.status = IStableYieldTypes.AllocationStatus.MATURED;
-                _removeAllocationFromTracking(poolAddress, allocationId);
-                
-                uint256 usedFromAllocation = instrument.purchasePrice;
-                if (totalSPVAllocations[allocation.spv] >= usedFromAllocation) {
-                    totalSPVAllocations[allocation.spv] -= usedFromAllocation;
-                }
-                if (poolToSPVAllocations[poolAddress][allocation.spv] >= usedFromAllocation) {
-                    poolToSPVAllocations[poolAddress][allocation.spv] -= usedFromAllocation;
-                }
-                
-                emit AllocationMatured(poolAddress, instrumentId, allocationId, maturityAmount, block.timestamp);
-            }
-        }
-        
         uint256 realizedYield = maturityAmount > instrument.purchasePrice ? maturityAmount - instrument.purchasePrice : 0;
         
         emit InstrumentMatured(poolAddress, instrumentId, instrument.faceValue, realizedYield);
@@ -767,47 +555,35 @@ contract StableYieldManager is
     }
 
     /**
-     * @dev SPV returns unused allocation funds back to the pool escrow.
+     * @dev SPV returns undeployed capital to pool reserves. Always available, in any
+     *      amount up to the SPV's undeployed balance for the pool.
      */
-    function returnUnusedFunds(
-        bytes32 allocationId,
+    function returnCapital(
+        address poolAddress,
         uint256 returnAmount
-    ) external onlyRole(accessManager.SPV_ROLE()) nonReentrant {
-        IStableYieldTypes.PendingAllocation storage allocation = pendingAllocations[allocationId];
-        
-        if (allocation.createdAt == 0) revert AllocationNotFound();
-        if (allocation.spv != msg.sender) revert NotAllocationSPV();
-        if (allocation.status != IStableYieldTypes.AllocationStatus.PENDING &&
-            allocation.status != IStableYieldTypes.AllocationStatus.INVESTED) revert InvalidStatus();
+    ) external onlyRole(accessManager.SPV_ROLE()) poolExists(poolAddress) nonReentrant {
         if (returnAmount == 0) revert InvalidAmount();
-        
-        uint256 maxReturnable = allocation.amount - allocation.usedAmount - allocation.returnedAmount;
-        if (returnAmount > maxReturnable) revert ExceedsAllocation();
-        
-        IStableYieldTypes.PoolData storage poolData = pools[allocation.pool];
+        if (returnAmount > poolSpvUndeployedCapital[poolAddress][msg.sender]) revert ExceedsUndeployedCapital();
+
+        IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
-        
-        IERC20 asset = IERC20(poolData.asset);
-        asset.safeTransferFrom(msg.sender, address(escrow), returnAmount);
+
+        IERC20(poolData.asset).safeTransferFrom(msg.sender, address(escrow), returnAmount);
         escrow.recordReceivedLiquidity(returnAmount);
-        
-        allocation.returnedAmount += returnAmount;
-        
-        if (totalSPVAllocations[allocation.spv] >= returnAmount) {
-            totalSPVAllocations[allocation.spv] -= returnAmount;
-        }
-        if (poolToSPVAllocations[allocation.pool][allocation.spv] >= returnAmount) {
-            poolToSPVAllocations[allocation.pool][allocation.spv] -= returnAmount;
-        }
-        
-        if (allocation.usedAmount + allocation.returnedAmount >= allocation.amount) {
-            allocation.status = IStableYieldTypes.AllocationStatus.RETURNED;
-            _removeAllocationFromTracking(allocation.pool, allocationId);
-        }
-        
-        emit AllocationReturned(allocation.pool, allocationId, returnAmount, block.timestamp);
-        
-        _triggerNAVUpdate(allocation.pool, "funds_returned");
+
+        spvUndeployedCapital[msg.sender] -= returnAmount;
+        poolSpvUndeployedCapital[poolAddress][msg.sender] -= returnAmount;
+        poolUndeployedCapital[poolAddress] -= returnAmount;
+
+        emit CapitalReturned(
+            poolAddress,
+            msg.sender,
+            returnAmount,
+            poolSpvUndeployedCapital[poolAddress][msg.sender],
+            block.timestamp
+        );
+
+        _triggerNAVUpdate(poolAddress, "capital_returned");
     }
 
     // ==================== COUPON PAYMENTS ====================
@@ -886,6 +662,34 @@ contract StableYieldManager is
         poolInstrumentCount[poolAddress]--;
         
         emit InstrumentRemoved(poolAddress, instrumentId, finalValue, reason);
+    }
+
+    /**
+     * @dev Write an instrument off the book. Its marked value leaves NAV immediately.
+     *
+     *      Needed when an instrument defaults or is otherwise not going to settle: a holding
+     *      that is never matured keeps carrying value, and holders would redeem against a NAV
+     *      that includes an asset the pool will not receive. Any amount later recovered comes
+     *      back through returnCapital.
+     */
+    function writeOffInstrument(
+        address poolAddress,
+        uint256 instrumentId,
+        string calldata reason
+    ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) nonReentrant {
+        IStableYieldTypes.InstrumentHolding[] storage instruments = poolInstruments[poolAddress];
+        if (instrumentId >= instruments.length) revert InvalidInstrument();
+        if (!instruments[instrumentId].isActive) revert InstrumentNotActive();
+        
+        uint256 writtenOffValue = instruments[instrumentId].instrumentType == IStableYieldTypes.InstrumentType.DISCOUNTED
+            ? StableYieldNAVLibrary.calculateDiscountedValue(instruments[instrumentId], block.timestamp)
+            : StableYieldNAVLibrary.calculateInterestBearingValue(instruments[instrumentId], block.timestamp);
+        
+        emit InstrumentWrittenOff(poolAddress, instrumentId, writtenOffValue, reason);
+        
+        _removeInstrument(poolAddress, instrumentId, "written_off");
+        
+        _triggerNAVUpdate(poolAddress, "instrument_written_off");
     }
 
     // ==================== ADMIN CONFIG ====================
@@ -1172,20 +976,24 @@ contract StableYieldManager is
         return (shares * navPerShare) / 1e18;
     }
 
-    function getPendingAllocation(bytes32 allocationId) external view returns (IStableYieldTypes.PendingAllocation memory) {
-        return pendingAllocations[allocationId];
+    /**
+     * @dev Where a pool's capital currently sits. The three figures sum to pool NAV:
+     *      `deployed` is marked instrument value, `reserves` is cash in escrow, and
+     *      `undeployed` is cash drawn by SPVs and not yet placed.
+     */
+    function getPoolCapital(address poolAddress)
+        external
+        view
+        poolExists(poolAddress)
+        returns (uint256 deployed, uint256 reserves, uint256 undeployed)
+    {
+        deployed = StableYieldNAVLibrary.calculateGrossAssetValue(poolInstruments[poolAddress]);
+        reserves = StableYieldEscrow(pools[poolAddress].escrowAddress).getPoolReserves();
+        undeployed = poolUndeployedCapital[poolAddress];
     }
 
-    function getPoolPendingAllocations(address poolAddress) external view returns (bytes32[] memory) {
-        return poolPendingAllocationIds[poolAddress];
-    }
-
-    function getTotalSPVAllocation(address spvAddress) external view returns (uint256) {
-        return totalSPVAllocations[spvAddress];
-    }
-
-    function getPoolToSPVAllocation(address poolAddress, address spvAddress) external view returns (uint256) {
-        return poolToSPVAllocations[poolAddress][spvAddress];
+    function getUndeployedCapital(address poolAddress, address spvAddress) external view returns (uint256) {
+        return poolSpvUndeployedCapital[poolAddress][spvAddress];
     }
 
     function getPoolReserveConfig(address poolAddress) external view returns (IStableYieldTypes.ReserveConfig memory) {

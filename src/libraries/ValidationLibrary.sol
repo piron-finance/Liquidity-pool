@@ -11,7 +11,7 @@ import "../interfaces/IPoolEscrow.sol";
  * @title ValidationLibrary
  * @dev Common validation helpers used by Manager and DepositWithdrawalLibrary.
  *      Validates deposits, withdrawals, maturity, pool status, and addresses.
- *      Also contains withdrawal handlers for funding, matured, and emergency states.
+ *      Also contains the withdrawal handlers for the funding and emergency states.
  */
 library ValidationLibrary {
 
@@ -65,25 +65,6 @@ library ValidationLibrary {
 
     // ==================== STATUS-SPECIFIC VALIDATION ====================
 
-    function validateEmergencyRefunds(
-        IPoolTypes.PoolData storage poolData,
-        IPoolRegistry poolRegistry,
-        address poolAddress
-    ) internal view {
-        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
-        require(poolData.status == IPoolTypes.PoolStatus.EMERGENCY, "ValidationLibrary/not in emergency");
-    }
-
-    function validateDiscountDistribution(
-        IPoolTypes.PoolData storage poolData,
-        IPoolRegistry poolRegistry,
-        address poolAddress
-    ) internal view {
-        require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
-        require(poolData.status == IPoolTypes.PoolStatus.MATURED, "ValidationLibrary/not matured");
-        require(poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED, "ValidationLibrary/not discounted instrument");
-    }
-
     function validateMaturityProcessing(
         IPoolTypes.PoolData storage poolData,
         IPoolRegistry poolRegistry,
@@ -129,6 +110,10 @@ library ValidationLibrary {
     // ==================== WITHDRAWAL HANDLERS ====================
 
     event Withdraw(address indexed caller, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
+    /// @dev Emitted on every withdrawal path. Libraries are delegatecalled, so `Withdraw` alone
+    ///      carries no pool address; indexers need this to attribute a withdrawal to a pool.
+    ///      `kind`: 0 = funding-phase refund, 1 = matured redemption, 2 = emergency exit.
+    event PoolWithdrawal(address indexed pool, address indexed owner, address indexed receiver, uint256 assets, uint256 shares, uint8 kind);
 
     /// @dev Handles withdrawal during FUNDING: burns shares, releases funds from escrow.
     function handleFundingWithdrawal(
@@ -164,39 +149,7 @@ library ValidationLibrary {
         escrowContract.releaseFunds(receiver, assets);
         
         emit Withdraw(msg.sender, receiver, owner, assets, shares);
-        return shares;
-    }
-    
-    /// @dev Handles matured withdrawal: calculates user entitlement, burns shares, and releases from escrow.
-    function handleMaturedWithdrawal(
-        mapping(address => IPoolTypes.PoolData) storage /* pools */,
-        mapping(address => mapping(address => IPoolTypes.UserPoolData)) storage poolUsers,
-        IPoolRegistry registry,
-        address poolAddress,
-        address receiver,
-        address owner,
-        IPoolTypes.PoolConfig storage poolConfig,
-        uint256 totalReturns
-    ) external returns (uint256 shares) {
-        require(block.timestamp >= poolConfig.maturityDate, "ValidationLib/not matured");
-        
-        uint256 userShares = IERC20(poolAddress).balanceOf(owner);
-        require(userShares != 0, "ValidationLib/no shares");
-        
-        uint256 totalShares = IERC20(poolAddress).totalSupply();
-        
-        uint256 userEntitlement = (userShares * totalReturns) / totalShares;
-        
-        shares = userShares;
-        ILiquidityPool(poolAddress).burnShares(owner, shares);
-        
-        poolUsers[poolAddress][owner].depositTime = 0;
-        
-        IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(poolAddress);
-        IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
-        escrowContract.releaseFunds(receiver, userEntitlement);
-        
-        emit Withdraw(msg.sender, receiver, owner, userEntitlement, shares);
+        emit PoolWithdrawal(poolAddress, owner, receiver, assets, shares, 0);
         return shares;
     }
     
@@ -228,6 +181,7 @@ library ValidationLibrary {
         escrowContract.releaseFunds(receiver, assets);
         
         emit Withdraw(msg.sender, receiver, owner, assets, shares);
+        emit PoolWithdrawal(poolAddress, owner, receiver, assets, shares, 2);
         return shares;
     }
 }

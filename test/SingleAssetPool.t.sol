@@ -487,4 +487,68 @@ contract SingleAssetPoolTest is BaseTest {
         
         assertEq(manager.poolTotalRaised(poolAddress), 50_000e6);
     }
+
+    // ==================== POOL CONFIG VALIDATION ====================
+
+    /// @dev A pool that cannot reach a valid settlement must be refused at creation. Each of
+    ///      these configs would otherwise brick the pool after the funding window closes,
+    ///      with deposits unwithdrawable because funding-phase withdrawal ends at epochEndTime.
+    function _configWith(
+        uint256 targetRaise,
+        uint256 maturityDate,
+        uint256 discountRate,
+        uint256 minInvestment
+    ) internal view returns (IPoolFactory.PoolConfig memory) {
+        return IPoolFactory.PoolConfig({
+            asset: address(token),
+            instrumentType: IPoolTypes.InstrumentType.DISCOUNTED,
+            instrumentName: "Bad Config Pool",
+            targetRaise: targetRaise,
+            epochDuration: EPOCH_DURATION,
+            maturityDate: maturityDate,
+            discountRate: discountRate,
+            spvAddress: spv,
+            couponDates: new uint256[](0),
+            couponRates: new uint256[](0),
+            minimumFundingThreshold: 8000,
+            minInvestment: minInvestment,
+            withdrawalFeeBps: 100
+        });
+    }
+
+    function test_poolConfig_rejectsDiscountRateAtOrAbove100Percent() public {
+        // calculateFaceValue divides by (10000 - discountRate), so this reverts at epoch
+        // close and the pool can never leave FUNDING.
+        vm.prank(admin);
+        vm.expectRevert(Manager.InvalidConfig.selector);
+        factory.createPool(
+            _configWith(TARGET_RAISE, block.timestamp + MATURITY_DURATION, 10000, MIN_INVESTMENT)
+        );
+    }
+
+    function test_poolConfig_rejectsZeroDiscountRateOnDiscountedInstrument() public {
+        vm.prank(admin);
+        vm.expectRevert(Manager.InvalidConfig.selector);
+        factory.createPool(
+            _configWith(TARGET_RAISE, block.timestamp + MATURITY_DURATION, 0, MIN_INVESTMENT)
+        );
+    }
+
+
+
+    function test_poolConfig_rejectsMinInvestmentAboveTarget() public {
+        vm.prank(admin);
+        vm.expectRevert(Manager.InvalidConfig.selector);
+        factory.createPool(
+            _configWith(TARGET_RAISE, block.timestamp + MATURITY_DURATION, 500, TARGET_RAISE + 1)
+        );
+    }
+
+    function test_poolConfig_acceptsAValidPool() public {
+        vm.prank(admin);
+        factory.createPool(
+            _configWith(TARGET_RAISE, block.timestamp + MATURITY_DURATION, 500, MIN_INVESTMENT)
+        );
+    }
+
 }
