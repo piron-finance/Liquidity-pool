@@ -122,7 +122,7 @@ contract StableYieldPool is
         return assets;
     }
 
-    function withdraw(uint256 assets, address receiver, address owner) public override whenNotPaused returns (uint256 shares) {
+    function withdraw(uint256 assets, address receiver, address owner) public override returns (uint256 shares) {
         require(assets > 0, "StableYieldPool/invalid amount");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
         require(owner != address(0), "StableYieldPool/invalid owner");
@@ -153,7 +153,7 @@ contract StableYieldPool is
         return actualShares; 
     }
 
-    function redeem(uint256 shares, address receiver, address owner) public override whenNotPaused returns (uint256 assets) {
+    function redeem(uint256 shares, address receiver, address owner) public override returns (uint256 assets) {
         require(shares > 0, "StableYieldPool/invalid shares");
         require(receiver != address(0), "StableYieldPool/invalid receiver");
         require(owner != address(0), "StableYieldPool/invalid owner");
@@ -246,13 +246,20 @@ contract StableYieldPool is
         }
     }
 
+    /// @dev Pausing freezes deposits and mints. Withdrawals stay open so holders can
+    ///      always exit at NAV. Kept wide so whoever notices a problem first can act.
     function pause() external {
-        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
+        require(
+            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender) ||
+            accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender),
+            "StableYieldPool/not authorized"
+        );
         _pause();
     }
 
+    /// @dev Admin only, so a compromised operator cannot undo a pause.
     function unpause() external {
-        require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
+        require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), msg.sender), "StableYieldPool/not admin");
         _unpause();
     }
     
@@ -269,19 +276,23 @@ contract StableYieldPool is
         emit HoldingPeriodUpdated(oldPeriod, newPeriod);
     }
     
-    function emergencyRedeem(uint256 shares, address receiver, address owner) external returns (uint256 assets) {
+    /**
+     * @dev Operator-run exit on a holder's behalf, for when a holder cannot transact.
+     *      Proceeds always go to the holder: an operator-chosen recipient would make this
+     *      a way to burn anyone's shares and take the assets.
+     */
+    function emergencyRedeem(uint256 shares, address owner) external returns (uint256 assets) {
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender), "StableYieldPool/not operator");
         require(shares > 0, "StableYieldPool/invalid shares");
-        require(receiver != address(0), "StableYieldPool/invalid receiver");
         require(owner != address(0), "StableYieldPool/invalid owner");
 
-        (uint256 actualShares, uint256 withdrawalValue, bool immediate) = stableYieldManager.validateWithdrawal(address(this), shares, receiver, owner);
+        (uint256 actualShares, uint256 withdrawalValue, bool immediate) = stableYieldManager.validateWithdrawal(address(this), shares, owner, owner);
         
         _burn(owner, actualShares);
         
         if (immediate) {
-            escrow.withdraw(receiver, withdrawalValue);
-            emit Withdraw(msg.sender, receiver, owner, withdrawalValue, actualShares);
+            escrow.withdraw(owner, withdrawalValue);
+            emit Withdraw(msg.sender, owner, owner, withdrawalValue, actualShares);
         } else {
             emit WithdrawalRequested(owner, shares, withdrawalValue);
         }

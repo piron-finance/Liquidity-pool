@@ -2,8 +2,8 @@
 pragma solidity ^0.8.19;
 
 /// @title IStableYieldTypes
-/// @dev Shared type definitions for Stable Yield pools: instrument types, allocation statuses,
-///      pool data, instrument holdings, withdrawal queues, and reserve configuration.
+/// @dev Shared type definitions for Stable Yield pools: instrument types, pool data,
+///      instrument holdings, withdrawal queues, and reserve configuration.
 interface IStableYieldTypes {
 
     // ==================== ENUMS ====================
@@ -11,14 +11,6 @@ interface IStableYieldTypes {
     enum InstrumentType {
         DISCOUNTED,
         INTEREST_BEARING
-    }
-
-    enum AllocationStatus {
-        PENDING,
-        INVESTED,
-        RETURNED,
-        MATURED,
-        CANCELLED
     }
 
     // ==================== STRUCTS ====================
@@ -44,7 +36,8 @@ interface IStableYieldTypes {
         uint256 nextCouponDueDate;
         uint8 couponsPaid;
         bool isActive;
-        bytes32 allocationId;
+        /// @dev SPV that placed this instrument. Keeps per-SPV attribution of deployed capital.
+        address spv;
     }
 
     struct WithdrawalQueue {
@@ -62,18 +55,6 @@ interface IStableYieldTypes {
         uint256 feeAmount;
         bool processed;
         uint256 processedTime;
-    }
-
-    struct PendingAllocation {
-        bytes32 allocationId;
-        address pool;
-        address spv;
-        uint256 amount;
-        uint256 usedAmount;
-        uint256 returnedAmount;
-        uint256 createdAt;
-        uint256 expiresAt;
-        AllocationStatus status;
     }
 
     struct ReserveConfig {

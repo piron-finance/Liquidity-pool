@@ -42,7 +42,8 @@ contract LockedPoolEscrow is
     uint256 public interestPaidOut;
     uint256 public penaltiesCollected;
    
-    mapping(address => uint256) public spvAllocations;
+    /// @dev Cumulative capital ever sent to an SPV. Never decreases; not a live exposure figure.
+    mapping(address => uint256) public lifetimeAllocatedToSPV;
 
     uint256 public protocolFundsFromReserve;  
     uint256 public protocolFundsDirectDeposit;
@@ -67,6 +68,7 @@ contract LockedPoolEscrow is
     event ProtocolFundsReleased(address indexed to, uint256 amount);
     event DustSwept(address indexed feeManager, uint256 amount);
     event PenaltiesSentToFeeManager(uint256 amount);
+    event PenaltiesSentToReserve(uint256 amount);
     event DepositFeeCollected(uint256 amount);
     event WithdrawalFeeCollected(uint256 amount);
     event FeeManagerUpdated(address indexed feeManager);
@@ -198,12 +200,28 @@ contract LockedPoolEscrow is
         emit FundsDeposited(msg.sender, netAmount);
     }
 
+    /**
+     * @dev Draws `amount` from the escrow's tracked balances: pool cash first, then the
+     *      protocol capital that funds yield. Reverts when the tracked balances do not
+     *      cover it, rather than zeroing a counter and transferring anyway.
+     */
+    function _drawFunds(uint256 amount) internal returns (uint256 fromProtocol) {
+        uint256 fromPrincipal = amount > principalHeld ? principalHeld : amount;
+        fromProtocol = amount - fromPrincipal;
+        
+        uint256 fromReserve = fromProtocol > protocolFundsFromReserve ? protocolFundsFromReserve : fromProtocol;
+        uint256 fromDirect = fromProtocol - fromReserve;
+        require(protocolFundsDirectDeposit >= fromDirect, "LockedPoolEscrow/insufficient funds");
+        
+        principalHeld -= fromPrincipal;
+        protocolFundsFromReserve -= fromReserve;
+        protocolFundsDirectDeposit -= fromDirect;
+    }
+
     function payInterest(address to, uint256 amount) external onlyLockedPoolOrManager nonReentrant {
         require(to != address(0), "LockedPoolEscrow/invalid recipient");
         require(amount > 0, "LockedPoolEscrow/invalid amount");
-        require(principalHeld >= amount, "LockedPoolEscrow/insufficient principal");
-        
-        principalHeld -= amount;
+        _drawFunds(amount);
         interestPaidOut += amount;
         
         asset.safeTransfer(to, amount);
@@ -216,11 +234,10 @@ contract LockedPoolEscrow is
         require(amount > 0, "LockedPoolEscrow/invalid amount");
         require(asset.balanceOf(address(this)) >= amount, "LockedPoolEscrow/insufficient balance");
         
-        if (principalHeld >= amount) {
-            principalHeld -= amount;
-        } else {
-            principalHeld = 0;
-        }
+        // A maturity payout is principal plus interest. Only the principal is in principalHeld;
+        // the interest is funded from protocol capital, so it must be debited there.
+        uint256 interestPortion = _drawFunds(amount);
+        interestPaidOut += interestPortion;
         
         asset.safeTransfer(to, amount);
         
@@ -255,29 +272,17 @@ contract LockedPoolEscrow is
         emit PenaltiesSentToFeeManager(amount);
     }
 
-    function transferPenaltiesToTreasury(address treasury) external onlyOperator nonReentrant {
-        require(treasury != address(0), "LockedPoolEscrow/invalid treasury");
+    function transferPenaltiesToReserve() external onlyOperator nonReentrant {
+        require(yieldReserve != address(0), "LockedPoolEscrow/yield reserve not set");
         require(penaltiesCollected > 0, "LockedPoolEscrow/no penalties");
         
         uint256 amount = penaltiesCollected;
         penaltiesCollected = 0;
         
-        asset.safeTransfer(treasury, amount);
-    }
-
-    function transferPenaltiesToReserve(address yieldReserve_) external onlyOperator nonReentrant {
-        require(yieldReserve_ != address(0), "LockedPoolEscrow/invalid reserve");
-        require(penaltiesCollected > 0, "LockedPoolEscrow/no penalties");
+        asset.forceApprove(yieldReserve, amount);
+        YieldReserveEscrow(yieldReserve).receiveYield(amount);
         
-        uint256 amount = penaltiesCollected;
-        penaltiesCollected = 0;
-        
-        asset.forceApprove(yieldReserve_, amount);
-        
-        (bool success,) = yieldReserve_.call(
-            abi.encodeWithSignature("receiveYield(uint256)", amount)
-        );
-        require(success, "LockedPoolEscrow/reserve transfer failed");
+        emit PenaltiesSentToReserve(amount);
     }
 
     function sendYieldToReserve(uint256 amount) external onlyLockedPoolOrManager nonReentrant {
@@ -416,7 +421,7 @@ contract LockedPoolEscrow is
         require(principalHeld >= amount, "LockedPoolEscrow/insufficient principal");
         
         principalHeld -= amount;
-        spvAllocations[spvAddress] += amount;
+        lifetimeAllocatedToSPV[spvAddress] += amount;
         
         asset.safeTransfer(spvAddress, amount);
         
@@ -467,8 +472,8 @@ contract LockedPoolEscrow is
         return protocolFundsDirectDeposit;
     }
 
-    function getSPVAllocation(address spvAddress) external view returns (uint256) {
-        return spvAllocations[spvAddress];
+    function getLifetimeAllocatedToSPV(address spvAddress) external view returns (uint256) {
+        return lifetimeAllocatedToSPV[spvAddress];
     }
 
     function getTotalBalance() external view returns (uint256) {

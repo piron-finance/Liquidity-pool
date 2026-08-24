@@ -61,8 +61,10 @@ library CalculationLibrary {
             uint256 totalValue = calculateCurrentPoolValue(poolData);
             return (userShares * totalValue) / totalShares;
         } else if (poolData.status == IPoolTypes.PoolStatus.MATURED) {
+            uint256 settledShares = poolData.sharesAtMaturity;
+            if (settledShares == 0) return 0;
             uint256 totalReturns = calculateTotalReturns(poolData);
-            return (userShares * totalReturns) / totalShares;
+            return (userShares * totalReturns) / settledShares;
         } else if (poolData.status == IPoolTypes.PoolStatus.EMERGENCY) {
             return (userShares * poolData.totalRaised) / totalShares;
         }
@@ -97,14 +99,12 @@ library CalculationLibrary {
         return (actualRaised * BASIS_POINTS) / (BASIS_POINTS - discountRate);
     }
 
+    /// @dev The settled pot: what the SPV actually returned, plus coupons received but not
+    ///      yet distributed. Never a projection — face value and scheduled coupons are targets,
+    ///      and paying them out when the instrument underperformed overpays whoever exits first.
     function calculateTotalReturns(IPoolTypes.PoolData storage poolData) public view returns (uint256) {
-        if (poolData.config.instrumentType == IPoolTypes.InstrumentType.DISCOUNTED) {
-            return poolData.config.faceValue;
-        } else {
-           
-            uint256 undistributedCoupons = poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
-            return poolData.fundsReturnedBySPV + undistributedCoupons;
-        }
+        uint256 undistributedCoupons = poolData.totalCouponsReceived - poolData.totalCouponsDistributed;
+        return poolData.fundsReturnedBySPV + undistributedCoupons;
     }
 
     function calculateExpectedCoupons(IPoolTypes.PoolData storage poolData) public view returns (uint256) {

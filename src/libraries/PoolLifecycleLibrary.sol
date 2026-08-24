@@ -211,6 +211,7 @@ library PoolLifecycleLibrary {
         escrowContract.trackMaturityReturn(finalAmount);
         
         poolData.fundsReturnedBySPV += finalAmount;
+        poolData.sharesAtMaturity = IERC20(liquidityPool).totalSupply();
         poolData.status = IPoolTypes.PoolStatus.MATURED;
         
         emit MaturityProcessed(finalAmount);
