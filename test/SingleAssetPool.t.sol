@@ -551,4 +551,38 @@ contract SingleAssetPoolTest is BaseTest {
         );
     }
 
+
+    // ==================== EMERGENCY ENTRY ====================
+
+    /// @dev Emergency refunds pay one unit per share. That is honourable only while the
+    ///      escrow still holds everything raised; against a drawn-down escrow the first
+    ///      claimants take par and the rest find nothing left.
+    function test_emergencyExit_refusedOnceSPVHoldsTheMoney() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        vm.prank(user1);
+        token.approve(poolAddress, TARGET_RAISE);
+        vm.prank(user1);
+        LiquidityPool(poolAddress).deposit(TARGET_RAISE, user1);
+
+        skipTime(EPOCH_DURATION + 1);
+        vm.prank(operator);
+        manager.closeEpoch(poolAddress);
+
+        // Nothing has left the escrow yet, so the pool may still declare an emergency.
+        uint256 snap = vm.snapshotState();
+        vm.prank(poolAddress);
+        manager.emergencyExit();
+        assertTrue(manager.poolStatus(poolAddress) == IPoolTypes.PoolStatus.EMERGENCY);
+        vm.revertToState(snap);
+
+        // Once the SPV draws the funds, par can no longer be honoured.
+        vm.prank(spv);
+        manager.withdrawFundsForInvestment(poolAddress, TARGET_RAISE);
+
+        vm.prank(poolAddress);
+        vm.expectRevert(Manager.InvalidStatus.selector);
+        manager.emergencyExit();
+    }
+
 }

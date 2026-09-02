@@ -435,9 +435,20 @@ contract Manager is Initializable, UUPSUpgradeable, IPoolManager, ReentrancyGuar
 
     /**
      * @dev Pool self-reports an emergency, entering EMERGENCY status.
+     *
+     *      Only while the escrow is still whole. Emergency refunds pay one unit per share,
+     *      which is exactly right when nothing has been invested and wrong the moment it
+     *      has: against an escrow already drawn down by the SPV, the first holders out
+     *      take par and the rest find nothing left. `fundsWithdrawnBySPV` is the precise
+     *      test — it covers a pool sitting in PENDING_INVESTMENT that has not yet
+     *      transferred, which a status check would refuse for no reason.
+     *
+     *      Handling a mid-deal SPV default needs refunds pro-rated against what the escrow
+     *      actually holds, which is a different mechanism than this one.
      */
     function emergencyExit() external override onlyValidPool {
         address poolAddress = msg.sender;
+        if (pools[poolAddress].fundsWithdrawnBySPV != 0) revert InvalidStatus();
         
         _updateStatus(poolAddress, IPoolTypes.PoolStatus.EMERGENCY);
         _emitEmergencyMetrics(poolAddress, "POOL_SELF_REPORT");
