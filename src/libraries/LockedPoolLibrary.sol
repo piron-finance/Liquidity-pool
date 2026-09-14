@@ -181,11 +181,18 @@ library LockedPoolLibrary {
 
     // ==================== VALIDATION ====================
 
-    /// @dev Validates a lock tier: duration > 0, APY <= 50%, penalty <= 50%.
+    /// @dev Longest term a tier may offer: ten years.
+    ///
+    ///      Same purpose as the bps ceilings — a guard against a mistyped tier locking
+    ///      capital past any horizon the protocol plans for, not a view on what terms
+    ///      are sensible.
+    uint256 internal constant MAX_TIER_DURATION_DAYS = 3650;
+
+    /// @dev Validates a lock tier: duration in range, APY <= 50%, penalty <= 50%.
     function validateTier(
         ILockedPoolTypes.LockTier memory tier
     ) public pure returns (bool isValid) {
-        if (tier.durationDays == 0) return false;
+        if (tier.durationDays == 0 || tier.durationDays > MAX_TIER_DURATION_DAYS) return false;
         if (tier.apyBps > 5000) return false;
         if (tier.earlyExitPenaltyBps > 5000) return false;
         return true;

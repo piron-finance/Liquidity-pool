@@ -94,7 +94,13 @@ library StableYieldNAVLibrary {
             instrument.purchaseDate : 
             instrument.nextCouponDueDate - couponPeriodSeconds;
         
+        // Capped at one period. Beyond the due date the coupon is late, not larger:
+        // without this a payment the SPV never makes goes on inflating NAV until
+        // maturity, and holders redeem against income that never arrived.
         uint256 timeSinceLastCoupon = currentTime - lastCouponDate;
+        if (timeSinceLastCoupon > couponPeriodSeconds) {
+            timeSinceLastCoupon = couponPeriodSeconds;
+        }
         uint256 couponAmount = (instrument.faceValue * instrument.annualCouponRate) / (10000 * instrument.couponFrequency);
         uint256 accruedInterest = (couponAmount * timeSinceLastCoupon) / couponPeriodSeconds;
         
