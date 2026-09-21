@@ -1,6 +1,4 @@
-User/marketing monorepo: https://github.com/piron-finance/apps
-admin/spv monorepo: https://github.com/piron-finance/apps-internal
-Backend: https://github.com/piron-finance/piron-backend
+
 
 # Piron Pools
 
