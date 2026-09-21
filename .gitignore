@@ -19,9 +19,10 @@ docs/
 *.txt
 !remappings.txt
 
-# Markdown files (keep only README)
+# Markdown files (keep only README and the changelog)
 *.md
 !README.md
+!CHANGELOG.md
 
 # Frontend ABIs and deployment info
 frontend-abis/

@@ -54,11 +54,13 @@ library ValidationLibrary {
         require(owner != address(0), "ValidationLibrary/invalid owner");
         require(poolRegistry.isRegisteredPool(poolAddress), "ValidationLibrary/invalid pool");
         
+        // INVESTED is deliberately absent. It used to be admitted once past the maturity
+        // date, but handleWithdraw has no INVESTED branch and reverts on it regardless, so
+        // the clause only moved the rejection to a later line with a worse message.
+        // Settlement is what opens redemption.
         bool canWithdraw = poolData.status == IPoolTypes.PoolStatus.FUNDING ||
                           poolData.status == IPoolTypes.PoolStatus.MATURED || 
-                          poolData.status == IPoolTypes.PoolStatus.EMERGENCY ||
-                          (poolData.status == IPoolTypes.PoolStatus.INVESTED && 
-                           block.timestamp >= poolData.config.maturityDate);
+                          poolData.status == IPoolTypes.PoolStatus.EMERGENCY;
         
         require(canWithdraw, "ValidationLibrary/withdrawals not allowed");
     }
