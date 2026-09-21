@@ -318,7 +318,12 @@ contract StableYieldManager is
         
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
         
-        if (escrow.getPoolReserves() >= grossWithdrawalValue) {
+        IStableYieldTypes.WithdrawalQueue storage queue = poolQueues[poolAddress];
+        bool queueEmpty = queue.head == queue.tail;
+
+        // Paying at once while people are waiting would serve whoever arrived last out
+        // of the cash standing against the requests in front of them.
+        if (queueEmpty && escrow.getPoolReserves() >= grossWithdrawalValue) {
             if (transactionFee > 0) {
                 escrow.collectWithdrawalFee(transactionFee);
                 emit TransactionFeeCollected(poolAddress, "withdrawal", grossWithdrawalValue, transactionFee);
@@ -356,7 +361,9 @@ contract StableYieldManager is
         });
         
         userWithdrawalRequests[poolAddress][user].push(requestId);
-        queue.totalPendingValue += estimatedValue;
+        // Gross. The fee leaves the escrow alongside the net, so reserving only the net
+        // understates the liability and lets the SPV draw the difference.
+        queue.totalPendingValue += estimatedValue + feeAmount;
         
         emit WithdrawalQueued(poolAddress, user, requestId, shares, estimatedValue);
     }
@@ -406,7 +413,15 @@ contract StableYieldManager is
             poolData,
             poolInstruments[poolAddress]
         );
-        return baseNAV + poolUndeployedCapital[poolAddress];
+        uint256 gross = baseNAV + poolUndeployedCapital[poolAddress];
+
+        // Queued exits burn their shares the moment they ask to leave, so the cash owed
+        // to them stands against a supply that no longer counts them. Leaving it in the
+        // numerator prices every remaining share up by the size of the queue, and a
+        // holder whose inflated claim still fits the free cash is paid at that price out
+        // of the money the queue is waiting on.
+        uint256 owed = poolQueues[poolAddress].totalPendingValue;
+        return gross > owed ? gross - owed : 0;
     }
 
     function calculateNAVPerShare(address poolAddress) public view ActivePool(poolAddress) returns (uint256 navPerShare) {
@@ -827,9 +842,10 @@ contract StableYieldManager is
         uint256 totalNAV = calculatePoolNAV(poolAddress);
         
         uint256 pendingWithdrawals = poolQueues[poolAddress].totalPendingValue;
-        uint256 pendingFees = _calculatePendingFees(poolAddress);
-        uint256 effectiveReserves = currentReserves > (pendingWithdrawals + pendingFees) 
-            ? currentReserves - pendingWithdrawals - pendingFees 
+        // `pendingWithdrawals` is the gross quote, fee included, so it is the whole of
+        // what the queue will take out of the escrow.
+        uint256 effectiveReserves = currentReserves > pendingWithdrawals
+            ? currentReserves - pendingWithdrawals
             : 0;
         
         IStableYieldTypes.ReserveConfig storage config = poolReserveConfigs[poolAddress];

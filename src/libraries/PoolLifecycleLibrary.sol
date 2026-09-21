@@ -163,6 +163,14 @@ library PoolLifecycleLibrary {
         
         require(actualAmount <= poolData.totalRaised, "PoolLifecycle/Cannot invest more than raised");
         require(actualAmount > 0, "PoolLifecycle/invalid amount");
+        // What the SPV drew is what it must account for. Confirming less leaves the
+        // difference sitting with the SPV and unrecorded as owed, while face value,
+        // expected settlement and every holder valuation are struck on the smaller
+        // figure — so the shortfall lands silently on holders.
+        require(
+            actualAmount == poolData.fundsWithdrawnBySPV,
+            "PoolLifecycle/must account for all funds drawn"
+        );
         
         poolData.actualInvested = actualAmount;
         
