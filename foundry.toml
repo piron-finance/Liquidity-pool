@@ -14,7 +14,26 @@ ast = false
 build_info = false
 extra_output = []
 sparse_mode = false
-fs_permissions = []
+fs_permissions = [{ access = "read-write", path = "./deployments/" }]
+
+# Property-based testing. The suite was entirely example-based before, which only ever
+# covers the orderings somebody thought of.
+[profile.default.fuzz]
+runs = 512
+
+[profile.default.invariant]
+runs = 128
+depth = 32
+fail_on_revert = false
+
+# A deeper sweep for CI, where the extra minutes are free.
+[profile.deep.fuzz]
+runs = 10000
+
+[profile.deep.invariant]
+runs = 512
+depth = 64
+fail_on_revert = false
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
 
@@ -25,6 +44,19 @@ out = "out"
 libs = ["lib"]
 optimizer = true
 optimizer_runs = 1000
-via_ir = true  # Only use for production deployment
+via_ir = true
 evm_version = "shanghai"
 solc_version = "0.8.22"
+
+# ── RPC Endpoints ─────────────────────────────────────────────────────────────
+[rpc_endpoints]
+# Testnets
+base_sepolia       = "${RPC_URL_BASE_SEPOLIA}"        # Chain 84532
+arbitrum_sepolia   = "${RPC_URL_ARBITRUM_SEPOLIA}"    # Chain 421614
+celo_sepolia       = "${RPC_URL_CELO_SEPOLIA}"        # Chain 44787
+optimism_sepolia   = "${RPC_URL_OPTIMISM_SEPOLIA}"    # Chain 11155420
+plume_testnet      = "${RPC_URL_PLUME_TESTNET}"       # Chain 98867
+lisk_sepolia       = "${RPC_URL_LISK_SEPOLIA}"        # Chain 4202
+arc_testnet        = "${RPC_URL_ARC_TESTNET}"         # Chain 1244 — Circle ARC (USDC native gas)
+robinhood_testnet  = "${RPC_URL_ROBINHOOD_TESTNET}"   # Chain 46630
+

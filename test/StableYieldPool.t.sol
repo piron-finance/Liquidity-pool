@@ -1237,7 +1237,14 @@ contract StableYieldPoolTest is BaseTest {
 
         address attackerEscrow = makeAddr("attackerEscrow");
 
+        // An operator cannot reach this entry point at all any more — it would be able to
+        // book capital against one pool and send it to another pool's escrow.
         vm.prank(operator);
+        vm.expectRevert("YieldReserveEscrow/unauthorized");
+        yieldReserve.deployToPool(poolAddress, attackerEscrow, 100_000e6);
+
+        // And a manager still cannot send it somewhere unauthorized.
+        vm.prank(address(stableYieldManager));
         vm.expectRevert("YieldReserveEscrow/unauthorized escrow");
         yieldReserve.deployToPool(poolAddress, attackerEscrow, 100_000e6);
     }

@@ -88,6 +88,10 @@ contract YieldReserveEscrow is
 
     mapping(address => bool) public authorizedEscrows;
 
+    /// @dev Set once, after deployment. Upgrades to this contract go through the same
+    ///      72-hour timelock and guardian brake as every other upgradeable contract.
+    address public timelockController;
+
     // ==================== EVENTS ====================
 
     event YieldReceived(uint256 amount, uint256 toTreasury, uint256 toReserve);
@@ -209,11 +213,13 @@ contract YieldReserveEscrow is
         emit EscrowAuthorized(escrow_, authorized_);
     }
 
+    /// @dev Through the timelock, as every other upgradeable contract in the system is.
+    ///      This contract holds the protocol's backstop capital; a multisig-only path let
+    ///      its implementation be replaced in one transaction, with no delay for anyone to
+    ///      notice and no guardian able to intervene.
     function _authorizeUpgrade(address newImplementation) internal override {
-        require(
-            accessManager.hasRole(accessManager.MULTISIG_ADMIN_ROLE(), msg.sender),
-            "YieldReserveEscrow/only multisig"
-        );
+        require(timelockController != address(0), "YieldReserveEscrow/timelock not set");
+        require(msg.sender == timelockController, "YieldReserveEscrow/only timelock");
         require(newImplementation != address(0), "YieldReserveEscrow/invalid implementation");
         version += 1;
     }
@@ -266,10 +272,12 @@ contract YieldReserveEscrow is
         address escrow,
         uint256 amount
     ) external nonReentrant {
+        // Managers only. They derive the escrow from their own `poolEscrows[pool]`, so
+        // pool and escrow cannot disagree. An operator passing them separately could book
+        // capital against one pool and send it to another's escrow, and since
+        // `deployedToPool` gates both recall paths the funds would be unrecallable.
         require(
-            msg.sender == lockedPoolManager || 
-            msg.sender == stableYieldManager ||
-            accessManager.hasRole(accessManager.OPERATOR_ROLE(), msg.sender),
+            msg.sender == lockedPoolManager || msg.sender == stableYieldManager,
             "YieldReserveEscrow/unauthorized"
         );
         require(pool != address(0), "YieldReserveEscrow/invalid pool");
@@ -376,16 +384,6 @@ contract YieldReserveEscrow is
         emit LoanToPool(pool, positionId, amount);
     }
 
-    function payUser(address user, uint256 amount) external onlyAuthorizedManager nonReentrant {
-        require(user != address(0), "YieldReserveEscrow/invalid user");
-        require(amount > 0, "YieldReserveEscrow/invalid amount");
-        require(totalBalance >= amount, "YieldReserveEscrow/insufficient balance");
-        
-        totalBalance -= amount;
-        totalLoanedOut += amount;
-        
-        asset.safeTransfer(user, amount);
-    }
 
     function repayLoan(
         address pool,
@@ -402,7 +400,9 @@ contract YieldReserveEscrow is
         if (repayAmount > 0) {
             totalLoanedOut -= repayAmount;
             poolLoans[pool] -= repayAmount;
-            positionLoans[positionId] = 0;
+            // Subtract rather than zero: a partial repayment must leave the remainder
+            // owed, not forgive it while the aggregates stay inflated.
+            positionLoans[positionId] = loanOwed - repayAmount;
             totalBalance += repayAmount;
         }
         
@@ -565,7 +565,26 @@ contract YieldReserveEscrow is
      *      exactly the revenue meant to keep the reserve solvent would otherwise sit unusable,
      *      invisible to every path that checks `totalBalance`.
      */
-    function syncUntrackedFunds() external onlyOperator returns (uint256 credited) {
+    /// @dev Credits tokens that reached this contract without passing through a tracked
+    ///      path — notably the FeeManager's share of a distribution, which arrives by
+    ///      bare transfer. Permissionless on purpose: it only recognises funds already
+    ///      held, so there is nothing to gain by calling it and real harm in the reserve
+    ///      sitting insolvent on paper because nobody remembered to.
+    /// @dev Names the timelock permitted to upgrade this contract. Callable once.
+    ///
+    ///      One-way on purpose: a contract whose upgrade authority can be repointed has
+    ///      no timelock, only the appearance of one.
+    function setTimelockController(address timelock_) external {
+        require(
+            accessManager.hasRole(accessManager.MULTISIG_ADMIN_ROLE(), msg.sender),
+            "YieldReserveEscrow/only multisig"
+        );
+        require(timelock_ != address(0), "YieldReserveEscrow/invalid timelock");
+        require(timelockController == address(0), "YieldReserveEscrow/timelock already set");
+        timelockController = timelock_;
+    }
+
+    function syncUntrackedFunds() external returns (uint256 credited) {
         uint256 held = asset.balanceOf(address(this));
         require(held > totalBalance, "YieldReserveEscrow/nothing to sync");
         

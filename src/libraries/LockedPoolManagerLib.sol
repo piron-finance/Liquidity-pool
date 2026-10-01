@@ -34,27 +34,33 @@ library LockedPoolManagerLib {
     ) external {
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
         uint256 available = escrow.getPrincipalHeld();
+        uint256 penaltyCaptured;
 
         if (available >= payout + penalty) {
             escrow.withdraw(user, payout);
             if (penalty > 0) {
                 escrow.recordPenalty(penalty);
+                penaltyCaptured = penalty;
             }
         } else if (available >= payout) {
             escrow.withdraw(user, payout);
             uint256 penaltyInEscrow = available - payout;
             if (penaltyInEscrow > 0) {
                 escrow.recordPenalty(penaltyInEscrow);
+                penaltyCaptured = penaltyInEscrow;
             }
         } else {
-            _processPaymentWithReserveLoan(
+            penaltyCaptured = _processPaymentWithReserveLoan(
                 poolEscrows, poolAccounting, debtPositions, poolDebtPositionIds,
                 yieldReserve, poolAddress, positionId, user, payout, available, penalty
             );
         }
 
-        if (penalty > 0) {
-            poolAccounting[poolAddress].totalPenaltiesEarned += penalty;
+        // Only what was actually taken. Crediting the full penalty while recording part of
+        // it reported revenue the protocol never received; the shortfall is carried as
+        // `pendingPenalty` on the debt position and credited when the debt settles.
+        if (penaltyCaptured > 0) {
+            poolAccounting[poolAddress].totalPenaltiesEarned += penaltyCaptured;
         }
     }
 
@@ -70,7 +76,7 @@ library LockedPoolManagerLib {
         uint256 payout,
         uint256 escrowAvailable,
         uint256 penalty
-    ) internal {
+    ) internal returns (uint256 penaltyCaptured) {
         if (yieldReserve == address(0)) revert NoYieldReserve();
 
         uint256 reserveLoan = payout - escrowAvailable;
@@ -88,9 +94,11 @@ library LockedPoolManagerLib {
             uint256 escrowPrincipal = escrow.getPrincipalHeld();
             if (escrowPrincipal >= penalty) {
                 escrow.recordPenalty(penalty);
+                penaltyCaptured = penalty;
             } else {
                 if (escrowPrincipal > 0) {
                     escrow.recordPenalty(escrowPrincipal);
+                    penaltyCaptured = escrowPrincipal;
                 }
                 pendingPenalty = penalty - escrowPrincipal;
             }
@@ -136,6 +144,7 @@ library LockedPoolManagerLib {
 
             if (penaltyAmount > 0) {
                 escrow.recordPenalty(penaltyAmount);
+                poolAccounting[poolAddress].totalPenaltiesEarned += penaltyAmount;
             }
 
             debt.settled = true;

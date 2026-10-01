@@ -313,7 +313,9 @@ contract FeeManagerTest is BaseTest {
         uint256 deployAmount = 20_000e6;
         uint256 escrowBefore = token.balanceOf(mockEscrow);
         
-        vm.prank(operator);
+        // As the manager. An operator may no longer call this directly: it would be able
+        // to book capital against one pool and send it to another pool's escrow, and
+        // `deployedToPool` gates both recall paths.
         yieldReserve.deployToPool(mockPool, mockEscrow, deployAmount);
         
         uint256 escrowAfter = token.balanceOf(mockEscrow);
@@ -497,7 +499,6 @@ contract FeeManagerTest is BaseTest {
         vm.prank(address(this));
         yieldReserve.recordYield(fundAmount);
         
-        vm.prank(operator);
         yieldReserve.deployToPool(mockPool, mockEscrow, 20_000e6);
         
         vm.prank(address(this));
@@ -552,13 +553,36 @@ contract FeeManagerTest is BaseTest {
         assertEq(adminAfter - adminBefore, withdrawAmount);
     }
     
-    function test_yieldReserve_upgradeRequiresMultisig() public {
+    /// The reserve holds the protocol's backstop capital, so its implementation goes
+    /// through the same 72-hour timelock as every other upgradeable contract. It used to
+    /// take a multisig signature directly, which meant the code behind the largest pot in
+    /// the protocol could be replaced in one transaction with no delay and no guardian.
+    function test_yieldReserve_upgradeGoesThroughTheTimelock() public {
         _setupYieldReserve();
-        
+
         YieldReserveEscrow newImpl = new YieldReserveEscrow();
-        
-        vm.prank(admin);
-        vm.expectRevert("YieldReserveEscrow/only multisig");
+
+        // Until the timelock is named, nobody can upgrade it at all.
+        vm.prank(multisigAdmin);
+        vm.expectRevert("YieldReserveEscrow/timelock not set");
+        yieldReserve.upgradeToAndCall(address(newImpl), "");
+
+        address timelock = makeAddr("timelock");
+        vm.prank(multisigAdmin);
+        yieldReserve.setTimelockController(timelock);
+
+        // Naming it is one-way: an upgrade path that can be repointed is not a timelock.
+        vm.prank(multisigAdmin);
+        vm.expectRevert("YieldReserveEscrow/timelock already set");
+        yieldReserve.setTimelockController(makeAddr("other"));
+
+        // The multisig alone is no longer enough.
+        vm.prank(multisigAdmin);
+        vm.expectRevert("YieldReserveEscrow/only timelock");
+        yieldReserve.upgradeToAndCall(address(newImpl), "");
+
+        // The timelock is.
+        vm.prank(timelock);
         yieldReserve.upgradeToAndCall(address(newImpl), "");
     }
 }

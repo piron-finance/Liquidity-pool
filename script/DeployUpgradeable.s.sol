@@ -98,7 +98,48 @@ contract DeployUpgradeable is Script {
         vm.stopBroadcast();
 
         _logDeploymentResults(contracts, config);
+        _saveDeployment(contracts);
         emit DeploymentComplete(contracts);
+    }
+
+    function _saveDeployment(DeployedContracts memory contracts) internal {
+        string memory chainId = vm.toString(block.chainid);
+        string memory out = string.concat(
+            "Chain ID: ", chainId, "\n",
+            "\n=== GOVERNANCE ===\n",
+            "AccessManager:       ", vm.toString(contracts.accessManager), "\n",
+            "TimelockController:  ", vm.toString(contracts.timelockController), "\n",
+            "UpgradeGuardian:     ", vm.toString(contracts.upgradeGuardian), "\n"
+        );
+        out = string.concat(out,
+            "\n=== CORE ===\n",
+            "Manager:             ", vm.toString(contracts.managerProxy), "\n",
+            "PoolRegistry:        ", vm.toString(contracts.poolRegistryProxy), "\n",
+            "PoolFactory:         ", vm.toString(contracts.poolFactoryProxy), "\n",
+            "FeeManager:          ", vm.toString(contracts.feeManagerProxy), "\n",
+            "YieldReserveEscrow:  ", vm.toString(contracts.yieldReserveProxy), "\n"
+        );
+        out = string.concat(out,
+            "\n=== STABLE YIELD ===\n",
+            "StableYieldManager:  ", vm.toString(contracts.stableYieldManagerProxy), "\n",
+            "ManagedPoolFactory:  ", vm.toString(contracts.managedPoolFactoryProxy), "\n",
+            "\n=== LOCKED POOL ===\n",
+            "LockedPoolManager:   ", vm.toString(contracts.lockedPoolManagerProxy), "\n"
+        );
+        out = string.concat(out,
+            "\n=== IMPLEMENTATIONS ===\n",
+            "LiquidityPool:       ", vm.toString(contracts.liquidityPoolImpl), "\n",
+            "PoolEscrow:          ", vm.toString(contracts.poolEscrowImpl), "\n",
+            "StableYieldPool:     ", vm.toString(contracts.stableYieldPoolImpl), "\n",
+            "StableYieldEscrow:   ", vm.toString(contracts.stableYieldEscrowImpl), "\n",
+            "LockedPool:          ", vm.toString(contracts.lockedPoolImpl), "\n",
+            "LockedPoolEscrow:    ", vm.toString(contracts.lockedPoolEscrowImpl), "\n",
+            "\n=== TOKEN ===\n",
+            "BaseToken (ERC20Mock): ", vm.toString(contracts.baseToken), "\n",
+            "\n----------------------------------------\n"
+        );
+
+        vm.writeFile(string.concat("./deployments/", chainId, ".txt"), out);
     }
 
     function _loadConfig() internal view returns (DeploymentConfig memory config) {
@@ -366,6 +407,12 @@ contract DeployUpgradeable is Script {
         StableYieldManager(contracts.stableYieldManagerProxy).setYieldReserve(contracts.yieldReserveProxy);
         LockedPoolManager(contracts.lockedPoolManagerProxy).setYieldReserve(contracts.yieldReserveProxy);
         console.log("Managers configured with YieldReserve");
+
+        // The two money-holding contracts outside the pool set upgrade through the same
+        // timelock as everything else. Without this they cannot be upgraded at all.
+        yieldReserve.setTimelockController(contracts.timelockController);
+        FeeManager(contracts.feeManagerProxy).setTimelockController(contracts.timelockController);
+        console.log("FeeManager and YieldReserve upgrade authority set to timelock");
 
         console.log("System configuration complete");
     }

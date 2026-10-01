@@ -23,6 +23,7 @@ docs/
 *.md
 !README.md
 !CHANGELOG.md
+!SOLIDITY_FINDINGS.md
 
 # Frontend ABIs and deployment info
 frontend-abis/

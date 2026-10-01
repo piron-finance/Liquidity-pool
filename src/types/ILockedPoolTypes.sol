@@ -68,6 +68,15 @@ interface ILockedPoolTypes {
         uint256 interestEarned;
         bool autoRollover;
         uint256 rolledFromPositionId;
+        /// @dev Exit penalty fixed at deposit, as `apyBpsAtDeposit` fixes the rate.
+        ///      Reading it live from the tier let an operator reprice the cost of leaving
+        ///      a position that was already open.
+        ///
+        ///      Zero means "struck before this field existed" — those positions fall back
+        ///      to the live tier, which is what they have always done. A fresh position
+        ///      can never store zero here, because a zero-penalty tier is recorded as
+        ///      `NO_PENALTY_SENTINEL`.
+        uint256 earlyExitPenaltyBpsAtDeposit;
     }
 
     struct PoolConfig {

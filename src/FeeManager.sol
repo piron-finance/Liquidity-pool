@@ -100,6 +100,9 @@ contract FeeManager is
      * @param _treasury Treasury wallet
      * @param _opsWallet Operations wallet
      */
+    /// @dev Set once, after deployment. See `_authorizeUpgrade`.
+    address public timelockController;
+
     function initialize(
         address _accessManager,
         address _poolRegistry,
@@ -131,9 +134,22 @@ contract FeeManager is
         feeSplits[FeeType.OTHER] = FeeSplit({treasuryBps: 10_000, reserveBps: 0, opsBps: 0, active: true});
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
+    /// @dev Through the timelock, as every other upgradeable contract in the system is.
+    ///      This contract custodies undistributed fee revenue; a multisig-only path let
+    ///      its implementation be replaced in one transaction, with no delay and no
+    ///      guardian able to intervene.
+    function _authorizeUpgrade(address newImplementation) internal override {
+        require(timelockController != address(0), "FeeManager/timelock not set");
+        require(msg.sender == timelockController, "FeeManager/only timelock");
         require(newImplementation != address(0), "FeeManager/invalid implementation address");
         version += 1;
+    }
+
+    /// @dev Names the timelock permitted to upgrade this contract. Callable once.
+    function setTimelockController(address timelock_) external onlyRole(accessManager.MULTISIG_ADMIN_ROLE()) {
+        require(timelock_ != address(0), "FeeManager/invalid timelock");
+        require(timelockController == address(0), "FeeManager/timelock already set");
+        timelockController = timelock_;
     }
 
     // ==================== FEE COLLECTION ====================
