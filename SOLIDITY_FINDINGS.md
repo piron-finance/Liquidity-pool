@@ -321,6 +321,46 @@ Include a dedicated monotonic allocation counter in the hash.
 
 ---
 
+## S-12 · Design question · A queued exit is senior to a holder who stayed
+
+**Where** `StableYieldManager.calculatePoolNAV`, `_queueWithdrawal`,
+`StableYieldManagerLib._processQueuedWithdrawal`
+
+Found by the invariant fuzzer at depth 64, not by reading.
+
+A withdrawal request burns its shares immediately and records a quote. When the queue is
+served, that quote is paid **in full**. If the pool's value falls in between — a write-off,
+a settlement below the mark — the shortfall lands entirely on the holders who did not
+queue. Carried far enough, NAV clamps to zero and every remaining share is worth nothing
+while the queue is still paid at its original quote.
+
+The fuzzer reached exactly that state: shares outstanding, NAV zero, the queue owed
+75,271,366,619 against holdings of 65,579,139,369.
+
+Nothing here is broken. `calculatePoolNAV` clamps at zero rather than wrapping, the queue
+stops paying when the escrow runs dry, and the behaviour matches the reference the Rust
+ports were built from. But it is a seniority choice that has never been written down:
+
+- **As built**, a queued leaver has a fixed claim ranking ahead of everyone who stayed.
+- **The alternative** is to re-price a queued request at service time against what the
+  pool is actually worth, so a fall is shared. That was explicitly rejected earlier in the
+  Rust work for a good reason — re-pricing against a supply those shares had already left
+  pays the leaver *more* the longer the queue takes. Any fix has to avoid reintroducing
+  that.
+
+A third option, and probably the right one: cap a queued payout at the holder's pro-rata
+share of what the pool is worth *when served*, taking the lower of that and the original
+quote. The leaver cannot gain from delay, and cannot be made whole at the expense of
+people who are still in.
+
+### Not changed
+
+This alters who bears a loss, which is a product decision rather than a defect to patch.
+Flagged because the fuzzer proved the state is reachable, and because the economics of it
+are not stated anywhere in the contracts today.
+
+---
+
 # Checked and found sound
 
 Recorded because an audit that lists only defects says nothing about where the auditor

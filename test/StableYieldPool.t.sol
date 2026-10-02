@@ -29,7 +29,7 @@ contract StableYieldPoolTest is BaseTest {
     uint256 constant MIN_INVESTMENT = 1000e6;
     uint256 constant DEFAULT_FEE_BPS = 300;
     
-    function setUp() public override {
+    function setUp() public virtual override {
         super.setUp();
         
         token = new MockERC20("Mock USDC", "USDC", 6);

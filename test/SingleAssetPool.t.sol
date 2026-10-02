@@ -28,7 +28,7 @@ contract SingleAssetPoolTest is BaseTest {
     uint256 constant EPOCH_DURATION = 7 days;
     uint256 constant MATURITY_DURATION = 90 days;
     
-    function setUp() public override {
+    function setUp() public virtual override {
         super.setUp();
         
         token = new MockERC20("Mock USDC", "USDC", 6);
