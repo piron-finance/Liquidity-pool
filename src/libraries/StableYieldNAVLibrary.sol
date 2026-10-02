@@ -77,7 +77,14 @@ library StableYieldNAVLibrary {
         return instrument.purchasePrice + ((instrument.faceValue - instrument.purchasePrice) * timeElapsed) / totalTime;
     }
     
-    /// @dev Face value + accrued interest since the last coupon date.
+    /// @dev Capital accreted from the purchase price toward face, plus the coupon accrued
+    ///      since the last payment.
+    ///
+    ///      Marking straight at face ignored `purchasePrice`, so an instrument bought
+    ///      below par booked the whole discount the moment it was recorded: an SPV could
+    ///      lift NAV by buying cheaply, and a default before maturity would have been a
+    ///      fall from a level the pool never truly held. The discount now accretes over
+    ///      the holding period, the same way a discounted instrument's does.
     function calculateInterestBearingValue(
         IStableYieldTypes.InstrumentHolding storage instrument,
         uint256 currentTime
@@ -104,6 +111,8 @@ library StableYieldNAVLibrary {
         uint256 couponAmount = (instrument.faceValue * instrument.annualCouponRate) / (10000 * instrument.couponFrequency);
         uint256 accruedInterest = (couponAmount * timeSinceLastCoupon) / couponPeriodSeconds;
         
-        return instrument.faceValue + accruedInterest;
+        // The capital leg is exactly `calculateDiscountedValue`, capped at face once the
+        // term is up, so both instrument types agree on what holding below par is worth.
+        return calculateDiscountedValue(instrument, currentTime) + accruedInterest;
     }
 }

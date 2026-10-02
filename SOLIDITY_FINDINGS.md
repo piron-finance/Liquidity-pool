@@ -361,6 +361,39 @@ are not stated anywhere in the contracts today.
 
 ---
 
+## S-13 · Medium · An instrument's discount was booked on day one — **fixed**
+
+**Where** `src/libraries/StableYieldNAVLibrary.sol:108`
+
+`calculateInterestBearingValue` returned `faceValue + accruedInterest`, ignoring
+`purchasePrice`. An instrument bought below par was therefore marked at redemption value
+the moment it was recorded: an SPV lifted NAV simply by buying cheaply, the gain was
+unearned until the bond actually redeemed, and a default beforehand read as a fall from a
+level the pool had never held.
+
+Carried through two earlier passes as a product decision, on the grounds that changing it
+alters the economics of every interest-bearing pool. That was the wrong read — the
+discounted instrument type already accretes, so this was an inconsistency between the two
+rather than a deliberate stance.
+
+### Fix
+
+The capital leg is now `calculateDiscountedValue`, which accretes purchase price toward
+face and caps there, with the coupon accrued on top. Matched in `piron-core` so all three
+runtimes agree.
+
+### Why it survived two reviews
+
+Every interest-bearing test bought at par (100,000e6 for 100,000e6), where the two
+behaviours are identical — so the change broke nothing, which is precisely why it needed
+new coverage rather than a green suite.
+
+Verified by reverting the fix: NAV jumped from 194,000.000000 to 204,000.000000 the instant
+the purchase was recorded — the whole 10,000 discount, booked unearned.
+`test_probe_interestBearingBoughtBelowParAccretesTheDiscount` holds it.
+
+---
+
 # Checked and found sound
 
 Recorded because an audit that lists only defects says nothing about where the auditor

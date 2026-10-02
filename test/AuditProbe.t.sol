@@ -94,4 +94,53 @@ contract AuditProbe is StableYieldPoolTest {
         vm.prank(operator);
         stableYieldManager.settleWithdrawals(poolAddress, fromHead);
     }
+
+    /// M3. An interest-bearing instrument bought below par accretes the discount over the
+    /// holding period rather than booking it the moment it is recorded.
+    ///
+    /// Marked straight at face, an SPV lifted NAV simply by buying cheaply — and the gain
+    /// was unearned until the bond redeemed, so a default beforehand read as a fall from a
+    /// level the pool never held. The existing interest-bearing coverage buys at par, where
+    /// both behaviours agree, so this exercises the case that tells them apart.
+    function test_probe_interestBearingBoughtBelowParAccretesTheDiscount() public {
+        (poolAddress, escrowAddress) = _createPool();
+        _depositAs(user1, 200_000e6);
+        vm.warp(block.timestamp + 92 days);
+
+        uint256 navBefore = stableYieldManager.calculatePoolNAV(poolAddress);
+
+        vm.prank(operator);
+        stableYieldManager.allocateCapital(poolAddress, spv, 90_000e6);
+
+        // 90,000 paid for something redeeming at 100,000 in a year.
+        vm.prank(spv);
+        stableYieldManager.addInstrument(
+            poolAddress,
+            IStableYieldTypes.InstrumentType.INTEREST_BEARING,
+            90_000e6,
+            100_000e6,
+            block.timestamp + 365 days,
+            800,
+            4
+        );
+
+        // Recording the purchase moves cash into a holding; it does not create value.
+        assertEq(
+            stableYieldManager.calculatePoolNAV(poolAddress),
+            navBefore,
+            "buying below par booked the discount immediately"
+        );
+
+        // A year on, the capital leg has reached face and stops there.
+        vm.warp(block.timestamp + 365 days);
+        uint256 navAtMaturity = stableYieldManager.calculatePoolNAV(poolAddress);
+        assertGt(navAtMaturity, navBefore, "the discount never accreted");
+
+        vm.warp(block.timestamp + 365 days);
+        assertEq(
+            stableYieldManager.calculatePoolNAV(poolAddress),
+            navAtMaturity,
+            "value kept climbing past maturity"
+        );
+    }
 }
