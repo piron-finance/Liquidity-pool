@@ -60,6 +60,12 @@ interface IPoolTypes {
     struct UserPoolData {
         uint256 depositTime;
         uint256 couponsClaimed;
+        /// @dev Shares subscribed through this pool.
+        ///      Coupon entitlement is struck on this rather than on the holder's live
+        ///      ERC-20 balance. A balance is a number anyone can move between addresses,
+        ///      and an entitlement derived from it resets every time it moves — so the
+        ///      same coupon could be claimed once per address the shares passed through.
+        uint256 shares;
     }
 
     struct InvestmentProof {

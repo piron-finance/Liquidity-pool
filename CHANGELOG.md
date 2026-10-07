@@ -9,6 +9,67 @@ breaks things silently.
 
 ---
 
+## [Unreleased] — audit findings
+
+Internal security review across all three runtimes. Everything here was reproduced by an
+executable probe before being fixed, and each fix carries a regression test that asserts
+the corrected behaviour — see `test/AuditProbe.t.sol` and `test/AuditEvm.t.sol`.
+
+### Breaking — ABI
+
+- **`IPoolTypes.UserPoolData` gains a `shares` field.** Coupon entitlement is now struck
+  on shares subscribed through the pool rather than on the holder's live ERC-20 balance.
+  Anyone decoding `poolUsers` needs updating.
+- **`processInvestment` requires `actualAmount == fundsWithdrawnBySPV`.** Confirming a
+  different figure now reverts rather than being accepted silently.
+- **`settleWithdrawals` requires a contiguous run from the queue head.** An arbitrary
+  selection of request ids now reverts.
+
+### Fixed
+
+- **A queued exit no longer reprices the pool.** `withdraw`/`redeem` burn shares on both
+  the immediate and the queued branch, but `calculatePoolNAV` did not subtract
+  `totalPendingValue` — so the instant a large exit queued, supply fell while NAV did not
+  and every remaining share repriced upward by the size of the queue. A second holder
+  whose inflated claim still fitted the free cash was then routed to the *immediate*
+  branch and paid at that price, out of the cash standing against the queued request.
+  Reproduced at 90,000 / 3,000 / 7,000 USDC with 50,000 allocated: the price rose 10.56x
+  and a 3,000 deposit came back out as 29,040. NAV is now net of what the pool owes,
+  pending carries the gross quote (the fee leaves the escrow too), and an immediate
+  withdrawal is refused while anyone is waiting.
+- **A coupon can no longer be claimed twice by moving shares.** Entitlement read the live
+  balance and subtracted a per-address claim record, so shares moved to another holder
+  reset the claim against them. Reproduced: 2,000 distributed, 3,000 paid, the excess
+  taken from principal the SPV had not yet drawn.
+- **The coupon divisor is fixed at settlement.** Once holders start burning shares to
+  redeem, dividing the coupon pot by a live supply hands each successive holder a larger
+  slice of the same money. Found while fixing the claim path, not in the original review.
+- **Distributed coupons are no longer stranded at settlement.** Claiming required
+  `INVESTED`, `distributeCoupons` marked the whole received balance distributed, and
+  `calculateTotalReturns` counts only *undistributed* coupons — so any holder who had not
+  claimed by settlement lost the entitlement outright, with no recovery path anywhere in
+  the system. Claims are now permitted once matured, and the redemption path settles what
+  is still owed alongside the principal.
+- **The SPV must account for what it drew.** `processInvestment` accepted any amount up
+  to `totalRaised` without consulting `fundsWithdrawnBySPV`, so drawing 100,000 and
+  confirming 60,000 left 40,000 with the SPV and unrecorded as owed, while face value,
+  expected settlement and every holder valuation were struck on the smaller figure.
+- **An unpaid coupon stops accruing at its due date.** Accrual was uncapped, so a payment
+  the SPV never made went on inflating NAV until maturity.
+- **The withdrawal queue is served in order.** `settleWithdrawals` took an arbitrary array
+  of request ids, which let an operator choose who got paid — the thing the ordering rule
+  exists to prevent.
+- **Lock tiers are bounded in duration.** `validateTier` capped APY and penalty at 50% but
+  left `durationDays` unbounded.
+
+### Known, unchanged
+
+- **Interest-bearing instruments are marked at face from day one.** `purchase_price` is
+  ignored, so an SPV buying below par books an instant gain it has not earned and may
+  never realise. The behaviour is deliberate parity with the original design and
+  reversing it changes the economics of every interest-bearing pool, so it is left as
+  found pending a decision.
+
 ## [Unreleased] — PR #36
 
 ### Fixed

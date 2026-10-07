@@ -169,16 +169,21 @@ library CalculationLibrary {
     ) external returns (uint256 claimableAmount) {
         require(user != address(0), "CalculationLib/invalid user");
         require(poolData.config.instrumentType == IPoolTypes.InstrumentType.INTEREST_BEARING, "CalculationLib/not interest bearing");
-        require(poolData.status == IPoolTypes.PoolStatus.INVESTED, "CalculationLib/not invested");
+        require(
+            poolData.status == IPoolTypes.PoolStatus.INVESTED ||
+                poolData.status == IPoolTypes.PoolStatus.MATURED,
+            "CalculationLib/not invested"
+        );
         
-        uint256 userShares = IERC20(liquidityPool).balanceOf(user);
+        // Subscribed shares, not the live balance — see `UserPoolData.shares`.
+        uint256 userShares = poolUsers[liquidityPool][user].shares;
         require(userShares != 0, "CalculationLib/no shares");
         
-        uint256 totalShares = IERC20(liquidityPool).totalSupply();
+        uint256 divisor = _couponDivisor(poolData, liquidityPool);
         uint256 totalDistributedCoupons = poolData.totalCouponsDistributed;
         require(totalDistributedCoupons != 0, "CalculationLib/no coupons distributed");
         
-        uint256 userTotalEntitlement = (userShares * totalDistributedCoupons) / totalShares;
+        uint256 userTotalEntitlement = (userShares * totalDistributedCoupons) / divisor;
         uint256 userAlreadyClaimed = poolUsers[liquidityPool][user].couponsClaimed;
         
         require(userTotalEntitlement > userAlreadyClaimed, "CalculationLib/no new coupons");
@@ -188,6 +193,22 @@ library CalculationLibrary {
         poolData.totalCouponsClaimed += claimableAmount;
         
         return claimableAmount;
+    }
+
+    /// @dev Divisor for a coupon split.
+    ///
+    ///      Once the pool has settled, holders start burning shares to redeem. Dividing
+    ///      by a live supply that shrinks with each exit would hand each successive
+    ///      holder a larger slice of the same money — the same trap the redemption path
+    ///      avoids with `sharesAtMaturity`, so the coupon split uses the same divisor.
+    function _couponDivisor(
+        IPoolTypes.PoolData storage poolData,
+        address liquidityPool
+    ) internal view returns (uint256) {
+        if (poolData.status == IPoolTypes.PoolStatus.MATURED && poolData.sharesAtMaturity != 0) {
+            return poolData.sharesAtMaturity;
+        }
+        return IERC20(liquidityPool).totalSupply();
     }
 
     // ==================== COUPON VIEW HELPERS ====================
@@ -201,18 +222,21 @@ library CalculationLibrary {
     ) external view returns (uint256) {
         if (user == address(0)) return 0;
         if (poolData.config.instrumentType != IPoolTypes.InstrumentType.INTEREST_BEARING) return 0;
-        if (poolData.status != IPoolTypes.PoolStatus.INVESTED) return 0;
+        if (
+            poolData.status != IPoolTypes.PoolStatus.INVESTED &&
+            poolData.status != IPoolTypes.PoolStatus.MATURED
+        ) return 0;
         
-        uint256 userShares = IERC20(liquidityPool).balanceOf(user);
+        uint256 userShares = poolUsers[liquidityPool][user].shares;
         if (userShares == 0) return 0;
         
-        uint256 totalShares = IERC20(liquidityPool).totalSupply();
-        if (totalShares == 0) return 0;
+        uint256 divisor = _couponDivisor(poolData, liquidityPool);
+        if (divisor == 0) return 0;
         
         uint256 totalDistributedCoupons = poolData.totalCouponsDistributed;
         if (totalDistributedCoupons == 0) return 0;
         
-        uint256 userTotalEntitlement = (userShares * totalDistributedCoupons) / totalShares;
+        uint256 userTotalEntitlement = (userShares * totalDistributedCoupons) / divisor;
         uint256 userAlreadyClaimed = poolUsers[liquidityPool][user].couponsClaimed;
         
         return userTotalEntitlement > userAlreadyClaimed ? userTotalEntitlement - userAlreadyClaimed : 0;

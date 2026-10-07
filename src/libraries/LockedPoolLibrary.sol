@@ -44,7 +44,7 @@ library LockedPoolLibrary {
         ILockedPoolTypes.LockTier memory tier
     ) public pure returns (ILockedPoolTypes.EarlyExitCalculation memory result) {
         uint256 totalValueReceived = position.investedAmount + position.fullInterestAmount;
-        uint256 penalty = (totalValueReceived * tier.earlyExitPenaltyBps) / BPS_DENOMINATOR;
+        uint256 penalty = (totalValueReceived * effectivePenaltyBps(position, tier)) / BPS_DENOMINATOR;
         
         uint256 payout;
         if (penalty >= position.investedAmount) {
@@ -81,7 +81,7 @@ library LockedPoolLibrary {
         
         uint256 valueAtExit = position.principalDeposited + earnedInterest;
         
-        uint256 penalty = (valueAtExit * tier.earlyExitPenaltyBps) / BPS_DENOMINATOR;
+        uint256 penalty = (valueAtExit * effectivePenaltyBps(position, tier)) / BPS_DENOMINATOR;
         uint256 payout = valueAtExit - penalty;
         
         result = ILockedPoolTypes.EarlyExitCalculation({
@@ -181,11 +181,18 @@ library LockedPoolLibrary {
 
     // ==================== VALIDATION ====================
 
-    /// @dev Validates a lock tier: duration > 0, APY <= 50%, penalty <= 50%.
+    /// @dev Longest term a tier may offer: ten years.
+    ///
+    ///      Same purpose as the bps ceilings — a guard against a mistyped tier locking
+    ///      capital past any horizon the protocol plans for, not a view on what terms
+    ///      are sensible.
+    uint256 internal constant MAX_TIER_DURATION_DAYS = 3650;
+
+    /// @dev Validates a lock tier: duration in range, APY <= 50%, penalty <= 50%.
     function validateTier(
         ILockedPoolTypes.LockTier memory tier
     ) public pure returns (bool isValid) {
-        if (tier.durationDays == 0) return false;
+        if (tier.durationDays == 0 || tier.durationDays > MAX_TIER_DURATION_DAYS) return false;
         if (tier.apyBps > 5000) return false;
         if (tier.earlyExitPenaltyBps > 5000) return false;
         return true;
@@ -207,6 +214,24 @@ library LockedPoolLibrary {
     // ==================== POSITION BUILDING ====================
 
     /// @dev Constructs a complete UserPosition struct from deposit parameters.
+    /// @dev Stored in place of a zero penalty so that zero can keep meaning "no penalty
+    ///      was captured for this position". Resolved back to zero on read.
+    uint256 internal constant NO_PENALTY_SENTINEL = type(uint256).max;
+
+    /// @dev The penalty rate a position was struck on.
+    ///
+    ///      Falls back to the tier for positions created before the rate was captured;
+    ///      those keep the behaviour they have always had rather than suddenly exiting
+    ///      free on a zero-valued new field.
+    function effectivePenaltyBps(
+        ILockedPoolTypes.UserPosition memory position,
+        ILockedPoolTypes.LockTier memory tier
+    ) public pure returns (uint256) {
+        if (position.earlyExitPenaltyBpsAtDeposit == NO_PENALTY_SENTINEL) return 0;
+        if (position.earlyExitPenaltyBpsAtDeposit == 0) return tier.earlyExitPenaltyBps;
+        return position.earlyExitPenaltyBpsAtDeposit;
+    }
+
     function buildPosition(
         uint256 positionId,
         address user,
@@ -243,7 +268,10 @@ library LockedPoolLibrary {
             penaltyPaid: 0,
             interestEarned: paid ? interest : 0,
             autoRollover: false,
-            rolledFromPositionId: 0
+            rolledFromPositionId: 0,
+            earlyExitPenaltyBpsAtDeposit: tier.earlyExitPenaltyBps == 0
+                ? NO_PENALTY_SENTINEL
+                : tier.earlyExitPenaltyBps
         });
         
         return position;

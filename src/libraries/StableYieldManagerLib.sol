@@ -74,6 +74,13 @@ library StableYieldManagerLib {
         return requestsProcessed;
     }
 
+    /// @dev Settles a contiguous run of requests from the head.
+    ///
+    ///      `requestIds` must start at the queue head and be consecutive. Serving an
+    ///      arbitrary selection would let an operator choose who gets paid and in what
+    ///      order, which is the thing the queue's ordering rule exists to prevent — a
+    ///      request that cannot be funded stops the batch rather than being skipped in
+    ///      favour of a smaller one behind it.
     function settleWithdrawals(
         mapping(address => IStableYieldTypes.WithdrawalQueue) storage poolQueues,
         mapping(address => mapping(uint256 => IStableYieldTypes.WithdrawalRequest)) storage withdrawalRequests,
@@ -82,6 +89,10 @@ library StableYieldManagerLib {
         address poolAddress,
         uint256[] calldata requestIds
     ) external returns (uint256 processed) {
+        uint256 expected = poolQueues[poolAddress].head;
+        for (uint256 j = 0; j < requestIds.length; j++) {
+            require(requestIds[j] == expected + j, "StableYieldLib/out of order");
+        }
         IStableYieldTypes.PoolData storage poolData = pools[poolAddress];
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
 
@@ -151,7 +162,12 @@ library StableYieldManagerLib {
         request.processed = true;
         request.processedTime = block.timestamp;
 
-        poolQueues[poolAddress].totalPendingValue -= request.estimatedValue;
+        // Gross, matching what was reserved when the request was made.
+        uint256 reserved = netValue + feeAmount;
+        IStableYieldTypes.WithdrawalQueue storage q = poolQueues[poolAddress];
+        q.totalPendingValue = q.totalPendingValue > reserved
+            ? q.totalPendingValue - reserved
+            : 0;
 
         if (feeAmount > 0) {
             escrow.collectWithdrawalFee(feeAmount);

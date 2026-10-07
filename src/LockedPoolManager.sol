@@ -100,7 +100,11 @@ contract LockedPoolManager is
 
     address public feeManager;
     uint256 public defaultDepositFeeBps;
-    mapping(address => uint256) public poolDepositFeeBps;  
+    mapping(address => uint256) public poolDepositFeeBps;
+    /// @dev Zero is a legitimate per-pool fee, so "is an override set" is tracked apart
+    ///      from its value. Without this, `setPoolDepositFee(pool, 0)` appeared to
+    ///      succeed and the pool silently kept charging the default.
+    mapping(address => bool) public poolDepositFeeSet;
     uint256 public constant MAX_DEPOSIT_FEE = 500;  
     uint256 public constant BPS = 10000;
 
@@ -294,8 +298,9 @@ contract LockedPoolManager is
         
         LockedPoolEscrow escrow = LockedPoolEscrow(poolEscrows[poolAddress]);
         
-        uint256 feeBps = poolDepositFeeBps[poolAddress];
-        if (feeBps == 0) feeBps = defaultDepositFeeBps;
+        uint256 feeBps = poolDepositFeeSet[poolAddress]
+            ? poolDepositFeeBps[poolAddress]
+            : defaultDepositFeeBps;
         
         (uint256 netAmount, uint256 depositFee) = escrow.processDeposit(amount, feeBps);
         
@@ -365,6 +370,10 @@ contract LockedPoolManager is
         
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
         
+        // `positions` is global, so the caller being a pool is not the same as the
+        // position belonging to it. Without this, a position opened in one pool settles
+        // out of another pool's escrow and against its metrics.
+        if (position.poolAddress != poolAddress) revert InvalidPosition();
         if (position.user != caller) revert NotOwner();
         if (position.status != ILockedPoolTypes.PositionStatus.ACTIVE && 
             position.status != ILockedPoolTypes.PositionStatus.MATURED) revert InvalidStatus();
@@ -526,9 +535,12 @@ contract LockedPoolManager is
         if (msg.sender != poolAddress) revert OnlyPool();
         
         ILockedPoolTypes.UserPosition storage position = positions[positionId];
+        if (position.poolAddress != poolAddress) revert InvalidPosition();
         _validateEarlyExit(position, caller);
         
-        ILockedPoolTypes.LockTier storage tier = poolTiers[poolAddress][position.tierIndex];
+        // From the position's own pool, matching `calculateEarlyExitPayout`. Reading the
+        // calling pool's tiers priced a foreign position on terms it never agreed to.
+        ILockedPoolTypes.LockTier storage tier = poolTiers[position.poolAddress][position.tierIndex];
         ILockedPoolTypes.EarlyExitCalculation memory calc = _calculateEarlyExit(position, tier);
         
         payout = calc.payout;
@@ -682,12 +694,18 @@ contract LockedPoolManager is
             allocation.status = ILockedPoolTypes.AllocationStatus.RETURNED;
         }
         
-        if (totalSPVAllocations[spv] >= returnedAmount) {
-            totalSPVAllocations[spv] -= returnedAmount;
-        }
-        if (poolToSPVAllocations[poolAddress][spv] >= returnedAmount) {
-            poolToSPVAllocations[poolAddress][spv] -= returnedAmount;
-        }
+        // Against principal, not the gross return: `returnedAmount` can include yield,
+        // which was never allocated. Clamped rather than skipped — skipping left the
+        // figure permanently stale whenever it would have underflowed.
+        uint256 principalReturned = returnedAmount > allocation.amount
+            ? allocation.amount
+            : returnedAmount;
+        totalSPVAllocations[spv] = totalSPVAllocations[spv] > principalReturned
+            ? totalSPVAllocations[spv] - principalReturned
+            : 0;
+        poolToSPVAllocations[poolAddress][spv] = poolToSPVAllocations[poolAddress][spv] > principalReturned
+            ? poolToSPVAllocations[poolAddress][spv] - principalReturned
+            : 0;
         
         emit AllocationMatured(poolAddress, allocationId, returnedAmount);
     }
@@ -744,12 +762,14 @@ contract LockedPoolManager is
     ) external onlyRole(accessManager.DEFAULT_ADMIN_ROLE()) poolExists(poolAddress) {
         if (feeBps > MAX_DEPOSIT_FEE) revert InvalidAmount();
         poolDepositFeeBps[poolAddress] = feeBps;
+        poolDepositFeeSet[poolAddress] = true;
         emit PoolDepositFeeUpdated(poolAddress, feeBps);
     }
 
     function getEffectiveDepositFee(address poolAddress) external view returns (uint256) {
-        uint256 poolFee = poolDepositFeeBps[poolAddress];
-        return poolFee > 0 ? poolFee : defaultDepositFeeBps;
+        return poolDepositFeeSet[poolAddress]
+            ? poolDepositFeeBps[poolAddress]
+            : defaultDepositFeeBps;
     }
 
     // ==================== PROTOCOL CAPITAL ====================

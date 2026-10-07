@@ -46,6 +46,7 @@ library DepositWithdrawalLibrary {
             poolUsers[liquidityPool][receiver].depositTime = block.timestamp;
         }
         shares = assets;
+        poolUsers[liquidityPool][receiver].shares += shares;
         
         poolData.totalRaised += assets;
         
@@ -122,15 +123,30 @@ library DepositWithdrawalLibrary {
         uint256 feeAmount = (userEntitlement * feeBps) / BASIS_POINTS;
         uint256 netAmount = userEntitlement - feeAmount;
         
+        // Distributed coupons are earmarked in escrow and excluded from `totalReturns`,
+        // so a holder who never got round to claiming would otherwise walk away leaving
+        // the money reachable by nobody at all. Settled here, before the position closes.
+        uint256 owedCoupon = CalculationLibrary.getUserAvailableCoupon(
+            poolData, poolUsers, liquidityPool, owner
+        );
+        if (owedCoupon != 0) {
+            poolUsers[liquidityPool][owner].couponsClaimed += owedCoupon;
+            poolData.totalCouponsClaimed += owedCoupon;
+        }
+
         shares = userShares;
         ILiquidityPool(liquidityPool).burnShares(owner, shares);
         
         poolUsers[liquidityPool][owner].depositTime = 0;
+        poolUsers[liquidityPool][owner].shares = 0;
         pools[liquidityPool].totalFeesCollected += feeAmount;
         
         IPoolRegistry.PoolInfo memory poolInfo = registry.getPoolInfo(liquidityPool);
         IPoolEscrow escrowContract = IPoolEscrow(poolInfo.escrow);
         
+        if (owedCoupon != 0) {
+            escrowContract.claimCoupon(receiver, owedCoupon);
+        }
         escrowContract.releaseFunds(receiver, netAmount);
         
         if (feeAmount > 0 && treasury != address(0)) {

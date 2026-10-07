@@ -46,7 +46,7 @@ contract LockedPoolTest is BaseTest {
     uint16 constant TIER_12M_APY = 1000;
     uint16 constant TIER_12M_PENALTY = 2000;
     
-    function setUp() public override {
+    function setUp() public virtual override {
         super.setUp();
         
         token = new MockERC20("Mock USDC", "USDC", 6);
