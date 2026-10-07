@@ -374,6 +374,11 @@ contract DeployUpgradeable is Script {
         accessMgr.grantRoleDuringDeployment(accessMgr.OPERATOR_ROLE(), contracts.stableYieldManagerProxy);
         accessMgr.grantRoleDuringDeployment(accessMgr.POOL_CREATOR_ROLE(), contracts.lockedPoolManagerProxy);
         accessMgr.grantRoleDuringDeployment(accessMgr.OPERATOR_ROLE(), contracts.lockedPoolManagerProxy);
+        // Naming the upgrade timelock on FeeManager and YieldReserveEscrow is multisig-only, and
+        // the multisig is never the deployer. The deployer takes the role while the deployment
+        // window is still open, uses it for those two calls below, and hands it back before
+        // the script ends. _verifyDeployment refuses a deployment where it still holds it.
+        accessMgr.grantRoleDuringDeployment(accessMgr.MULTISIG_ADMIN_ROLE(), config.admin);
         accessMgr.finalizeDeployment();
         console.log("Roles granted and deployment finalized");
 
@@ -414,6 +419,9 @@ contract DeployUpgradeable is Script {
         FeeManager(contracts.feeManagerProxy).setTimelockController(contracts.timelockController);
         console.log("FeeManager and YieldReserve upgrade authority set to timelock");
 
+        accessMgr.revokeRole(accessMgr.MULTISIG_ADMIN_ROLE(), config.admin);
+        console.log("Deployer's temporary multisig role revoked");
+
         console.log("System configuration complete");
     }
 
@@ -432,6 +440,8 @@ contract DeployUpgradeable is Script {
         require(Manager(contracts.managerProxy).timelockController() == contracts.timelockController, "Manager timelock mismatch");
         require(StableYieldManager(contracts.stableYieldManagerProxy).timelockController() == contracts.timelockController, "StableYieldManager timelock mismatch");
         require(LockedPoolManager(contracts.lockedPoolManagerProxy).timelockController() == contracts.timelockController, "LockedPoolManager timelock mismatch");
+        require(FeeManager(contracts.feeManagerProxy).timelockController() == contracts.timelockController, "FeeManager timelock mismatch");
+        require(YieldReserveEscrow(contracts.yieldReserveProxy).timelockController() == contracts.timelockController, "YieldReserve timelock mismatch");
 
         AccessManager accessManager = AccessManager(contracts.accessManager);
         require(accessManager.hasRole(accessManager.DEFAULT_ADMIN_ROLE(), config.admin), "Admin role not granted");
@@ -445,6 +455,8 @@ contract DeployUpgradeable is Script {
         require(accessManager.hasRole(accessManager.POOL_CREATOR_ROLE(), contracts.lockedPoolManagerProxy), "Pool creator not granted to LPM");
         require(accessManager.hasRole(accessManager.OPERATOR_ROLE(), contracts.lockedPoolManagerProxy), "Operator not granted to LPM");
         require(accessManager.deploymentComplete(), "Deployment not finalized");
+        require(accessManager.hasRole(accessManager.MULTISIG_ADMIN_ROLE(), config.multisigAdmin), "Multisig role not granted");
+        require(!accessManager.hasRole(accessManager.MULTISIG_ADMIN_ROLE(), config.admin), "Deployer still holds multisig role");
 
         require(FeeManager(contracts.feeManagerProxy).treasury() == config.treasury, "FeeManager treasury mismatch");
         require(FeeManager(contracts.feeManagerProxy).yieldReserve() == contracts.yieldReserveProxy, "FeeManager yieldReserve mismatch");
