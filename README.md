@@ -1,7 +1,5 @@
 # Piron Pools
 
-Institutional-grade on-chain infrastructure for tokenized fixed-income products. Piron Pools connects capital providers with real-world financial instruments — treasury bills, commercial paper, corporate bonds — through permissioned liquidity pools with full lifecycle management.
-
 ## Overview
 
 Piron Pools is a modular smart contract protocol built on Ethereum that enables the issuance, management, and settlement of structured fixed-income products entirely on-chain. The system supports multiple pool architectures to accommodate different investment profiles, from single-instrument deals to diversified managed portfolios.

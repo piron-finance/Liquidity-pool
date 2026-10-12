@@ -59,4 +59,5 @@ plume_testnet      = "${RPC_URL_PLUME_TESTNET}"       # Chain 98867
 lisk_sepolia       = "${RPC_URL_LISK_SEPOLIA}"        # Chain 4202
 arc_testnet        = "${RPC_URL_ARC_TESTNET}"         # Chain 1244 — Circle ARC (USDC native gas)
 robinhood_testnet  = "${RPC_URL_ROBINHOOD_TESTNET}"   # Chain 46630
+monad_testnet      = "${RPC_URL_MONAD_TESTNET}"       # Chain 10143 — native gas is MON
 

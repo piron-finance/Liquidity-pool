@@ -19,13 +19,20 @@ docs/
 *.txt
 !remappings.txt
 
-# Markdown files (keep only README and the changelog)
+# Markdown files (keep only README and the changelog).
+#
+# This repository is PUBLIC. Internal security documents do not belong in it: a findings
+# file is a list of what to attack and, for anything not yet fixed everywhere, a map of
+# where. SOLIDITY_FINDINGS.md was force-tracked here by an earlier `!` override and is now
+# kept in the private pools-rust repo alongside STELLAR_FINDINGS.md and
+# SOLANA_FINDINGS.md. Do not re-add an exception for one.
 *.md
 !README.md
 !CHANGELOG.md
-!SOLIDITY_FINDINGS.md
 
 # Frontend ABIs and deployment info
 frontend-abis/
 deployed-addresses.txt
 changed-abis/
+# Local Claude Code config
+.claude/
