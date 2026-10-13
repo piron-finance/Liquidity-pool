@@ -275,9 +275,13 @@ contract StableYieldManager is
         
         StableYieldEscrow escrow = StableYieldEscrow(poolData.escrowAddress);
         uint256 feeBps = getPoolTransactionFee(poolAddress);
-        (uint256 netDepositAmount, uint256 transactionFee) = escrow.processDeposit(amount, feeBps);
-        
+
+        // The price is read before the deposit is credited. processDeposit adds the net
+        // amount to the reserves that NAV is computed from, so pricing afterwards values
+        // the new shares as if the depositor's own money were already the pool's: they
+        // receive too few, and the difference passes to everyone who was there first.
         uint256 navPerShare = calculateNAVPerShare(poolAddress);
+        (uint256 netDepositAmount, uint256 transactionFee) = escrow.processDeposit(amount, feeBps);
         shares = (netDepositAmount * 1e18) / navPerShare;
         
         if (transactionFee > 0) {

@@ -120,6 +120,12 @@ library StableYieldManagerLib {
             }
         }
 
+        // The ids are a consecutive run from the head and every one of them is now paid,
+        // so the head moves past them. Left where it was, the next settlement would have
+        // to list the paid requests again to start "at the head", and the pending count
+        // (tail - head) would go on counting them.
+        poolQueues[poolAddress].head = expected + requestIds.length;
+
         return processed;
     }
 

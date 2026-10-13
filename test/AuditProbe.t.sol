@@ -143,4 +143,88 @@ contract AuditProbe is StableYieldPoolTest {
             "value kept climbing past maturity"
         );
     }
+
+    /// A deposit is priced at the share price that stood before it, so it cannot move
+    /// that price. Priced after the deposit is credited, the new shares are valued as if
+    /// the depositor's own money were already the pool's, and the difference passes to
+    /// the holders who were there first.
+    function test_probe_depositDoesNotMoveSharePrice() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 100_000e6);
+        uint256 priceBefore = StableYieldPool(poolAddress).getNAVPerShare();
+        _depositAs(user2, 300_000e6);
+
+        assertApproxEqRel(StableYieldPool(poolAddress).getNAVPerShare(), priceBefore, 0.0001e18, "a deposit moved the share price");
+    }
+
+    /// Equal deposits into an idle pool receive equal shares, whatever order they arrive in.
+    function test_probe_equalDepositsGetEqualShares() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 100_000e6);
+        _depositAs(user2, 100_000e6);
+
+        assertEq(
+            StableYieldPool(poolAddress).balanceOf(user2),
+            StableYieldPool(poolAddress).balanceOf(user1),
+            "equal deposits, unequal shares"
+        );
+    }
+
+    /// Straight after depositing, a holder's shares are worth what they paid in less the
+    /// entry fee. A large deposit into a small pool is the case that lost the most.
+    function test_probe_depositorKeepsWhatTheyPutIn() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 50_000e6);
+        _depositAs(user2, 280_000e6);
+
+        StableYieldPool pool = StableYieldPool(poolAddress);
+        uint256 worth = (pool.balanceOf(user2) * pool.getNAVPerShare()) / 1e18;
+        uint256 paidIn = 280_000e6 - (280_000e6 * DEFAULT_FEE_BPS) / 10_000;
+        assertApproxEqRel(worth, paidIn, 0.0001e18, "the depositor lost money by depositing");
+    }
+
+    /// Settling moves the head past what it paid. Left behind, the next request could only
+    /// be settled by listing the paid ones again, and the pending count kept counting them.
+    function test_probe_settlingAdvancesTheQueueHead() public {
+        (poolAddress, escrowAddress) = _createPool();
+
+        _depositAs(user1, 60_000e6);
+        _depositAs(user2, 40_000e6);
+        vm.prank(operator);
+        stableYieldManager.allocateCapital(poolAddress, spv, 70_000e6);
+        vm.warp(block.timestamp + 92 days);
+
+        uint256 aliceShares = StableYieldPool(poolAddress).balanceOf(user1);
+        vm.prank(user1);
+        StableYieldPool(poolAddress).redeem(aliceShares, user1, user1);
+        uint256 bobShares = StableYieldPool(poolAddress).balanceOf(user2);
+        vm.prank(user2);
+        StableYieldPool(poolAddress).redeem(bobShares, user2, user2);
+
+        vm.startPrank(spv);
+        token.approve(address(stableYieldManager), 70_000e6);
+        stableYieldManager.returnCapital(poolAddress, 70_000e6);
+        vm.stopPrank();
+
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = 0;
+        vm.prank(operator);
+        stableYieldManager.settleWithdrawals(poolAddress, ids);
+
+        (uint256 head, uint256 tail, uint256 pending,) = stableYieldManager.getWithdrawalQueueStatus(poolAddress);
+        assertEq(head, 1, "request 0 is paid but the head still points at it");
+        assertEq(pending, tail - 1, "a paid request is still counted as pending");
+
+        // The next in line is now the head, and is settled on its own.
+        ids[0] = 1;
+        vm.prank(operator);
+        stableYieldManager.settleWithdrawals(poolAddress, ids);
+
+        (head,, pending,) = stableYieldManager.getWithdrawalQueueStatus(poolAddress);
+        assertEq(head, 2);
+        assertEq(pending, 0);
+    }
 }
